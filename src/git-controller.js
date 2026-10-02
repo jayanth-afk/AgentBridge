@@ -1,9 +1,8 @@
-import { exec } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import fs from 'node:fs';
 
-const execAsync = promisify(exec);
 
 export class GitController {
   constructor(permissionGuard, auditLogger) {
@@ -16,6 +15,9 @@ export class GitController {
     if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
       throw new Error(`InvalidDirectory: Path '${resolved}' is not an existing directory.`);
     }
+    if (!Array.isArray(args) || args.some(arg => typeof arg !== 'string')) {
+      throw new Error('InvalidGitArguments: Git arguments must be an array of strings.');
+    }
 
     const scrubbedEnv = {
       PATH: process.env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin',
@@ -24,12 +26,36 @@ export class GitController {
       GIT_TERMINAL_PROMPT: '0'
     };
 
-    const cmd = `git ${args.join(' ')}`;
-    return execAsync(cmd, {
-      cwd: resolved,
-      env: scrubbedEnv,
-      timeout: timeoutMs,
-      maxBuffer: 5 * 1024 * 1024
+    return await new Promise((resolve, reject) => {
+      const child = spawn('git', args, {
+        cwd: resolved,
+        env: scrubbedEnv,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      let stdout = '';
+      let stderr = '';
+      let timedOut = false;
+      const append = (current, chunk) => current + chunk.toString();
+      child.stdout.on('data', chunk => { stdout = append(stdout, chunk); });
+      child.stderr.on('data', chunk => { stderr = append(stderr, chunk); });
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill('SIGTERM');
+        setTimeout(() => { if (!child.killed) child.kill('SIGKILL'); }, 1000).unref();
+      }, timeoutMs);
+      child.once('error', err => {
+        clearTimeout(timer);
+        reject(err);
+      });
+      child.once('close', code => {
+        clearTimeout(timer);
+        if (code === 0 && !timedOut) return resolve({ stdout, stderr });
+        const err = new Error(timedOut ? `Git command timed out after ${timeoutMs}ms` : `git exited with code ${code}: ${(stderr || stdout).trim()}`);
+        err.code = code;
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+      });
     });
   }
 
@@ -384,7 +410,7 @@ export class GitController {
       await this._execGit(pathCheck.path, [
         '-c', `user.name="${agentId}"`,
         '-c', `user.email="${agentId}@agent-bridge.local"`,
-        'commit', '-m', `"${safeMsg}"`
+        'commit', '-m', safeMsg
       ]);
 
       // 3. Commit SHA
@@ -428,8 +454,8 @@ export class GitController {
       const format = '%h|%an|%ad|%s';
       const { stdout } = await this._execGit(pathCheck.path, [
         'log',
-        `-n ${Math.min(maxCommits, 25)}`,
-        `--format="${format}"`,
+        '-n', String(Math.min(maxCommits, 25)),
+        `--format=${format}`,
         '--date=short'
       ]);
 

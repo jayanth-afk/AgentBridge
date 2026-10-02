@@ -93,10 +93,19 @@ test('Autonomous Structured Git Operations & Validation Suite', async (t) => {
       assert.ok(commitRes.commit);
       assert.ok(commitRes.branch);
 
+      // Git arguments must never be interpreted by a shell.
+      const markerFile = path.join(stageRepoPath, 'shell-injection-marker.txt');
+      const hostileMessage = `test $(touch ${markerFile}) && echo hostile`;
+      const secondFile = path.join(stageRepoPath, 'second.txt');
+      fs.writeFileSync(secondFile, 'second', 'utf8');
+      const hostileCommit = await git.commit(stageRepoPath, 'antigravity-ide', hostileMessage, [secondFile]);
+      assert.strictEqual(hostileCommit.success, true);
+      assert.strictEqual(fs.existsSync(markerFile), false);
+
       // Log
       const logRes = await git.getLog(stageRepoPath, 'antigravity-ide', 5);
       assert.ok(logRes.commits.length > 0);
-      assert.strictEqual(logRes.commits[0].hash, commitRes.commit);
+      assert.strictEqual(logRes.commits[0].hash, hostileCommit.commit);
     } finally {
       fs.rmSync(stageRepoPath, { recursive: true, force: true });
     }

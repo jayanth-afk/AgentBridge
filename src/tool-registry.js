@@ -140,6 +140,71 @@ export class ToolRegistry {
 
     // 2. Project & Filesystem
     this.registerTool({
+      name: 'bridge_context',
+      description: 'Return compact task-oriented project context: git state, structure, and optional relevant search hits.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          rootPath: { type: 'string' },
+          query: { type: 'string' },
+          maxResults: { type: 'number' },
+          agentId: { type: 'string' }
+        },
+        required: ['agentId']
+      },
+      handler: async (args, ctx) => {
+        const context = await ctx.controller.buildContext(args.rootPath, args.agentId, args.query, args.maxResults);
+        context.tasks = ctx.taskManager ? ctx.taskManager.listTasks({ agentId: args.agentId, limit: 6, compact: true }) : [];
+        context.agents = ctx.presence ? ctx.presence.listAgents() : [];
+        return context;
+      }
+    });
+
+    this.registerTool({
+      name: 'bridge_find_symbol',
+      description: 'Find code symbol definitions with compact file and line references.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          rootPath: { type: 'string' },
+          symbol: { type: 'string' },
+          maxResults: { type: 'number' },
+          agentId: { type: 'string' }
+        },
+        required: ['rootPath', 'symbol', 'agentId']
+      },
+      handler: async (args, ctx) => ctx.controller.findSymbol(args.rootPath, args.agentId, args.symbol, args.maxResults)
+    });
+
+    this.registerTool({
+      name: 'bridge_read_symbol',
+      description: 'Read a bounded source window around a symbol definition instead of an entire file.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: { type: 'string' },
+          symbol: { type: 'string' },
+          contextLines: { type: 'number' },
+          maxLines: { type: 'number' },
+          agentId: { type: 'string' }
+        },
+        required: ['filePath', 'symbol', 'agentId']
+      },
+      handler: async (args, ctx) => ctx.controller.readSymbol(args.filePath, args.agentId, args.symbol, args.contextLines, args.maxLines)
+    });
+
+    this.registerTool({
+      name: 'bridge_test_plan',
+      description: 'Build a compact test plan from changed files and available test files, with a full-suite fallback.',
+      inputSchema: {
+        type: 'object',
+        properties: { rootPath: { type: 'string' }, agentId: { type: 'string' } },
+        required: ['agentId']
+      },
+      handler: async (args, ctx) => ctx.controller.testPlan(args.rootPath, args.agentId)
+    });
+
+    this.registerTool({
       name: 'bridge_inspect_project',
       description: 'Inspect a project root directory, returning files and directories.',
       inputSchema: {
@@ -176,7 +241,8 @@ export class ToolRegistry {
           agentId: { type: 'string' },
           startLine: { type: 'number', description: 'Starting line (default 1)' },
           endLine: { type: 'number', description: 'Ending line (default 100)' },
-          compact: { type: 'boolean', description: 'Omit extra metadata for low token burn' }
+          compact: { type: 'boolean', description: 'Omit extra metadata for low token burn' },
+          knownHash: { type: 'string', description: 'If unchanged, return only unchanged=true and the current hash' }
         },
         required: ['filePath', 'agentId']
       },

@@ -10,6 +10,7 @@ import { ProjectController } from '../src/project-controller.js';
 import { ConcurrencyManager } from '../src/concurrency-manager.js';
 import { CacheManager } from '../src/cache-manager.js';
 import { DiagnosticsManager } from '../src/diagnostics-manager.js';
+import { ToolRegistry } from '../src/tool-registry.js';
 import { GitController } from '../src/git-controller.js';
 
 const TEST_DB = path.join(CONFIG.DATA_DIR, 'test_opt.sqlite');
@@ -24,6 +25,7 @@ test('Optimizations, Atomic Patching & Token Efficiency Suite', async (t) => {
   const diagnostics = new DiagnosticsManager();
   const git = new GitController(guard, logger);
   const controller = new ProjectController(guard, logger, concurrency, null, cache, git);
+  const registry = new ToolRegistry();
 
   t.after(() => {
     try {
@@ -143,7 +145,76 @@ test('Optimizations, Atomic Patching & Token Efficiency Suite', async (t) => {
     assert.notStrictEqual(read3.fileHash, read1.fileHash);
   });
 
-  await t.test('6. Diagnostics Manager', () => {
+  await t.test('6. Directory-scoped cache invalidation after file mutation', () => {
+    const root = path.join(TEST_WORKSPACE, 'cache-root');
+    const file = path.join(root, 'changed.txt');
+    cache.set('directory-search', { value: 'stale' }, root, 5000);
+    cache.set('file-read', { value: 'stale' }, file, 5000);
+    assert.ok(cache.get('directory-search'));
+    assert.ok(cache.get('file-read'));
+    cache.invalidatePath(file);
+    assert.strictEqual(cache.get('directory-search'), null);
+    assert.strictEqual(cache.get('file-read'), null);
+  });
+
+  await t.test('7. Cache eviction is LRU', () => {
+    const lru = new CacheManager({ maxEntries: 2, defaultTtlMs: 5000 });
+    lru.set('a', 'A');
+    lru.set('b', 'B');
+    assert.strictEqual(lru.get('a'), 'A');
+    lru.set('c', 'C');
+    assert.strictEqual(lru.get('a'), 'A');
+    assert.strictEqual(lru.get('b'), null);
+    assert.strictEqual(lru.get('c'), 'C');
+
+    // Refreshing an existing key must not evict the other entry.
+    lru.set('a', 'A2');
+    assert.strictEqual(lru.get('a'), 'A2');
+    assert.strictEqual(lru.get('c'), 'C');
+  });
+
+  await t.test('8. Read cache rejects external file mutation', async () => {
+    const externalFile = path.join(TEST_WORKSPACE, 'external_cache_test.txt');
+    try {
+      await controller.createFile(externalFile, 'antigravity-ide', 'Version One', true);
+      const first = await controller.readFile(externalFile, 'antigravity-ide', 1, 10, true);
+      fs.writeFileSync(externalFile, 'Version Two', 'utf8');
+      const second = await controller.readFile(externalFile, 'antigravity-ide', 1, 10, true);
+      assert.ok(first.content.includes('Version One'));
+      assert.ok(second.content.includes('Version Two'));
+      assert.notStrictEqual(first.fileHash, second.fileHash);
+    } finally {
+      try { if (fs.existsSync(externalFile)) fs.unlinkSync(externalFile); } catch {}
+    }
+  });
+
+  await t.test('9. Context engine and symbol navigation', async () => {
+    const symbolFile = path.join(TEST_WORKSPACE, 'symbol_context_test.js');
+    await controller.createFile(symbolFile, 'antigravity-ide', 'function targetSymbol() {\n  return 42;\n}\n', true);
+    const context = await controller.buildContext(TEST_WORKSPACE, 'antigravity-ide', 'targetSymbol', 5);
+    assert.strictEqual(context.query, 'targetSymbol');
+    assert.ok(context.relevant.some(r => r.file === symbolFile));
+    const found = await controller.findSymbol(TEST_WORKSPACE, 'antigravity-ide', 'targetSymbol', 5);
+    assert.strictEqual(found.count, 1);
+    const symbol = await controller.readSymbol(symbolFile, 'antigravity-ide', 'targetSymbol', 1, 10);
+    assert.ok(symbol.content.includes('return 42'));
+
+    const compactRead = await controller.readFile(symbolFile, 'antigravity-ide', 1, 10, true);
+    const unchanged = await controller.readFile(symbolFile, 'antigravity-ide', 1, 10, true, compactRead.fileHash);
+    assert.strictEqual(unchanged.unchanged, true);
+    assert.strictEqual(unchanged.fileHash, compactRead.fileHash);
+
+    const toolContext = await registry.executeTool('bridge_context', {
+      rootPath: TEST_WORKSPACE, query: 'targetSymbol', agentId: 'antigravity-ide'
+    }, { controller, taskManager: null, presence: null, diagnostics });
+    assert.ok(Array.isArray(toolContext.relevant));
+    const plan = await controller.testPlan(TEST_WORKSPACE, 'antigravity-ide');
+    assert.ok(Array.isArray(plan.selectedTests));
+    assert.ok(typeof plan.command === 'string');
+    try { if (fs.existsSync(symbolFile)) fs.unlinkSync(symbolFile); } catch {}
+  });
+
+  await t.test('10. Diagnostics Manager', () => {
     diagnostics.recordToolExecution('bridge_read_file', 15, true);
     diagnostics.recordToolExecution('bridge_read_file', 25, true);
     diagnostics.recordToolExecution('bridge_read_file', 100, false);

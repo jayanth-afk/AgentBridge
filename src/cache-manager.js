@@ -22,14 +22,18 @@ export class CacheManager {
       this.misses++;
       return null;
     }
+    this.cache.delete(key);
+    this.cache.set(key, entry);
     this.hits++;
     return entry.value;
   }
 
   set(key, value, filePath = null, ttlMs = this.defaultTtlMs) {
-    if (this.cache.size >= this.maxEntries) {
+    // Updating an existing key must not evict an unrelated hot entry.
+    if (this.cache.has(key)) this.cache.delete(key);
+    else if (this.cache.size >= this.maxEntries) {
       const oldestKey = this.cache.keys().next().value;
-      if (oldestKey) this.cache.delete(oldestKey);
+      if (oldestKey !== undefined) this.cache.delete(oldestKey);
     }
     this.cache.set(key, {
       value,
@@ -41,7 +45,13 @@ export class CacheManager {
   invalidatePath(filePath) {
     if (!filePath) return;
     for (const [key, entry] of this.cache.entries()) {
-      if (entry.path && (entry.path === filePath || entry.path.startsWith(filePath))) {
+      if (!entry.path) continue;
+      // Invalidate both file-scoped entries and directory-scoped entries
+      // (search/snapshot caches) affected by a file mutation.
+      const samePath = entry.path === filePath;
+      const entryContainsPath = filePath.startsWith(entry.path + '/');
+      const pathContainsEntry = entry.path.startsWith(filePath + '/');
+      if (samePath || entryContainsPath || pathContainsEntry) {
         this.cache.delete(key);
       }
     }

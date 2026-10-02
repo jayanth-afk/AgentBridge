@@ -92,7 +92,7 @@ export class ProjectController {
     return summary;
   }
 
-  async readFile(filePath, agentId, startLine = 1, endLine = 100, compact = false) {
+  async readFile(filePath, agentId, startLine = 1, endLine = 100, compact = false, knownHash = null) {
     const t0 = Date.now();
     const permCheck = this.guard.checkPermission(agentId, 'READ');
     if (!permCheck.allowed) throw new Error(permCheck.reason);
@@ -114,12 +114,25 @@ export class ProjectController {
 
     this.fileActivity?.start({ filePath: resolved, agentId, activityType: 'reading' });
 
-    // Check memory cache
-    const cacheKey = `read_${resolved}_${startLine}_${endLine}_${compact}`;
+    // Include a cheap filesystem signature so external edits cannot return stale
+    // cached content. Bridge-originated writes still invalidate immediately.
+    const fileStat = fs.statSync(resolved);
+    const cacheKey = `read_${resolved}_${fileStat.size}_${fileStat.mtimeMs}_${startLine}_${endLine}_${compact}`;
     const cached = this.cache.get(cacheKey);
     if (cached) {
       this.fileActivity?.stop({ filePath: resolved, agentId, activityType: 'reading' });
+      if (knownHash && cached.fileHash === knownHash) {
+        return { filePath: resolved, unchanged: true, fileHash: cached.fileHash };
+      }
       return cached;
+    }
+
+    if (knownHash) {
+      const currentHash = this.concurrency.computeFileHash(resolved);
+      if (currentHash === knownHash) {
+        this.fileActivity?.stop({ filePath: resolved, agentId, activityType: 'reading' });
+        return { filePath: resolved, unchanged: true, fileHash: currentHash };
+      }
     }
 
     const content = fs.readFileSync(resolved, 'utf8');
@@ -260,6 +273,54 @@ export class ProjectController {
 
     this.cache.set(cacheKey, res, resolved, 10000);
     return res;
+  }
+
+  async findSymbol(rootPath, agentId, symbol, maxResults = 20) {
+    if (!symbol || typeof symbol !== 'string') throw new Error('symbol is required.');
+    const escapedSymbol = symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const patterns = [
+      new RegExp(String.raw`(?:export\s+)?(?:async\s+)?function\s+${escapedSymbol}\b`),
+      new RegExp(String.raw`(?:export\s+)?class\s+${escapedSymbol}\b`),
+      new RegExp(String.raw`(?:export\s+)?(?:const|let|var)\s+${escapedSymbol}\s*=`),
+      new RegExp(String.raw`(?:def|class)\s+${escapedSymbol}\b`),
+      new RegExp(String.raw`(?:func|class|struct|enum|protocol)\s+${escapedSymbol}\b`)
+    ];
+    const searchResults = await this.searchFiles(rootPath, agentId, symbol, false, Math.min(maxResults, 100));
+    const results = [];
+    for (const hit of searchResults.results) {
+      if (patterns.some(pattern => pattern.test(hit.line))) {
+        results.push({ file: hit.file, lineNumber: hit.lineNumber, line: hit.line });
+      }
+      if (results.length >= maxResults) break;
+    }
+    return { symbol, count: results.length, results };
+  }
+
+  async readSymbol(filePath, agentId, symbol, contextLines = 2, maxLines = 120) {
+    const found = await this.findSymbol(path.dirname(filePath), agentId, symbol, 100);
+    const match = found.results.find(r => path.resolve(r.file) === path.resolve(filePath));
+    if (!match) throw new Error(`Symbol '${symbol}' not found in '${filePath}'.`);
+    const start = Math.max(1, match.lineNumber - contextLines);
+    const end = Math.min(start + Math.max(1, maxLines) - 1, match.lineNumber + maxLines);
+    const result = await this.readFile(filePath, agentId, start, end, true);
+    return { symbol, ...result };
+  }
+
+  async buildContext(rootPath, agentId, query = null, maxResults = 8) {
+    const root = rootPath || this.guard.config.BRIDGE_ROOT;
+    const snapshot = await this.projectSnapshot(root, agentId);
+    let search = null;
+    if (query) {
+      search = await this.searchFiles(root, agentId, query, false, Math.min(maxResults, 20));
+    }
+    return {
+      root: snapshot.root,
+      git: snapshot.git,
+      structure: snapshot.structure,
+      query: query || null,
+      relevant: search ? search.results.slice(0, maxResults) : [],
+      generatedAt: new Date().toISOString()
+    };
   }
 
   async createFile(filePath, agentId, content, overwrite = false) {
@@ -501,19 +562,21 @@ export class ProjectController {
     if (!Array.isArray(files) || files.length === 0) {
       throw new Error('files must be a non-empty array of file read requests.');
     }
-    const results = [];
-    for (const item of files.slice(0, 50)) {
+    const items = files.slice(0, 50);
+    // Reads are independent. Run them concurrently to remove N-serial filesystem
+    // round trips while preserving input order and per-file error isolation.
+    const results = await Promise.all(items.map(async (item) => {
       const filePath = typeof item === 'string' ? item : item.filePath;
       const startLine = typeof item === 'object' && item.startLine ? item.startLine : 1;
       const endLine = typeof item === 'object' && item.endLine ? item.endLine : 100;
 
       try {
         const readRes = await this.readFile(filePath, agentId, startLine, endLine, compact);
-        results.push({ ...readRes, success: true });
+        return { ...readRes, success: true };
       } catch (err) {
-        results.push({ filePath, success: false, error: err.message });
+        return { filePath, success: false, error: err.message };
       }
-    }
+    }));
     return { count: results.length, results };
   }
 
@@ -614,7 +677,8 @@ export class ProjectController {
           isClean: gitStatus.isClean,
           stagedCount: gitStatus.stagedCount,
           unstagedCount: gitStatus.unstagedCount,
-          untrackedCount: gitStatus.untrackedCount
+          untrackedCount: gitStatus.untrackedCount,
+          changedFiles: gitStatus.changedFiles || []
         };
       } catch {}
     }
@@ -642,6 +706,43 @@ export class ProjectController {
     });
 
     return snapshot;
+  }
+
+  async testPlan(rootPath, agentId) {
+    const root = rootPath || this.guard.config.BRIDGE_ROOT;
+    let status = { changedFiles: [] };
+    if (this.git) {
+      try { status = await this.git.getStatus(root, agentId, false); } catch {}
+    }
+    const testDir = path.join(root, 'tests');
+    const available = [];
+    const walk = (dir) => {
+      if (!fs.existsSync(dir)) return;
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.isFile() && /\.(test|spec)\.(js|mjs|cjs|ts|tsx)$/.test(entry.name)) available.push(path.relative(root, full));
+      }
+    };
+    walk(testDir);
+
+    const changed = status.changedFiles || [];
+    const selected = new Set();
+    for (const file of changed) {
+      const base = path.basename(file).replace(/\.[^.]+$/, '').toLowerCase();
+      for (const test of available) {
+        const testBase = path.basename(test).toLowerCase();
+        if (testBase.includes(base) || base.includes(testBase.replace(/\.(test|spec)\.[^.]+$/, ''))) selected.add(test);
+      }
+    }
+    const tests = selected.size ? [...selected].slice(0, 20) : available.slice(0, 20);
+    return {
+      root,
+      changedFiles: changed.slice(0, 20),
+      selectedTests: tests,
+      fallbackToFullSuite: selected.size === 0,
+      command: tests.length && !selected.size ? 'npm test' : (tests.length ? `node --test ${tests.join(' ')}` : 'npm test')
+    };
   }
 
   async deleteFile(filePath, agentId) {
