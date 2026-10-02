@@ -137,6 +137,9 @@ export class TaskManager extends EventEmitter {
   }
 
   claimNextTask(agentId) {
+    // Recover abandoned leases before claiming new work.
+    this.recoverExpiredTasks(agentId);
+
     // Check if there are blocked tasks whose dependencies are now completed
     this.refreshBlockedTasks(agentId);
 
@@ -177,6 +180,77 @@ export class TaskManager extends EventEmitter {
     const claimedTask = this.getTask(row.id, false);
     this.emit('taskClaimed', claimedTask);
     return claimedTask;
+  }
+
+  recoverExpiredTasks(agentId = null) {
+    const params = [];
+    let query = `SELECT * FROM tasks WHERE status IN ('claimed', 'in_progress') AND started_at IS NOT NULL`;
+    if (agentId) {
+      query += ' AND to_agent = ?';
+      params.push(agentId);
+    }
+
+    const rows = this.db.prepare(query).all(...params);
+    const nowMs = Date.now();
+    const recovered = [];
+
+    for (const task of rows) {
+      const startedMs = Date.parse(task.updated_at || task.started_at);
+      const timeoutMs = Number(task.timeout_ms) || 60000;
+      if (!Number.isFinite(startedMs) || nowMs - startedMs < timeoutMs) continue;
+
+      const retryCount = (task.retry_count || 0) + 1;
+      const maxRetries = task.max_retries || 3;
+      const now = new Date().toISOString();
+      const error = `Task lease expired after ${'${'}timeoutMs}ms`;
+
+      if (retryCount <= maxRetries) {
+        this.db.prepare(`
+          UPDATE tasks
+          SET status = 'pending', retry_count = ?, error = ?, updated_at = ?, started_at = NULL
+          WHERE id = ? AND status IN ('claimed', 'in_progress')
+        `).run(retryCount, error, now, task.id);
+        recovered.push({ taskId: task.id, status: 'pending', retryCount });
+        this.logger.log({
+          agentId: agentId || task.to_agent,
+          action: 'recover_expired_task',
+          status: 'retry',
+          details: { taskId: task.id, retryCount, maxRetries, timeoutMs }
+        });
+      } else {
+        this.db.prepare(`
+          UPDATE tasks
+          SET status = 'failed', retry_count = ?, error = ?, updated_at = ?, completed_at = ?
+          WHERE id = ? AND status IN ('claimed', 'in_progress')
+        `).run(retryCount, `Failed after ${'${'}retryCount} attempts: ${'${'}error}`, now, now, task.id);
+        recovered.push({ taskId: task.id, status: 'failed', retryCount });
+        this.logger.log({
+          agentId: agentId || task.to_agent,
+          action: 'recover_expired_task',
+          status: 'failed',
+          details: { taskId: task.id, retryCount, maxRetries, timeoutMs }
+        });
+      }
+    }
+
+    return recovered;
+  }
+
+  touchTask({ taskId, agentId }) {
+    const now = new Date().toISOString();
+    const result = this.db.prepare(`
+      UPDATE tasks
+      SET status = CASE WHEN status = 'claimed' THEN 'in_progress' ELSE status END,
+          started_at = COALESCE(started_at, ?),
+          updated_at = ?
+      WHERE id = ? AND to_agent = ? AND status IN ('claimed', 'in_progress')
+    `).run(now, now, taskId, agentId);
+
+    if (result.changes === 0) {
+      throw new Error(`Task '${'${'}taskId}' is not actively owned by '${'${'}agentId}'.`);
+    }
+
+    return this.getTask(taskId, true);
   }
 
   refreshBlockedTasks(agentId) {

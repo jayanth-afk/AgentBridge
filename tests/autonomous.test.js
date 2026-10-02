@@ -128,7 +128,32 @@ test('Autonomous Multi-Agent Consumption & Execution Suite', async (t) => {
     assert.strictEqual(finalFail.status, 'failed');
   });
 
-  await t.test('3. End-to-End Autonomous Smoke Test (ChatGPT -> Bridge -> Antigravity Runner -> Result -> ChatGPT)', async () => {
+  await t.test('3. Expired task lease recovery and retry accounting', async () => {
+    const task = taskManager.createTask({
+      fromAgent: 'chatgpt-desktop',
+      toAgent: 'antigravity-ide',
+      title: 'Lease Recovery Test',
+      instructions: 'Simulate abandoned work',
+      timeoutMs: 1,
+      maxRetries: 1
+    });
+    const claimed = taskManager.claimNextTask('antigravity-ide');
+    assert.strictEqual(claimed.id, task.id);
+
+    await new Promise(r => setTimeout(r, 5));
+    const recovered = taskManager.recoverExpiredTasks('antigravity-ide');
+    assert.strictEqual(recovered.length, 1);
+    assert.strictEqual(recovered[0].status, 'pending');
+    assert.strictEqual(taskManager.getTask(task.id, false).retryCount, 1);
+
+    const reclaimed = taskManager.claimNextTask('antigravity-ide');
+    assert.strictEqual(reclaimed.id, task.id);
+    await new Promise(r => setTimeout(r, 5));
+    const failed = taskManager.recoverExpiredTasks('antigravity-ide');
+    assert.strictEqual(failed[0].status, 'failed');
+  });
+
+  await t.test('4. End-to-End Autonomous Smoke Test (ChatGPT -> Bridge -> Antigravity Runner -> Result -> ChatGPT)', async () => {
     // Start an autonomous AgentRunner for antigravity-ide
     const runner = new AgentRunner({
       agentId: 'antigravity-ide',
@@ -190,7 +215,7 @@ test('Autonomous Multi-Agent Consumption & Execution Suite', async (t) => {
     assert.strictEqual(runner.state, 'OFFLINE');
   });
 
-  await t.test('4. Live Acknowledgment Ping (ChatGPT -> Antigravity -> ACK)', async () => {
+  await t.test('5. Live Acknowledgment Ping (ChatGPT -> Antigravity -> ACK)', async () => {
     const runner = new AgentRunner({
       agentId: 'antigravity-ide',
       mailboxHub: mailbox,

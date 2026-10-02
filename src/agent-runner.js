@@ -139,7 +139,19 @@ export class AgentRunner extends EventEmitter {
     this.emit('processingTask', task);
 
     const t0 = Date.now();
+    const taskManager = this.mailbox?.tasks;
+    const heartbeatMs = Math.max(10, Math.min(Math.floor((task.timeoutMs || 60000) / 3), 5000));
+    const heartbeat = taskManager?.touchTask
+      ? setInterval(() => {
+          try { taskManager.touchTask({ taskId: task.id, agentId: this.agentId }); } catch {}
+        }, heartbeatMs)
+      : null;
     try {
+      // Mark ownership as active and keep the lease alive during long-running work.
+      if (taskManager?.touchTask) {
+        try { taskManager.touchTask({ taskId: task.id, agentId: this.agentId }); } catch {}
+      }
+
       // Execute the task
       const result = await this.executeTaskLogic(task);
 
@@ -173,6 +185,7 @@ export class AgentRunner extends EventEmitter {
 
       this.emit('taskFailed', { task, error: err.message, executionMs: Date.now() - t0 });
     } finally {
+      if (heartbeat) clearInterval(heartbeat);
       this.state = 'IDLE';
       if (this.presence) {
         this.presence.setState(this.agentId, 'IDLE', null);
