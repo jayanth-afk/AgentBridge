@@ -1,0 +1,2 @@
+Line A: ChatGPT target
+Line B: Content

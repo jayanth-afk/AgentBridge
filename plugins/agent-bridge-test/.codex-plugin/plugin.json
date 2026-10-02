@@ -1,0 +1,29 @@
+{
+  "version": "1.0.0",
+  "name": "agent-bridge-test",
+  "description": "Agent Bridge test plugin exposing bridge_ping",
+  "author": {
+    "name": "Agent Bridge"
+  },
+  "license": "MIT",
+  "keywords": [
+    "agent-bridge",
+    "mcp",
+    "bridge_ping"
+  ],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Agent Bridge Test",
+    "shortDescription": "Test Agent Bridge local MCP integration",
+    "longDescription": "Exposes the Agent Bridge local MCP server and bridge_ping tool to ChatGPT Desktop.",
+    "developerName": "Agent Bridge",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Call the Agent Bridge bridge_ping tool."
+    ]
+  }
+}

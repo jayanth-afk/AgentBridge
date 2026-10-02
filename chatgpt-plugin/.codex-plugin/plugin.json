@@ -1,0 +1,25 @@
+{
+  "name": "agent-bridge",
+  "version": "1.0.0",
+  "description": "Local Agent Bridge for connected development between ChatGPT Desktop, Claude Desktop, and Antigravity IDE.",
+  "author": {
+    "name": "Jayanth"
+  },
+  "license": "MIT",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Agent Bridge",
+    "shortDescription": "Connect ChatGPT Desktop to local project development and peer agents",
+    "longDescription": "Agent Bridge provides controlled, secure local project tools and inter-agent collaboration for ChatGPT Desktop.",
+    "developerName": "Agent Bridge",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Ping the Agent Bridge with bridge_ping",
+      "Discover active agents with bridge_discover_agents"
+    ]
+  }
+}

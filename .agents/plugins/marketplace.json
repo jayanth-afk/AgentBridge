@@ -1,0 +1,20 @@
+{
+  "name": "agent-bridge-local",
+  "interface": {
+    "displayName": "Agent Bridge Local Marketplace"
+  },
+  "plugins": [
+    {
+      "name": "agent-bridge-test",
+      "source": {
+        "source": "local",
+        "path": "./plugins/agent-bridge-test"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
