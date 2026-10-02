@@ -24,7 +24,7 @@ export class PermissionGuard {
         requiresHumanApproval: ['DESTRUCTIVE', 'PUSH', 'MERGE']
       },
       'system': {
-        allowedPermissions: ['READ', 'SEARCH', 'WRITE', 'CREATE', 'EDIT', 'DELETE', 'EXECUTE', 'GIT_READ', 'GIT_WRITE', 'MESSAGE', 'DELEGATE', 'DESTRUCTIVE'],
+        allowedPermissions: ['READ', 'SEARCH', 'WRITE', 'CREATE', 'EDIT', 'DELETE', 'EXECUTE', 'GIT_READ', 'GIT_WRITE', 'MESSAGE', 'DELEGATE', 'DESTRUCTIVE', 'PUSH'],
         requiresHumanApproval: []
       }
     };

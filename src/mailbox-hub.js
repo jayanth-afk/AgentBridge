@@ -1,9 +1,11 @@
 import crypto from 'node:crypto';
+import { TaskManager } from './task-manager.js';
 
 export class MailboxHub {
-  constructor(auditLogger) {
+  constructor(auditLogger, taskManager = null) {
     this.logger = auditLogger;
     this.db = auditLogger.db;
+    this.tasks = taskManager || new TaskManager(auditLogger);
     this.agentHandlers = new Map(); // agentId -> async (question, context) => response
   }
 
@@ -33,11 +35,6 @@ export class MailboxHub {
     return { id, timestamp, fromAgent, toAgent, subject, content, replyToId };
   }
 
-  // Fan out one message to many agents. Recipients are dispatched independently
-  // (allSettled), so one failing recipient never aborts delivery to the others
-  // and nobody waits on anybody else. Every outcome is reported per recipient.
-  // Note: each insert is a sub-millisecond synchronous SQLite write; there is no
-  // per-recipient network wait to overlap, so dispatch is effectively immediate.
   async broadcastMessage({ fromAgent, toAgents, subject, content, replyToId = null }) {
     const recipients = [...new Set(Array.isArray(toAgents) ? toAgents : [])];
     const settled = await Promise.allSettled(
@@ -52,15 +49,15 @@ export class MailboxHub {
     return { delivered, failed };
   }
 
-  getInbox({ agentId, unreadOnly = false }) {
+  getInbox({ agentId, unreadOnly = false, compact = false, limit = 50 }) {
     let query = `SELECT * FROM messages WHERE to_agent = ?`;
     if (unreadOnly) {
       query += ` AND read_at IS NULL`;
     }
-    query += ` ORDER BY timestamp DESC`;
+    query += ` ORDER BY timestamp DESC LIMIT ?`;
 
     const stmt = this.db.prepare(query);
-    const messages = stmt.all(agentId);
+    const messages = stmt.all(agentId, limit);
 
     this.logger.log({
       agentId,
@@ -70,6 +67,17 @@ export class MailboxHub {
       status: 'success',
       details: { count: messages.length, unreadOnly }
     });
+
+    if (compact) {
+      return messages.map(m => ({
+        id: m.id,
+        timestamp: m.timestamp,
+        from_agent: m.from_agent,
+        subject: m.subject,
+        read_at: m.read_at,
+        snippet: m.content ? (m.content.length > 80 ? m.content.slice(0, 80) + '...' : m.content) : ''
+      }));
+    }
 
     return messages;
   }
@@ -83,23 +91,25 @@ export class MailboxHub {
     return { success: info.changes > 0, readAt: now };
   }
 
-  delegateTask({ fromAgent, toAgent, title, instructions, context = null }) {
-    const id = `task_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-    const timestamp = new Date().toISOString();
-
-    const stmt = this.db.prepare(`
-      INSERT INTO tasks (id, created_at, updated_at, from_agent, to_agent, title, instructions, context, status, result)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL)
-    `);
-    stmt.run(id, timestamp, timestamp, fromAgent, toAgent, title, instructions, context);
-
-    this.logger.log({
-      agentId: fromAgent,
-      action: 'delegate_task',
-      targetPath: null,
-      command: null,
-      status: 'success',
-      details: { taskId: id, toAgent, title }
+  delegateTask({
+    fromAgent,
+    toAgent,
+    title,
+    instructions,
+    context = null,
+    parentTaskId = null,
+    priority = 'normal',
+    dependencies = []
+  }) {
+    const task = this.tasks.createTask({
+      fromAgent,
+      toAgent,
+      title,
+      instructions,
+      context,
+      parentTaskId,
+      priority,
+      dependencies
     });
 
     // Also send an inbox message notifying the agent
@@ -107,17 +117,17 @@ export class MailboxHub {
       fromAgent,
       toAgent,
       subject: `[Task Delegation] ${title}`,
-      content: `New task assigned (${id}): ${instructions}`,
+      content: `New task assigned (${task.id}): ${instructions}`,
       replyToId: null
     });
 
-    return { id, createdAt: timestamp, fromAgent, toAgent, title, instructions, status: 'pending' };
+    return task;
   }
 
   async askAgent({ fromAgent, toAgent, question, context = null }) {
     const timestamp = new Date().toISOString();
 
-    // If target agent has a registered handler (e.g. Antigravity peer or automated mock), call it synchronously!
+    // If target agent has a registered handler (e.g. Antigravity peer or automated mock), call it synchronously
     const handler = this.agentHandlers.get(toAgent);
     if (handler) {
       const response = await handler(question, context);
@@ -172,49 +182,61 @@ export class MailboxHub {
     });
   }
 
-  updateTaskStatus({ taskId, agentId, status, result = null }) {
-    const timestamp = new Date().toISOString();
-    const stmt = this.db.prepare(`
-      UPDATE tasks
-      SET status = ?, result = ?, updated_at = ?
-      WHERE id = ? AND (to_agent = ? OR from_agent = ?)
-    `);
-    const info = stmt.run(status, result, timestamp, taskId, agentId, agentId);
-
-    if (info.changes === 0) {
-      throw new Error(`Task '${taskId}' not found or agent '${agentId}' is not authorized.`);
-    }
-
-    this.logger.log({
+  updateTaskStatus({ taskId, agentId, status, result = null, error = null }) {
+    return this.tasks.updateTaskStatus({
+      taskId,
       agentId,
-      action: 'update_task_status',
-      targetPath: null,
-      command: null,
-      status: 'success',
-      details: { taskId, status }
+      status,
+      result,
+      error
+    });
+  }
+
+  submitTaskResult({ taskId, agentId, status = 'completed', result = null, error = null }) {
+    const updated = this.tasks.updateTaskStatus({
+      taskId,
+      agentId,
+      status,
+      result,
+      error
     });
 
-    return { taskId, status, result, updatedAt: timestamp };
+    // Automatically send notification message back to task creator!
+    const task = this.tasks.getTask(taskId, false);
+    if (task && task.creator && task.creator !== agentId) {
+      this.sendMessage({
+        fromAgent: agentId,
+        toAgent: task.creator,
+        subject: `[Task Result] Re: ${task.title}`,
+        content: JSON.stringify({
+          taskId,
+          status,
+          result: task.result,
+          error: task.error
+        })
+      });
+    }
+
+    return updated;
   }
 
-  getTask(taskId) {
-    const stmt = this.db.prepare(`SELECT * FROM tasks WHERE id = ?`);
-    return stmt.get(taskId);
+  claimNextTask(agentId) {
+    return this.tasks.claimNextTask(agentId);
   }
 
-  listTasks({ agentId = null, status = null } = {}) {
-    let query = `SELECT * FROM tasks WHERE 1=1`;
-    const params = [];
-    if (agentId) {
-      query += ` AND (to_agent = ? OR from_agent = ?)`;
-      params.push(agentId, agentId);
-    }
-    if (status) {
-      query += ` AND status = ?`;
-      params.push(status);
-    }
-    query += ` ORDER BY updated_at DESC`;
-    const stmt = this.db.prepare(query);
-    return stmt.all(...params);
+  failTask({ taskId, agentId, error, allowRetry = true }) {
+    return this.tasks.failTask({ taskId, agentId, error, allowRetry });
+  }
+
+  cancelTask({ taskId, agentId, reason }) {
+    return this.tasks.cancelTask({ taskId, agentId, reason });
+  }
+
+  getTask(taskId, compact = true) {
+    return this.tasks.getTask(taskId, compact);
+  }
+
+  listTasks({ agentId = null, status = null, limit = 20, compact = true } = {}) {
+    return this.tasks.listTasks({ agentId, status, limit, compact });
   }
 }

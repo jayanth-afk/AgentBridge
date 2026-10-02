@@ -4,18 +4,48 @@ import crypto from 'node:crypto';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { ConcurrencyManager } from './concurrency-manager.js';
+import { CacheManager } from './cache-manager.js';
 
 const execAsync = promisify(exec);
 
+const BINARY_EXTENSIONS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.svgz',
+  '.pdf', '.zip', '.tar', '.gz', '.tgz', '.bz2', '.7z',
+  '.exe', '.bin', '.dll', '.dylib', '.so', '.a', '.o',
+  '.pyc', '.class', '.jar', '.wasm', '.mov', '.mp4', '.mp3',
+  '.sqlite', '.sqlite3', '.db', '.DS_Store', '.woff', '.woff2', '.ttf'
+]);
+
 export class ProjectController {
-  constructor(permissionGuard, auditLogger, concurrencyManager = new ConcurrencyManager(), fileActivityManager = null) {
+  constructor(
+    permissionGuard,
+    auditLogger,
+    concurrencyManager = new ConcurrencyManager(),
+    fileActivityManager = null,
+    cacheManager = new CacheManager(),
+    gitController = null
+  ) {
     this.guard = permissionGuard;
     this.logger = auditLogger;
     this.concurrency = concurrencyManager;
     this.fileActivity = fileActivityManager;
+    this.cache = cacheManager;
+    this.git = gitController;
   }
 
-  async inspectProject(rootPath, agentId) {
+  isBinaryFile(filePath) {
+    const ext = path.extname(filePath).toLowerCase();
+    return BINARY_EXTENSIONS.has(ext);
+  }
+
+  otherActivity(resolved, agentId) {
+    if (!this.fileActivity) return [];
+    return this.fileActivity.get(resolved)
+      .filter(a => a.agent_id !== agentId)
+      .map(a => ({ agentId: a.agent_id, activityType: a.activity_type, lastSeen: a.last_seen, description: a.description }));
+  }
+
+  async inspectProject(rootPath, agentId, options = {}) {
     const t0 = Date.now();
     const permCheck = this.guard.checkPermission(agentId, 'READ');
     if (!permCheck.allowed) throw new Error(permCheck.reason);
@@ -42,6 +72,7 @@ export class ProjectController {
 
     for (const file of files) {
       if (file.name.startsWith('.git') && file.name !== '.gitignore') continue;
+      if (file.name === 'node_modules' || file.name === '.build' || file.name === '.cache') continue;
       if (file.isDirectory()) {
         summary.directories.push(file.name);
       } else {
@@ -61,7 +92,7 @@ export class ProjectController {
     return summary;
   }
 
-  async readFile(filePath, agentId, startLine = 1, endLine = 500) {
+  async readFile(filePath, agentId, startLine = 1, endLine = 100, compact = false) {
     const t0 = Date.now();
     const permCheck = this.guard.checkPermission(agentId, 'READ');
     if (!permCheck.allowed) throw new Error(permCheck.reason);
@@ -77,9 +108,23 @@ export class ProjectController {
       throw new Error(`File '${resolved}' does not exist.`);
     }
 
+    if (this.isBinaryFile(resolved)) {
+      throw new Error(`Cannot read binary file '${path.basename(resolved)}' as text.`);
+    }
+
     this.fileActivity?.start({ filePath: resolved, agentId, activityType: 'reading' });
+
+    // Check memory cache
+    const cacheKey = `read_${resolved}_${startLine}_${endLine}_${compact}`;
+    const cached = this.cache.get(cacheKey);
+    if (cached) {
+      this.fileActivity?.stop({ filePath: resolved, agentId, activityType: 'reading' });
+      return cached;
+    }
+
     const content = fs.readFileSync(resolved, 'utf8');
     this.fileActivity?.stop({ filePath: resolved, agentId, activityType: 'reading' });
+
     const lines = content.split('\n');
     const totalLines = lines.length;
 
@@ -98,26 +143,27 @@ export class ProjectController {
       details: { totalLines, linesReturned: slice.length, fileHash }
     });
 
-    return {
+    const result = compact ? {
+      filePath: resolved,
+      lineRange: [s, e],
+      totalLines,
+      fileHash,
+      content: numbered
+    } : {
       filePath: resolved,
       startLine: s,
       endLine: e,
       totalLines,
       fileHash,
       content: numbered,
-      // Awareness only: other agents that have announced activity on this file.
       otherActivity: this.otherActivity(resolved, agentId)
     };
+
+    this.cache.set(cacheKey, result, resolved);
+    return result;
   }
 
-  otherActivity(resolved, agentId) {
-    if (!this.fileActivity) return [];
-    return this.fileActivity.get(resolved)
-      .filter(a => a.agent_id !== agentId)
-      .map(a => ({ agentId: a.agent_id, activityType: a.activity_type, lastSeen: a.last_seen, description: a.description }));
-  }
-
-  async searchFiles(rootPath, agentId, query, isRegex = false, maxResults = 50) {
+  async searchFiles(rootPath, agentId, query, isRegex = false, maxResults = 20, extensions = null, filePattern = null) {
     const t0 = Date.now();
     const permCheck = this.guard.checkPermission(agentId, 'SEARCH');
     if (!permCheck.allowed) throw new Error(permCheck.reason);
@@ -129,34 +175,65 @@ export class ProjectController {
     }
 
     const resolved = pathCheck.path;
+    const cacheKey = `search_${resolved}_${query}_${isRegex}_${maxResults}_${extensions}`;
+    const cached = this.cache.get(cacheKey);
+    if (cached) return cached;
+
     const matcher = isRegex ? new RegExp(query, 'i') : null;
     const results = [];
+    const limit = Math.min(maxResults || 20, 100);
+    const allowedExts = Array.isArray(extensions) ? new Set(extensions.map(e => e.toLowerCase())) : null;
 
     const walk = (dir) => {
-      if (results.length >= maxResults) return;
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      if (results.length >= limit) return;
+      let entries;
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+
       for (const entry of entries) {
-        if (entry.name.startsWith('.git') || entry.name === 'node_modules' || entry.name === '.build') continue;
+        if (results.length >= limit) return;
+        // Skip noise & cache directories
+        if (
+          entry.name.startsWith('.git') ||
+          entry.name === 'node_modules' ||
+          entry.name === '.build' ||
+          entry.name === '.cache' ||
+          entry.name === '.next' ||
+          entry.name === 'dist' ||
+          entry.name === 'data'
+        ) continue;
+
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) {
           walk(full);
         } else if (entry.isFile()) {
+          const ext = path.extname(entry.name).toLowerCase();
+          if (allowedExts && !allowedExts.has(ext)) continue;
+          if (this.isBinaryFile(full)) continue;
+
           try {
             const data = fs.readFileSync(full, 'utf8');
             const lines = data.split('\n');
-            lines.forEach((line, idx) => {
-              if (results.length >= maxResults) return;
+            for (let idx = 0; idx < lines.length; idx++) {
+              if (results.length >= limit) break;
+              const line = lines[idx];
               const matches = isRegex ? matcher.test(line) : line.includes(query);
               if (matches) {
+                // Keep snippets compact (max 120 chars) to prevent token explosion
+                const trimmed = line.trim();
+                const snippet = trimmed.length > 120 ? trimmed.slice(0, 120) + '...' : trimmed;
                 results.push({
                   file: full,
                   lineNumber: idx + 1,
-                  line: line.trim()
+                  line: snippet
                 });
               }
-            });
+            }
           } catch {
-            // Ignore unreadable binary files
+            // Ignore unreadable or locked files
           }
         }
       }
@@ -173,7 +250,16 @@ export class ProjectController {
       details: { query, resultsCount: results.length }
     });
 
-    return { rootPath: resolved, query, results };
+    const res = {
+      rootPath: resolved,
+      query,
+      count: results.length,
+      capped: results.length >= limit,
+      results
+    };
+
+    this.cache.set(cacheKey, res, resolved, 10000);
+    return res;
   }
 
   async createFile(filePath, agentId, content, overwrite = false) {
@@ -203,8 +289,13 @@ export class ProjectController {
         fs.mkdirSync(dir, { recursive: true });
       }
 
-      fs.writeFileSync(resolved, content, 'utf8');
+      // Atomic write using temp file and rename
+      const tempPath = path.join(dir, `.tmp_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`);
+      fs.writeFileSync(tempPath, content, 'utf8');
+      fs.renameSync(tempPath, resolved);
+
       const newHash = this.concurrency.computeFileHash(resolved);
+      this.cache.invalidatePath(resolved);
 
       this.logger.log({
         agentId,
@@ -215,7 +306,12 @@ export class ProjectController {
         details: { bytesWritten: Buffer.byteLength(content, 'utf8'), overwrite, fileHash: newHash }
       });
 
-      return { filePath: resolved, bytesWritten: Buffer.byteLength(content, 'utf8'), fileHash: newHash, status: 'created' };
+      return {
+        filePath: resolved,
+        bytesWritten: Buffer.byteLength(content, 'utf8'),
+        fileHash: newHash,
+        status: 'created'
+      };
     } finally {
       this.concurrency.releaseLock(resolved, agentId);
     }
@@ -244,10 +340,7 @@ export class ProjectController {
       throw new Error(hashCheck.reason);
     }
 
-    // Advisory activity only: this announces the edit but never blocks another agent.
     this.fileActivity?.start({ filePath: resolved, agentId, activityType: 'editing' });
-
-    // Advisory concurrency record; never denies another agent.
     const lock = this.concurrency.acquireLock(resolved, agentId);
     if (!lock.acquired) {
       throw new Error(`Cannot edit file: ${lock.reason}`);
@@ -257,9 +350,6 @@ export class ProjectController {
       const buf = fs.readFileSync(resolved);
       const current = buf.toString('utf8');
 
-      // Re-verify against the exact bytes about to be modified. The earlier check
-      // runs before this read, so another agent could have written in between.
-      // This is optimistic conflict DETECTION only; it never blocks or queues.
       if (expectedHash) {
         const hashNow = crypto.createHash('sha256').update(buf).digest('hex');
         if (hashNow !== expectedHash) {
@@ -280,8 +370,15 @@ export class ProjectController {
       }
 
       const updated = current.replace(targetContent, replacementContent);
-      fs.writeFileSync(resolved, updated, 'utf8');
+
+      // Atomic write via temp file
+      const dir = path.dirname(resolved);
+      const tempPath = path.join(dir, `.tmp_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`);
+      fs.writeFileSync(tempPath, updated, 'utf8');
+      fs.renameSync(tempPath, resolved);
+
       const newHash = this.concurrency.computeFileHash(resolved);
+      this.cache.invalidatePath(resolved);
 
       this.logger.log({
         agentId,
@@ -292,11 +389,259 @@ export class ProjectController {
         details: { replacedBytes: targetContent.length, newBytes: replacementContent.length, fileHash: newHash }
       });
 
-      return { filePath: resolved, fileHash: newHash, status: 'edited', otherActivity: this.otherActivity(resolved, agentId) };
+      return {
+        filePath: resolved,
+        fileHash: newHash,
+        status: 'edited',
+        otherActivity: this.otherActivity(resolved, agentId)
+      };
     } finally {
       this.concurrency.releaseLock(resolved, agentId);
       this.fileActivity?.stop({ filePath: resolved, agentId, activityType: 'editing' });
     }
+  }
+
+  /**
+   * Atomic patch operation with expectedHash and conflict detection.
+   * Returns minimal compact content.
+   */
+  async applyPatch(filePath, agentId, patch, expectedHash = null) {
+    const t0 = Date.now();
+    const permCheck = this.guard.checkPermission(agentId, 'EDIT');
+    if (!permCheck.allowed) throw new Error(permCheck.reason);
+
+    const pathCheck = this.guard.validatePathAccess(filePath, 'EDIT');
+    if (!pathCheck.allowed) throw new Error(pathCheck.reason);
+
+    const resolved = pathCheck.path;
+    if (!fs.existsSync(resolved)) {
+      throw new Error(`File '${resolved}' does not exist.`);
+    }
+
+    const lock = this.concurrency.acquireLock(resolved, agentId);
+    if (!lock.acquired) throw new Error(lock.reason);
+
+    try {
+      const currentBuf = fs.readFileSync(resolved);
+      const currentContent = currentBuf.toString('utf8');
+      const currentHash = crypto.createHash('sha256').update(currentBuf).digest('hex');
+
+      // Conflict detection against expectedHash
+      if (expectedHash && currentHash !== expectedHash) {
+        const conflictRes = {
+          status: 'conflict',
+          conflict: true,
+          filePath: resolved,
+          expectedHash,
+          currentHash,
+          message: `ConflictDetected: file was modified concurrently. Expected ${expectedHash}, found ${currentHash}.`
+        };
+        this.logger.log({
+          agentId,
+          action: 'apply_patch',
+          targetPath: resolved,
+          status: 'conflict',
+          details: conflictRes
+        });
+        return conflictRes;
+      }
+
+      let updatedContent = currentContent;
+
+      if (typeof patch === 'object' && patch !== null) {
+        if (patch.targetContent && patch.replacementContent !== undefined) {
+          if (!currentContent.includes(patch.targetContent)) {
+            throw new Error(`Target content not found in '${resolved}'.`);
+          }
+          updatedContent = currentContent.replace(patch.targetContent, patch.replacementContent);
+        } else if (patch.newContent !== undefined) {
+          updatedContent = patch.newContent;
+        } else {
+          throw new Error(`Invalid patch payload: expected targetContent/replacementContent or newContent.`);
+        }
+      } else if (typeof patch === 'string') {
+        updatedContent = patch;
+      } else {
+        throw new Error('Patch argument must be an object or string.');
+      }
+
+      // Atomic write via temp file
+      const dir = path.dirname(resolved);
+      const tempPath = path.join(dir, `.tmp_patch_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`);
+      fs.writeFileSync(tempPath, updatedContent, 'utf8');
+      fs.renameSync(tempPath, resolved);
+
+      const newHash = this.concurrency.computeFileHash(resolved);
+      this.cache.invalidatePath(resolved);
+
+      const result = {
+        status: 'applied',
+        conflict: false,
+        filePath: resolved,
+        newHash,
+        bytesWritten: Buffer.byteLength(updatedContent, 'utf8')
+      };
+
+      this.logger.log({
+        agentId,
+        action: 'apply_patch',
+        targetPath: resolved,
+        status: 'success',
+        executionMs: Date.now() - t0,
+        details: { newHash, bytesWritten: result.bytesWritten }
+      });
+
+      return result;
+    } finally {
+      this.concurrency.releaseLock(resolved, agentId);
+    }
+  }
+
+  async batchRead(files, agentId, compact = true) {
+    if (!Array.isArray(files) || files.length === 0) {
+      throw new Error('files must be a non-empty array of file read requests.');
+    }
+    const results = [];
+    for (const item of files.slice(0, 50)) {
+      const filePath = typeof item === 'string' ? item : item.filePath;
+      const startLine = typeof item === 'object' && item.startLine ? item.startLine : 1;
+      const endLine = typeof item === 'object' && item.endLine ? item.endLine : 100;
+
+      try {
+        const readRes = await this.readFile(filePath, agentId, startLine, endLine, compact);
+        results.push({ ...readRes, success: true });
+      } catch (err) {
+        results.push({ filePath, success: false, error: err.message });
+      }
+    }
+    return { count: results.length, results };
+  }
+
+  async batchWrite(files, agentId) {
+    if (!Array.isArray(files) || files.length === 0) {
+      throw new Error('files must be a non-empty array of file write requests.');
+    }
+    const results = [];
+    for (const item of files.slice(0, 50)) {
+      const { filePath, content, expectedHash = null, overwrite = true } = item;
+      try {
+        if (expectedHash) {
+          const patchRes = await this.applyPatch(filePath, agentId, { newContent: content }, expectedHash);
+          results.push(patchRes);
+        } else {
+          const createRes = await this.createFile(filePath, agentId, content, overwrite);
+          results.push({ status: 'created', ...createRes });
+        }
+      } catch (err) {
+        results.push({ filePath, status: 'error', error: err.message });
+      }
+    }
+    return { count: results.length, results };
+  }
+
+  async batchStat(paths, agentId) {
+    if (!Array.isArray(paths) || paths.length === 0) {
+      throw new Error('paths must be a non-empty array of file paths.');
+    }
+    const results = [];
+    for (const p of paths.slice(0, 100)) {
+      try {
+        const pathCheck = this.guard.validatePathAccess(p, 'READ');
+        if (!pathCheck.allowed) {
+          results.push({ path: p, exists: false, error: pathCheck.reason });
+          continue;
+        }
+        const resolved = pathCheck.path;
+        if (!fs.existsSync(resolved)) {
+          results.push({ path: resolved, exists: false });
+          continue;
+        }
+        const stat = fs.statSync(resolved);
+        results.push({
+          path: resolved,
+          exists: true,
+          isDirectory: stat.isDirectory(),
+          isFile: stat.isFile(),
+          size: stat.size,
+          modifiedAt: stat.mtime.toISOString(),
+          fileHash: stat.isFile() ? this.concurrency.computeFileHash(resolved) : null
+        });
+      } catch (err) {
+        results.push({ path: p, exists: false, error: err.message });
+      }
+    }
+    return { count: results.length, items: results };
+  }
+
+  async projectSnapshot(rootPath, agentId) {
+    const t0 = Date.now();
+    const permCheck = this.guard.checkPermission(agentId, 'READ');
+    if (!permCheck.allowed) throw new Error(permCheck.reason);
+
+    const targetDir = rootPath || this.guard.config.BRIDGE_ROOT;
+    const pathCheck = this.guard.validatePathAccess(targetDir, 'READ');
+    if (!pathCheck.allowed) throw new Error(pathCheck.reason);
+
+    const resolved = pathCheck.path;
+    const cacheKey = `snapshot_${resolved}`;
+    const cached = this.cache.get(cacheKey);
+    if (cached) return cached;
+
+    // Structure
+    const entries = fs.readdirSync(resolved, { withFileTypes: true });
+    const directories = [];
+    const keyFiles = [];
+
+    for (const entry of entries) {
+      if (entry.name.startsWith('.git') && entry.name !== '.gitignore') continue;
+      if (entry.name === 'node_modules') continue;
+      if (entry.isDirectory()) {
+        directories.push(entry.name);
+      } else if (entry.isFile()) {
+        if (['package.json', 'README.md', 'Package.swift', 'tsconfig.json'].includes(entry.name) || entry.name.endsWith('.js') || entry.name.endsWith('.json')) {
+          keyFiles.push(entry.name);
+        }
+      }
+    }
+
+    // Git Status
+    let gitInfo = null;
+    if (this.git) {
+      try {
+        const gitStatus = await this.git.getStatus(resolved, agentId);
+        gitInfo = {
+          branch: gitStatus.branch,
+          isClean: gitStatus.isClean,
+          stagedCount: gitStatus.stagedCount,
+          unstagedCount: gitStatus.unstagedCount,
+          untrackedCount: gitStatus.untrackedCount
+        };
+      } catch {}
+    }
+
+    const snapshot = {
+      root: resolved,
+      timestamp: new Date().toISOString(),
+      git: gitInfo,
+      structure: {
+        totalEntries: entries.length,
+        directories,
+        keyFiles: keyFiles.slice(0, 15)
+      }
+    };
+
+    this.cache.set(cacheKey, snapshot, resolved, 15000);
+
+    this.logger.log({
+      agentId,
+      action: 'project_snapshot',
+      targetPath: resolved,
+      status: 'allowed',
+      executionMs: Date.now() - t0,
+      details: { branch: gitInfo?.branch, directoriesCount: directories.length }
+    });
+
+    return snapshot;
   }
 
   async deleteFile(filePath, agentId) {
@@ -320,6 +665,7 @@ export class ProjectController {
 
     try {
       fs.unlinkSync(resolved);
+      this.cache.invalidatePath(resolved);
       this.logger.log({
         agentId,
         action: 'delete_file',

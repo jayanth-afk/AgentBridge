@@ -1,5 +1,12 @@
 import http from 'node:http';
 import { parse } from 'node:url';
+import { ToolRegistry } from './tool-registry.js';
+import { TaskManager } from './task-manager.js';
+import { CacheManager } from './cache-manager.js';
+import { DiagnosticsManager } from './diagnostics-manager.js';
+import { PresenceManager } from './presence-manager.js';
+import { AgentIdentityManager } from './agent-identity.js';
+import { GitController } from './git-controller.js';
 
 export class BridgeHttpServer {
   constructor(options = {}) {
@@ -9,6 +16,14 @@ export class BridgeHttpServer {
     this.guard = options.permissionGuard;
     this.mailbox = options.mailboxHub;
     this.controller = options.projectController;
+    this.collaboration = options.collaborationManager;
+    this.fileActivity = options.fileActivityManager;
+    this.cache = options.cacheManager || new CacheManager();
+    this.diagnostics = options.diagnosticsManager || new DiagnosticsManager();
+    this.presence = options.presenceManager || (this.logger ? new PresenceManager(this.logger) : null);
+    this.identity = options.identityManager || (this.logger ? new AgentIdentityManager(this.logger) : null);
+    this.git = options.gitController || (this.guard && this.logger ? new GitController(this.guard, this.logger) : null);
+    this.registry = options.toolRegistry || new ToolRegistry();
     this.server = null;
   }
 
@@ -46,7 +61,8 @@ export class BridgeHttpServer {
               service: 'agent-bridge',
               ziaWriteLocked: this.guard.config.ZIA_WRITE_LOCKED,
               allowedRoots: this.guard.config.ALLOWED_ROOTS,
-              activeAgents: this.guard.config.AGENT_IDENTITIES
+              activeAgents: this.guard.config.AGENT_IDENTITIES,
+              liveAgents: this.presence ? this.presence.listAgents() : []
             }));
           }
 
@@ -54,6 +70,7 @@ export class BridgeHttpServer {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify({
               agents: this.guard.config.AGENT_IDENTITIES,
+              liveAgents: this.presence ? this.presence.listAgents() : [],
               policies: this.guard.agentPolicies
             }));
           }
@@ -61,7 +78,8 @@ export class BridgeHttpServer {
           if (pathname.startsWith('/api/inbox/') && method === 'GET') {
             const agentId = pathname.replace('/api/inbox/', '');
             const unreadOnly = query.unreadOnly === 'true';
-            const messages = this.mailbox.getInbox({ agentId, unreadOnly });
+            const compact = query.compact === 'true';
+            const messages = this.mailbox.getInbox({ agentId, unreadOnly, compact });
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify(messages));
           }
@@ -82,19 +100,21 @@ export class BridgeHttpServer {
 
           if (pathname.startsWith('/api/task/') && method === 'GET') {
             const taskId = pathname.replace('/api/task/', '');
-            const task = this.mailbox.getTask(taskId);
+            const compact = query.compact !== 'false';
+            const task = this.mailbox.getTask(taskId, compact);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify(task || { error: 'Not found' }));
           }
 
           if (pathname === '/api/audit' && method === 'GET') {
             const limit = parseInt(query.limit, 10) || 50;
+            const compact = query.compact === 'true';
             const logs = this.logger.getRecentLogs(limit);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify(logs));
           }
 
-          // JSON-RPC / Streamable HTTP endpoint for tool calls
+          // JSON-RPC / Streamable HTTP endpoint for tool calls derived from ToolRegistry
           if (pathname === '/mcp' && method === 'POST') {
             const body = await readBody();
             const { method: rpcMethod, params = {}, id = 1 } = body;
@@ -105,95 +125,57 @@ export class BridgeHttpServer {
                 jsonrpc: '2.0',
                 id,
                 result: {
-                  tools: [
-                    { name: 'bridge_ping', description: 'Harmless health check tool that returns CHATGPT_BRIDGE_REAL_TEST_7F31' },
-                    { name: 'bridge_discover_agents', description: 'Discover agents' },
-                    { name: 'bridge_inspect_project', description: 'Inspect project structure' },
-                    { name: 'bridge_read_file', description: 'Read file with line numbers and hash' },
-                    { name: 'bridge_create_file', description: 'Create file in authorized workspace' },
-                    { name: 'bridge_edit_file', description: 'Edit file with optimistic concurrency' },
-                    { name: 'bridge_delete_file', description: 'Delete file with safety check' },
-                    { name: 'bridge_search_files', description: 'Search project files' },
-                    { name: 'bridge_execute_command', description: 'Execute safe whitelisted command' },
-                    { name: 'bridge_send_message', description: 'Send inter-agent message' },
-                    { name: 'bridge_check_inbox', description: 'Check agent inbox' },
-                    { name: 'bridge_delegate_task', description: 'Delegate task to peer agent' },
-                    { name: 'bridge_ask_agent', description: 'Synchronously query peer agent' }
-                  ]
+                  tools: this.registry.getToolDefinitions()
                 }
               }));
             }
 
             if (rpcMethod === 'tools/call') {
               const { name, arguments: args = {} } = params;
-              let out;
+              const toolContext = {
+                controller: this.controller,
+                mailbox: this.mailbox,
+                collaboration: this.collaboration,
+                fileActivity: this.fileActivity,
+                logger: this.logger,
+                git: this.git,
+                presence: this.presence,
+                identity: this.identity,
+                diagnostics: this.diagnostics,
+                cache: this.cache
+              };
 
-              switch (name) {
-                case 'bridge_ping': {
-                  const caller = args.agentId || 'unknown';
-                  const timestamp = new Date().toISOString();
-                  this.logger.log({
-                    agentId: caller,
-                    action: 'bridge_ping',
-                    targetPath: null,
-                    command: null,
-                    status: 'success',
-                    details: { responseToken: 'CHATGPT_BRIDGE_REAL_TEST_7F31' }
-                  });
-                  out = {
-                    status: 'OK',
-                    token: 'CHATGPT_BRIDGE_REAL_TEST_7F31',
-                    timestamp,
-                    caller,
-                    environment: 'Jayanth\'s Mac (Apple Silicon arm64, Node v24.12.0)',
-                    bridgePath: '/Users/jayanthpranaykonada/agent-bridge',
-                    message: 'CHATGPT_BRIDGE_REAL_TEST_7F31: Agent Bridge is operational on Jayanth\'s Mac.'
-                  };
-                  break;
-                }
-                case 'bridge_inspect_project':
-                  out = await this.controller.inspectProject(args.rootPath, args.agentId);
-                  break;
-                case 'bridge_read_file':
-                  out = await this.controller.readFile(args.filePath, args.agentId, args.startLine, args.endLine);
-                  break;
-                case 'bridge_create_file':
-                  out = await this.controller.createFile(args.filePath, args.agentId, args.content, args.overwrite);
-                  break;
-                case 'bridge_edit_file':
-                  out = await this.controller.editFile(args.filePath, args.agentId, args.targetContent, args.replacementContent, args.expectedHash);
-                  break;
-                case 'bridge_delete_file':
-                  out = await this.controller.deleteFile(args.filePath, args.agentId);
-                  break;
-                case 'bridge_search_files':
-                  out = await this.controller.searchFiles(args.rootPath, args.agentId, args.query, args.isRegex);
-                  break;
-                case 'bridge_execute_command':
-                  out = await this.controller.executeCommand(args.commandLine, args.cwd, args.agentId);
-                  break;
-                case 'bridge_send_message':
-                  out = this.mailbox.sendMessage(args);
-                  break;
-                case 'bridge_check_inbox':
-                  out = this.mailbox.getInbox(args);
-                  break;
-                case 'bridge_delegate_task':
-                  out = this.mailbox.delegateTask(args);
-                  break;
-                case 'bridge_ask_agent':
-                  out = await this.mailbox.askAgent(args);
-                  break;
-                default:
-                  throw new Error(`Unknown tool: ${name}`);
+              try {
+                const out = await this.registry.executeTool(name, args, toolContext);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({
+                  jsonrpc: '2.0',
+                  id,
+                  result: {
+                    content: [
+                      {
+                        type: 'text',
+                        text: typeof out === 'string' ? out : JSON.stringify(out, null, 2)
+                      }
+                    ]
+                  }
+                }));
+              } catch (toolErr) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({
+                  jsonrpc: '2.0',
+                  id,
+                  result: {
+                    isError: true,
+                    content: [
+                      {
+                        type: 'text',
+                        text: `Error executing ${name}: ${toolErr.message}`
+                      }
+                    ]
+                  }
+                }));
               }
-
-              res.writeHead(200, { 'Content-Type': 'application/json' });
-              return res.end(JSON.stringify({
-                jsonrpc: '2.0',
-                id,
-                result: { content: [{ type: 'text', text: JSON.stringify(out, null, 2) }] }
-              }));
             }
           }
 

@@ -5,22 +5,33 @@ import { AuditLogger } from '../src/audit-logger.js';
 import { MailboxHub } from '../src/mailbox-hub.js';
 import { FileActivityManager } from '../src/file-activity-manager.js';
 import { CollaborationManager } from '../src/collaboration-manager.js';
+import { PresenceManager } from '../src/presence-manager.js';
+import { ProjectController } from '../src/project-controller.js';
+import { PermissionGuard } from '../src/permission-guard.js';
+import { GitController } from '../src/git-controller.js';
+import { AgentRunner } from '../src/agent-runner.js';
+import { CacheManager } from '../src/cache-manager.js';
 
 const args = process.argv.slice(2);
 
 function printHelp() {
   console.log(`
-Agent Bridge CLI - Inter-Agent Terminal Gateway
+Agent Bridge CLI - Inter-Agent Terminal Gateway & Autonomous Worker
 
 Usage:
   bridge ping [--agent <agentId>]
   bridge status
+  bridge presence
+  bridge snapshot [rootPath]
+  bridge worker [--agent <agentId>] [--once]
   bridge send <toAgent> <subject> <content> [--agent <agentId>]
   bridge broadcast <subject> <content> [--agent <agentId>]
-  bridge inbox [--unread] [--agent <agentId>]
-  bridge tasks [--pending] [--agent <agentId>]
-  bridge delegate <toAgent> <title> <instructions> [--agent <agentId>]
+  bridge inbox [--unread] [--compact] [--agent <agentId>]
+  bridge tasks [--pending] [--compact] [--agent <agentId>]
+  bridge delegate <toAgent> <title> <instructions> [--agent <agentId>] [--priority <p>]
+  bridge claim-task [--agent <agentId>]
   bridge complete-task <taskId> <result> [--agent <agentId>]
+  bridge patch <filePath> <targetContent> <replacementContent> [--agent <agentId>]
   bridge activity-start <filePath> [activityType] [--agent <agentId>]
   bridge activity-stop <filePath> [--agent <agentId>]
   bridge activity-list
@@ -51,9 +62,14 @@ if (!command || command === 'help' || command === '--help' || command === '-h') 
 }
 
 const logger = new AuditLogger();
+const guard = new PermissionGuard();
 const mailbox = new MailboxHub(logger);
 const activityManager = new FileActivityManager(logger);
 const collabManager = new CollaborationManager(logger);
+const presence = new PresenceManager(logger);
+const cache = new CacheManager();
+const git = new GitController(guard, logger);
+const controller = new ProjectController(guard, logger, undefined, activityManager, cache, git);
 
 try {
   switch (command) {
@@ -74,10 +90,78 @@ try {
     case 'discover': {
       console.log(JSON.stringify({
         registeredAgents: CONFIG.AGENT_IDENTITIES,
+        liveAgents: presence.listAgents(),
         currentAgent: agentId,
         ziaWriteLocked: CONFIG.ZIA_WRITE_LOCKED,
         allowedRoots: CONFIG.ALLOWED_ROOTS
       }, null, 2));
+      break;
+    }
+
+    case 'presence': {
+      const live = presence.listAgents();
+      console.log(`Live Agent Presence (${live.length} registered):`);
+      live.forEach(a => {
+        const status = a.connected ? `ONLINE [${a.state}]` : 'OFFLINE';
+        console.log(`  ${a.agentId.padEnd(18)} : ${status} (PID: ${a.pid || '-'}, transport: ${a.transport}, last: ${a.lastHeartbeat})`);
+      });
+      break;
+    }
+
+    case 'worker': {
+      const runOnce = filteredArgs.includes('--once');
+      console.log(`🚀 Starting Autonomous Agent Worker for [${agentId}] (runOnce: ${runOnce})...`);
+      const runner = new AgentRunner({
+        agentId,
+        mailboxHub: mailbox,
+        presenceManager: presence,
+        projectController: controller,
+        gitController: git
+      });
+
+      runner.on('processingTask', (task) => {
+        console.log(`⚡ [${agentId}] Processing task [${task.id}]: "${task.title}"`);
+      });
+
+      runner.on('taskCompleted', ({ task, executionMs }) => {
+        console.log(`✅ [${agentId}] Completed task [${task.id}] in ${executionMs}ms`);
+        if (runOnce) {
+          runner.stop();
+          process.exit(0);
+        }
+      });
+
+      runner.on('taskFailed', ({ task, error }) => {
+        console.error(`❌ [${agentId}] Task [${task.id}] failed:`, error);
+        if (runOnce) {
+          runner.stop();
+          process.exit(1);
+        }
+      });
+
+      runner.start();
+
+      process.on('SIGINT', () => {
+        console.log(`\nStopping worker for [${agentId}]...`);
+        runner.stop();
+        process.exit(0);
+      });
+      process.on('SIGTERM', () => {
+        runner.stop();
+        process.exit(0);
+      });
+
+      if (runOnce) {
+        // Trigger poll immediately
+        runner.wakeUp();
+      }
+      break;
+    }
+
+    case 'snapshot': {
+      const target = filteredArgs[1] || CONFIG.BRIDGE_ROOT;
+      const snap = await controller.projectSnapshot(target, agentId);
+      console.log(JSON.stringify(snap, null, 2));
       break;
     }
 
@@ -109,7 +193,8 @@ try {
 
     case 'inbox': {
       const unreadOnly = filteredArgs.includes('--unread');
-      const msgs = mailbox.getInbox({ agentId, unreadOnly });
+      const compact = filteredArgs.includes('--compact');
+      const msgs = mailbox.getInbox({ agentId, unreadOnly, compact });
       if (msgs.length === 0) {
         console.log(`No ${unreadOnly ? 'unread ' : ''}messages for ${agentId}.`);
       } else {
@@ -118,7 +203,7 @@ try {
           const status = m.read_at ? 'READ' : 'UNREAD';
           console.log(`\n  [${m.id}] ${m.timestamp} (${status})`);
           console.log(`  From: ${m.from_agent} | Subject: ${m.subject}`);
-          console.log(`  Content: ${m.content}`);
+          if (!compact) console.log(`  Content: ${m.content}`);
         });
       }
       break;
@@ -126,20 +211,17 @@ try {
 
     case 'tasks': {
       const pendingOnly = filteredArgs.includes('--pending');
-      let query = `SELECT * FROM tasks WHERE to_agent = ?`;
-      if (pendingOnly) {
-        query += ` AND status IN ('pending', 'running')`;
-      }
-      query += ` ORDER BY created_at DESC`;
-      const tasks = logger.db.prepare(query).all(agentId);
+      const compact = filteredArgs.includes('--compact');
+      const statusFilter = pendingOnly ? 'pending' : null;
+      const tasks = mailbox.listTasks({ agentId, status: statusFilter, compact });
       if (tasks.length === 0) {
         console.log(`No ${pendingOnly ? 'pending ' : ''}tasks for ${agentId}.`);
       } else {
         console.log(`📋 Tasks for ${agentId} (${tasks.length} task(s)):`);
         tasks.forEach(t => {
-          console.log(`\n  [${t.id}] Status: ${t.status.toUpperCase()}`);
-          console.log(`  From: ${t.from_agent} | Title: ${t.title}`);
-          console.log(`  Instructions: ${t.instructions}`);
+          console.log(`\n  [${t.id}] Status: ${t.status.toUpperCase()} | Priority: ${t.priority}`);
+          console.log(`  From: ${t.creator || t.from_agent} | Title: ${t.title}`);
+          if (t.instructions) console.log(`  Instructions: ${t.instructions}`);
           if (t.result) console.log(`  Result: ${t.result}`);
         });
       }
@@ -165,6 +247,16 @@ try {
       break;
     }
 
+    case 'claim-task': {
+      const task = mailbox.claimNextTask(agentId);
+      if (!task) {
+        console.log(`No pending tasks available for ${agentId}.`);
+      } else {
+        console.log(`⚡ Claimed task [${task.id}]:`, task);
+      }
+      break;
+    }
+
     case 'complete-task': {
       const taskId = filteredArgs[1];
       const result = filteredArgs.slice(2).join(' ');
@@ -178,6 +270,19 @@ try {
         result
       });
       console.log(`✅ Task [${taskId}] marked completed:`, completed);
+      break;
+    }
+
+    case 'patch': {
+      const filePath = filteredArgs[1];
+      const targetContent = filteredArgs[2];
+      const replacementContent = filteredArgs[3];
+      if (!filePath || !targetContent || replacementContent === undefined) {
+        console.error('Error: bridge patch requires <filePath> <targetContent> <replacementContent>');
+        process.exit(1);
+      }
+      const res = await controller.applyPatch(filePath, agentId, { targetContent, replacementContent });
+      console.log(`✅ Patch result:`, res);
       break;
     }
 
