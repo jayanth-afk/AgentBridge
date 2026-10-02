@@ -5,23 +5,23 @@ export class PermissionGuard {
   constructor(config = CONFIG) {
     this.config = config;
 
-    // Granular per-agent policies
+    // Granular per-agent policies: autonomous git push authorized
     this.agentPolicies = {
       'chatgpt-desktop': {
-        allowedPermissions: ['READ', 'SEARCH', 'WRITE', 'CREATE', 'EDIT', 'DELETE', 'EXECUTE', 'GIT_READ', 'MESSAGE', 'DELEGATE'],
-        requiresHumanApproval: ['DESTRUCTIVE', 'PUSH', 'MERGE', 'NETWORK']
+        allowedPermissions: ['READ', 'SEARCH', 'WRITE', 'CREATE', 'EDIT', 'DELETE', 'EXECUTE', 'GIT_READ', 'GIT_WRITE', 'PUSH', 'MESSAGE', 'DELEGATE'],
+        requiresHumanApproval: ['DESTRUCTIVE', 'MERGE', 'NETWORK']
       },
       'claude-desktop': {
-        allowedPermissions: ['READ', 'SEARCH', 'WRITE', 'CREATE', 'EDIT', 'DELETE', 'EXECUTE', 'GIT_READ', 'MESSAGE', 'DELEGATE'],
-        requiresHumanApproval: ['DESTRUCTIVE', 'PUSH', 'MERGE', 'NETWORK']
+        allowedPermissions: ['READ', 'SEARCH', 'WRITE', 'CREATE', 'EDIT', 'DELETE', 'EXECUTE', 'GIT_READ', 'GIT_WRITE', 'PUSH', 'MESSAGE', 'DELEGATE'],
+        requiresHumanApproval: ['DESTRUCTIVE', 'MERGE', 'NETWORK']
       },
       'antigravity-ide': {
-        allowedPermissions: ['READ', 'SEARCH', 'WRITE', 'CREATE', 'EDIT', 'DELETE', 'EXECUTE', 'GIT_READ', 'GIT_WRITE', 'MESSAGE', 'DELEGATE'],
-        requiresHumanApproval: ['DESTRUCTIVE', 'PUSH', 'MERGE']
+        allowedPermissions: ['READ', 'SEARCH', 'WRITE', 'CREATE', 'EDIT', 'DELETE', 'EXECUTE', 'GIT_READ', 'GIT_WRITE', 'PUSH', 'MESSAGE', 'DELEGATE'],
+        requiresHumanApproval: ['DESTRUCTIVE', 'MERGE']
       },
       'freebuff': {
-        allowedPermissions: ['READ', 'SEARCH', 'WRITE', 'CREATE', 'EDIT', 'DELETE', 'EXECUTE', 'GIT_READ', 'GIT_WRITE', 'MESSAGE', 'DELEGATE'],
-        requiresHumanApproval: ['DESTRUCTIVE', 'PUSH', 'MERGE']
+        allowedPermissions: ['READ', 'SEARCH', 'WRITE', 'CREATE', 'EDIT', 'DELETE', 'EXECUTE', 'GIT_READ', 'GIT_WRITE', 'PUSH', 'MESSAGE', 'DELEGATE'],
+        requiresHumanApproval: ['DESTRUCTIVE', 'MERGE']
       },
       'system': {
         allowedPermissions: ['READ', 'SEARCH', 'WRITE', 'CREATE', 'EDIT', 'DELETE', 'EXECUTE', 'GIT_READ', 'GIT_WRITE', 'MESSAGE', 'DELEGATE', 'DESTRUCTIVE', 'PUSH'],

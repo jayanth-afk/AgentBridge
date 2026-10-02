@@ -65,5 +65,9 @@ export const CONFIG = {
     /:>{1,2}/,
     /\|\s*bash/i,
     /\|\s*sh/i
-  ]
+  ],
+
+  // Autonomous Git settings
+  GIT_PROTECTED_BRANCHES: ['main', 'master', 'production', 'release'],
+  ALLOW_AUTONOMOUS_PROTECTED_PUSH: false
 };

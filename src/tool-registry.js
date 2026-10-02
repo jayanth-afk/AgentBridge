@@ -410,6 +410,38 @@ export class ToolRegistry {
     });
 
     this.registerTool({
+      name: 'bridge_git_delete_branch',
+      description: 'Delete a local Git branch.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          repoPath: { type: 'string' },
+          branchName: { type: 'string' },
+          force: { type: 'boolean' },
+          agentId: { type: 'string' }
+        },
+        required: ['repoPath', 'branchName', 'agentId']
+      },
+      handler: async (args, ctx) => ctx.git.deleteBranch(args.repoPath, args.agentId, args.branchName, args.force)
+    });
+
+    this.registerTool({
+      name: 'bridge_git_stage',
+      description: 'Stage files for Git commit.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          repoPath: { type: 'string' },
+          files: { type: 'array', items: { type: 'string' } },
+          stageAll: { type: 'boolean' },
+          agentId: { type: 'string' }
+        },
+        required: ['repoPath', 'agentId']
+      },
+      handler: async (args, ctx) => ctx.git.stage(args.repoPath, args.agentId, args.files, args.stageAll)
+    });
+
+    this.registerTool({
       name: 'bridge_git_commit',
       description: 'Stage files and create a structured Git commit with author metadata.',
       inputSchema: {
@@ -427,27 +459,94 @@ export class ToolRegistry {
     });
 
     this.registerTool({
+      name: 'bridge_git_log',
+      description: 'View compact Git commit history.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          repoPath: { type: 'string' },
+          maxCommits: { type: 'number' },
+          agentId: { type: 'string' }
+        },
+        required: ['repoPath', 'agentId']
+      },
+      handler: async (args, ctx) => ctx.git.getLog(args.repoPath, args.agentId, args.maxCommits)
+    });
+
+    this.registerTool({
+      name: 'bridge_git_diff',
+      description: 'View concise Git diff summary.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          repoPath: { type: 'string' },
+          staged: { type: 'boolean' },
+          maxLines: { type: 'number' },
+          agentId: { type: 'string' }
+        },
+        required: ['repoPath', 'agentId']
+      },
+      handler: async (args, ctx) => ctx.git.getDiff(args.repoPath, args.agentId, args.staged, args.maxLines)
+    });
+
+    this.registerTool({
       name: 'bridge_git_push',
-      description: 'Git push to remote with explicit multi-point safeguards and protected branch safeguards.',
+      description: 'Autonomous Git push to remote with repo, remote, branch, and commit validation. Does NOT require human confirmation.',
       inputSchema: {
         type: 'object',
         properties: {
           repoPath: { type: 'string' },
           remote: { type: 'string', description: 'Remote name (default origin)' },
           branch: { type: 'string', description: 'Target branch (defaults to current)' },
-          explicitConfirmation: { type: 'boolean', description: 'MUST be true to authorize push' },
-          allowProtected: { type: 'boolean', description: 'MUST be true if pushing to main/master/production' },
+          allowProtected: { type: 'boolean', description: 'Allow pushing to main/master/production if policy requires' },
           dryRun: { type: 'boolean' },
+          verbose: { type: 'boolean', description: 'Return full git command output' },
           agentId: { type: 'string' }
         },
-        required: ['repoPath', 'explicitConfirmation', 'agentId']
+        required: ['repoPath', 'agentId']
       },
       handler: async (args, ctx) => ctx.git.push(args.repoPath, args.agentId, {
         remote: args.remote,
         branch: args.branch,
-        explicitConfirmation: args.explicitConfirmation,
         allowProtected: args.allowProtected,
-        dryRun: args.dryRun
+        dryRun: args.dryRun,
+        verbose: args.verbose
+      })
+    });
+
+    this.registerTool({
+      name: 'bridge_git_pull',
+      description: 'Pull latest changes from remote.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          repoPath: { type: 'string' },
+          remote: { type: 'string' },
+          branch: { type: 'string' },
+          agentId: { type: 'string' }
+        },
+        required: ['repoPath', 'agentId']
+      },
+      handler: async (args, ctx) => ctx.git.pull(args.repoPath, args.agentId, {
+        remote: args.remote,
+        branch: args.branch
+      })
+    });
+
+    this.registerTool({
+      name: 'bridge_git_fetch',
+      description: 'Fetch latest references from remote.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          repoPath: { type: 'string' },
+          remote: { type: 'string' },
+          agentId: { type: 'string' }
+        },
+        required: ['repoPath', 'agentId']
+      },
+      handler: async (args, ctx) => ctx.git.fetch(args.repoPath, args.agentId, {
+        remote: args.remote
       })
     });
 
