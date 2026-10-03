@@ -156,7 +156,9 @@ test('ModelOrchestrator Autonomous Multi-Hop & Delegation Suite', async (t) => {
     assert.ok(res.latencyMs > 0);
   });
 
-  await t.test('3. Autonomous Multi-Hop Loop with Live Model Turn', async () => {
+  // Hop 3 drives the real Claude Desktop model, so it needs live Claude quota and
+  // is gated like the other live tests. Run with: AGENT_BRIDGE_LIVE_MODELS=1 npm test
+  await t.test('3. Autonomous Multi-Hop Loop with Live Model Turn', { skip: process.env.AGENT_BRIDGE_LIVE_MODELS === '1' ? false : 'requires live Claude quota; set AGENT_BRIDGE_LIVE_MODELS=1' }, async () => {
     const hopRecords = [];
 
     // Hop 1: ChatGPT starts task asking Antigravity for a math token

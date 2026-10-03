@@ -143,7 +143,8 @@ export class DesktopAgentWorker extends EventEmitter {
       this.status = DesktopAgentWorkerStatus.PROCESSING;
       const result = await this.session.send({ text: request.question || '', requestId });
 
-      if (result.success && result.response) {
+      const hasResponse = Boolean(result.success) && typeof result.response === 'string' && result.response.trim().length > 0;
+      if (hasResponse) {
         this._settle(request, { status: 'completed', result: result.response });
         this.delivered.add(requestId);
         this.stats.delivered++;
@@ -152,7 +153,7 @@ export class DesktopAgentWorker extends EventEmitter {
         return { handled: true, ...payload };
       }
 
-      const error = result.error || result.status || 'MODEL_RESPONSE_FAILED';
+      const error = result.error || result.status || (result.response === '' ? 'MODEL_RESPONSE_EMPTY' : 'MODEL_RESPONSE_FAILED');
       this._settle(request, { status: 'failed', error });
       this.stats.failed++;
       this.emit('failed', { requestId, error, status: result.status });

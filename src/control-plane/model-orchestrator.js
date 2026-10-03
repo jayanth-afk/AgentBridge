@@ -163,8 +163,23 @@ export class ModelOrchestrator extends EventEmitter {
           };
         }
 
+        // Never fabricate a response. A Claude turn is only successful when a
+        // real correlated model response is present; otherwise fail honestly.
+        const responseText = claudeRes.response || claudeRes.result || null;
+        if (!responseText) {
+          const noRespError = claudeRes.status || claudeRes.error || 'CLAUDE_NO_MODEL_RESPONSE';
+          envelope.transition(RequestState.FAILED, { error: noRespError });
+          return {
+            success: false,
+            requestId,
+            toAgent,
+            transport: claudeRes.transport || 'claude-session',
+            error: noRespError,
+            latencyMs: Date.now() - startMs,
+            state: envelope.state
+          };
+        }
         envelope.transition(RequestState.ASSISTANT_COMPLETED);
-        const responseText = claudeRes.response || claudeRes.result || `[Response from Claude for ${requestId}]`;
         const correlated = this.correlator.correlateTurn({
           rawResponse: responseText,
           expectedRequestId: requestId

@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { ModelOrchestrator } from '../src/control-plane/model-orchestrator.js';
 import { RequestState } from '../src/protocol/envelope.js';
 
-test('Definitive 5-Hop Connected Real-Model Autonomous Loop Suite [LIVE_MODEL]', async (t) => {
+// Live multi-hop across real models. Requires available Claude/ChatGPT quota, so it
+// is gated like the other live tests. Run with: AGENT_BRIDGE_LIVE_MODELS=1 npm test
+test('Definitive 5-Hop Connected Real-Model Autonomous Loop Suite [LIVE_MODEL]', { skip: process.env.AGENT_BRIDGE_LIVE_MODELS === '1' ? false : 'requires live model quota; set AGENT_BRIDGE_LIVE_MODELS=1' }, async (t) => {
   const orchestrator = new ModelOrchestrator();
 
   await t.test('Definitive Multi-Hop: ChatGPT -> Claude -> Antigravity -> Claude -> ChatGPT', async () => {

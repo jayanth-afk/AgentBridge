@@ -140,6 +140,55 @@ test('Claude Desktop Autonomous Delivery Suite', async (t) => {
     try { fs.unlinkSync(TEST_DB); } catch {}
   });
 
+  await t.test('7. Empty/malformed model response is a failure (never completed)', async () => {
+    if (fs.existsSync(TEST_DB)) fs.unlinkSync(TEST_DB);
+    const logger = new AuditLogger(TEST_DB);
+    const eventBus = new EventBus(logger);
+    const mailbox = new MailboxHub(logger, new TaskManager(logger), eventBus);
+
+    const worker = new ClaudeDesktopWorker({
+      agentId: 'claude-desktop', mailboxHub: mailbox, eventBus,
+      session: { async send() { return { success: true, status: 'COMPLETED', response: '   ' }; }, async capabilities() { return {}; } }
+    });
+    await worker.start({ recoverPending: false });
+
+    const res = await mailbox.askAgent({ fromAgent: 'chatgpt-desktop', toAgent: 'claude-desktop', question: 'malformed', timeoutMs: 6000 });
+    assert.equal(res.status, 'failed');
+    assert.equal(mailbox.getRequest(res.requestId).response, null);
+
+    worker.stop(); eventBus.close();
+    try { fs.unlinkSync(TEST_DB); } catch {}
+  });
+
+  await t.test('8. Late response is persisted after the caller already timed out', async () => {
+    if (fs.existsSync(TEST_DB)) fs.unlinkSync(TEST_DB);
+    const logger = new AuditLogger(TEST_DB);
+    const eventBus = new EventBus(logger);
+    const mailbox = new MailboxHub(logger, new TaskManager(logger), eventBus);
+
+    const worker = new ClaudeDesktopWorker({
+      agentId: 'claude-desktop', mailboxHub: mailbox, eventBus,
+      session: {
+        async send({ requestId }) { await new Promise(r => setTimeout(r, 900)); return { success: true, status: 'COMPLETED', response: 'late:' + requestId }; },
+        async capabilities() { return {}; }
+      }
+    });
+    await worker.start({ recoverPending: false });
+
+    // Caller gives up after 250ms, but the model turn finishes at ~900ms.
+    const res = await mailbox.askAgent({ fromAgent: 'chatgpt-desktop', toAgent: 'claude-desktop', question: 'slow', timeoutMs: 250 });
+    assert.equal(res.status, 'timeout');
+
+    // Wait for the worker to finish and persist the late response.
+    await new Promise(r => setTimeout(r, 1200));
+    const row = mailbox.getRequest(res.requestId);
+    assert.equal(row.status, 'completed');
+    assert.match(row.response, /late:/);
+
+    worker.stop(); eventBus.close();
+    try { fs.unlinkSync(TEST_DB); } catch {}
+  });
+
   await t.test('5. Both participants share the same generic worker contract', async () => {
     assert.ok(new ChatGptDesktopWorker({ session: { capabilities: async () => ({}), send: async () => ({}) } }) instanceof DesktopAgentWorker);
     assert.ok(new ClaudeDesktopWorker({ session: { capabilities: async () => ({}), send: async () => ({}) } }) instanceof DesktopAgentWorker);
