@@ -79,16 +79,16 @@ export class ToolRegistry {
           agentId: caller,
           action: 'bridge_ping',
           status: 'success',
-          details: { responseToken: 'CHATGPT_BRIDGE_REAL_TEST_7F31' }
+          details: { responseToken: CONFIG.RESPONSE_TOKEN }
         });
         return {
           status: 'OK',
-          token: 'CHATGPT_BRIDGE_REAL_TEST_7F31',
+          token: CONFIG.RESPONSE_TOKEN,
           timestamp,
           caller,
-          environment: 'Jayanth\'s Mac (Apple Silicon arm64)',
+          environment: CONFIG.ENVIRONMENT_LABEL,
           bridgePath: CONFIG.BRIDGE_ROOT,
-          message: 'CHATGPT_BRIDGE_REAL_TEST_7F31: Agent Bridge is operational on Jayanth\'s Mac.'
+          message: `${CONFIG.RESPONSE_TOKEN}: Agent Bridge is operational on ${CONFIG.ENVIRONMENT_LABEL}.`
         };
       }
     });

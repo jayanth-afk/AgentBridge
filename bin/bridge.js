@@ -76,7 +76,8 @@ try {
     case 'ping': {
       console.log(JSON.stringify({
         status: 'OK',
-        token: 'CHATGPT_BRIDGE_REAL_TEST_7F31',
+        token: CONFIG.RESPONSE_TOKEN,
+        environment: CONFIG.ENVIRONMENT_LABEL,
         agent: agentId,
         bridgePath: CONFIG.BRIDGE_ROOT,
         ziaWriteLocked: CONFIG.ZIA_WRITE_LOCKED,

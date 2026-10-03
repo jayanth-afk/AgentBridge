@@ -47,7 +47,7 @@ test('Complete 15-Point Connected Agent Integration Suite', async (t) => {
   const chatgptTestFile = path.join(TEST_WORKSPACE, 'chatgpt_file.txt');
   const sharedFile = path.join(TEST_WORKSPACE, 'shared_conflict_file.txt');
 
-  await t.test('TEST 0: bridge_ping returns unmistakable token CHATGPT_BRIDGE_REAL_TEST_7F31', async () => {
+  await t.test('TEST 0: bridge_ping returns the configured liveness token', async () => {
     // Test HTTP endpoint call
     const res = await fetch('http://127.0.0.1:8999/mcp', {
       method: 'POST',
@@ -64,7 +64,7 @@ test('Complete 15-Point Connected Agent Integration Suite', async (t) => {
     });
     assert.strictEqual(res.status, 200);
     const data = await res.json();
-    assert.ok(data.result.content[0].text.includes('CHATGPT_BRIDGE_REAL_TEST_7F31'));
+    assert.ok(data.result.content[0].text.includes(CONFIG.RESPONSE_TOKEN));
   });
 
   await t.test('TEST 1: Claude Desktop -> bridge -> read disposable file', async () => {

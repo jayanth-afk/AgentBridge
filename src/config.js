@@ -1,3 +1,4 @@
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -27,6 +28,16 @@ export const CONFIG = {
 
   // No Agent-Bridge-level path denylist. OS-level permissions/TCC remain authoritative.
   FORBIDDEN_PATH_PATTERNS: [],
+
+  // Liveness beacon returned by `bridge ping` / the bridge_ping tool so callers can
+  // confirm they reached a real bridge. Override per-deployment via env; never commit
+  // a site-specific literal here.
+  RESPONSE_TOKEN: process.env.AGENT_BRIDGE_RESPONSE_TOKEN || 'AGENT_BRIDGE_ALIVE',
+
+  // Human-readable environment label. Derived from the running host rather than
+  // hardcoded, and does not include the hostname or username.
+  ENVIRONMENT_LABEL:
+    process.env.AGENT_BRIDGE_ENVIRONMENT || `${os.platform()} ${os.arch()}`,
 
   // Known agent identities
   AGENT_IDENTITIES: [

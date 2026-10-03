@@ -1,4 +1,28 @@
 node_modules/
-data/*.sqlite*
 .DS_Store
+
+# Runtime data: sqlite databases, browser profiles, session state.
+# Ignored wholesale because browser profiles contain cookies/session tokens.
+data/
+
+# Compiled native helper binary
 tools/macos-accessibility-helper/bridge-ax-helper
+
+# Local Freebuff state (also in .git/info/exclude, but that does not travel with the repo)
+.freebuff/
+
+# Environment / secret files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+id_rsa
+id_ed25519
+.netrc
+.npmrc
+.aws/
+.ssh/
