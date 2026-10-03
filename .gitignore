@@ -1,4 +1,7 @@
 node_modules/
 data/*.sqlite*
+data/*.json
+data/*.notify
+data/browser-profiles/
 .DS_Store
 tools/macos-accessibility-helper/bridge-ax-helper
