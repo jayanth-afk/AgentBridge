@@ -1,4 +1,6 @@
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import path from 'node:path';
 
 /**
  * ConversationRegistry:
@@ -10,6 +12,40 @@ export class ConversationRegistry extends EventEmitter {
     super();
     this.options = options;
     this.conversations = new Map(); // conversationId -> record
+    // Persistence is opt-in: pass persistPath to enable. Default null = in-memory only.
+    this.persistPath = options.persistPath !== undefined ? options.persistPath : null;
+    this._loadPersisted();
+  }
+
+  _loadPersisted() {
+    if (!this.persistPath) return;
+    try {
+      if (fs.existsSync(this.persistPath)) {
+        const raw = fs.readFileSync(this.persistPath, 'utf8');
+        const list = JSON.parse(raw);
+        if (Array.isArray(list)) {
+          for (const item of list) {
+            if (item && item.conversationId) {
+              this.conversations.set(item.conversationId, item);
+            }
+          }
+        }
+      }
+    } catch {
+      // Ignore initial load error
+    }
+  }
+
+  _savePersisted() {
+    if (!this.persistPath) return;
+    try {
+      const dir = path.dirname(this.persistPath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      const data = JSON.stringify(Array.from(this.conversations.values()), null, 2);
+      fs.writeFileSync(this.persistPath, data, 'utf8');
+    } catch {
+      // Ignore background persist error
+    }
   }
 
   /**
@@ -46,6 +82,7 @@ export class ConversationRegistry extends EventEmitter {
     };
 
     this.conversations.set(conversationId, record);
+    this._savePersisted();
     this.emit('conversation_created', record);
     return record;
   }
@@ -78,6 +115,7 @@ export class ConversationRegistry extends EventEmitter {
     if (updates.metadata) Object.assign(record.metadata, updates.metadata);
 
     record.lastActivity = new Date().toISOString();
+    this._savePersisted();
     this.emit('conversation_updated', record);
     return record;
   }
@@ -95,6 +133,7 @@ export class ConversationRegistry extends EventEmitter {
     record.turnCount++;
     record.lastLatencyMs = latencyMs;
 
+    this._savePersisted();
     this.emit('activity', { conversationId, record });
     return record;
   }
@@ -109,13 +148,17 @@ export class ConversationRegistry extends EventEmitter {
     record.status = 'invalidated';
     record.invalidationReason = reason;
     record.health = 'stale';
+    this._savePersisted();
     this.emit('conversation_invalidated', { conversationId, reason });
     return record;
   }
 
   detach(conversationId) {
     const had = this.conversations.delete(conversationId);
-    if (had) this.emit('conversation_detached', conversationId);
+    if (had) {
+      this._savePersisted();
+      this.emit('conversation_detached', conversationId);
+    }
     return had;
   }
 

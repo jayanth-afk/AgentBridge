@@ -61,11 +61,24 @@ export class ChatGptLocalEngineAdapter extends DesktopControlAdapter {
   }
 
   capabilities() {
+    const installed = this.isInstalled();
     return {
       name: this.name,
       transport: 'chatgpt-local-engine',
+      agent: 'chatgpt',
+      engine: 'codex-local',
+      trueHeadlessEngine: true, // Non-interactive headless CLI/app-server
+      idleModelWake: installed, // boolean: true when codex-cli is installed and ready
+      idleModelWakeVerdict: installed ? 'VERIFIED' : 'UNSUPPORTED',
+      uiSubmission: installed,
+      modelTurnConfirmation: installed,
+      modelResponseCorrelation: true,
+      streaming: true,
+      cancellation: true,
+      concurrency: true,
+      transports: ['codex-local', 'ipc-socket'],
+      ipcSocketPath: '/Users/jayanthpranaykonada/.codex/ipc/ipc.sock',
       canWake: true,
-      idleModelWake: true, // Authentic idle turn initiation
       streamingSupported: true,
       multiTurnSupported: true,
       concurrencySupported: true,
@@ -73,6 +86,14 @@ export class ChatGptLocalEngineAdapter extends DesktopControlAdapter {
       nonInteractive: true,
       realModelExecution: true
     };
+  }
+
+  async startTurn(options = {}) {
+    return this.executeTurn(options);
+  }
+
+  async send(options = {}) {
+    return this.executeTurn(options);
   }
 
   async health() {

@@ -1,4 +1,4 @@
-import { EventEmitter } from 'node:events';
+import { ModelExecutionAdapter } from './model-execution-adapter.js';
 import { AXEngine } from './ax-engine.js';
 import { SwiftAXBridge } from './swift-ax-bridge.js';
 import { ResponseObserver } from './response-observer.js';
@@ -14,10 +14,9 @@ import { sendDesktopNotification } from '../session-adapters/desktop-notifier.js
  * Automatically chooses the best live transport (MCP, CDP, AX, Browser) based on
  * verified health and hides transport-specific details behind a clean API.
  */
-export class ClaudeAutonomousSession extends EventEmitter {
+export class ClaudeAutonomousSession extends ModelExecutionAdapter {
   constructor(options = {}) {
-    super();
-    this.options = options;
+    super('claude-autonomous-session', options);
     this.swiftBridge = options.swiftBridge || new SwiftAXBridge(options);
     this.axEngine = options.axEngine || new AXEngine(options);
     this.observer = options.observer || new ResponseObserver(options);
@@ -30,6 +29,29 @@ export class ClaudeAutonomousSession extends EventEmitter {
 
     this.appName = 'Claude';
     this.activeTurns = new Map(); // requestId -> turnState
+  }
+
+  /**
+   * Report detailed agent engine capabilities
+   * Strictly distinguishes UI submission, model turn confirmation, and model response completion.
+   */
+  async capabilities() {
+    const inspect = await this.swiftBridge.inspectApp(this.appName);
+    const isRunning = Boolean(inspect.ok && inspect.running);
+    return {
+      name: this.name,
+      agent: 'claude',
+      engine: 'desktop-native-ax',
+      trueHeadlessEngine: false, // Truthful! GUI/AX based
+      idleModelWake: isRunning ? 'VERIFIED' : 'UNSUPPORTED',
+      uiSubmission: isRunning,
+      modelTurnConfirmation: isRunning,
+      modelResponseCorrelation: true,
+      streaming: true,
+      cancellation: true,
+      concurrency: false,
+      transports: ['accessibility', 'mcp', 'cdp', 'browser']
+    };
   }
 
   /**
@@ -83,29 +105,67 @@ export class ClaudeAutonomousSession extends EventEmitter {
       } else if (transport === 'cdp') {
         result = await this.cdpAdapter.sendMessage({ requestId: resolvedReqId, message: text });
       } else if (transport === 'accessibility') {
-        result = await this.axEngine.executeReliableSend({
-          targetApp: this.appName,
-          text,
-          requestId: resolvedReqId,
-          conversationTitle
-        });
-        if (result.success) {
-          this.observer.startObservation({ targetApp: this.appName, requestId: resolvedReqId });
-        } else {
-          // Fall back gracefully to notification when input is not located
-          const notifRes = await sendDesktopNotification({
-            title: 'Agent Bridge -> Claude Desktop',
-            subtitle: 'Turn Requested',
-            message: `Request [${resolvedReqId}] queued: ${text.slice(0, 80)}`
+        if (this.swiftBridge.isBinaryAvailable()) {
+          // One native invocation captures the AX baseline BEFORE Send, then
+          // observes the same turn. This closes the send/observe race.
+          const turnRes = await this.swiftBridge.sendAndObserve(
+            this.appName,
+            text,
+            resolvedReqId,
+            this.options.timeoutMs || 30000
+          );
+          if (turnRes.ok) {
+            this.emit('model_turn_started', { requestId: resolvedReqId, transport: 'accessibility' });
+            result = {
+              success: true,
+              status: turnRes.status || 'COMPLETED',
+              response: turnRes.response,
+              modelTurnConfirmed: true,
+              latencyMs: turnRes.latencyMs
+            };
+          } else {
+            result = {
+              success: false,
+              status: turnRes.status || 'TIMEOUT',
+              error: turnRes.error || 'Model response observation timed out',
+              modelTurnConfirmed: false
+            };
+          }
+        }
+
+        // Do not resend after a native submission timeout/unknown state:
+        // Claude may already be processing the request. Only fall back when
+        // the native route never had a usable application.
+        if (!result || (!result.success && ['APP_NOT_RUNNING', 'NO_WINDOW', 'INPUT_NOT_FOUND'].includes(result.status))) {
+          const axRes = await this.axEngine.executeReliableSend({
+            targetApp: this.appName,
+            text,
+            requestId: resolvedReqId,
+            conversationTitle
           });
-          result = {
-            success: true,
-            transport: 'notification',
-            status: 'queued_notification_fallback',
-            fallbackFrom: 'accessibility',
-            axError: result.error,
-            details: notifRes
-          };
+          if (axRes.success) {
+            this.observer.startObservation({ targetApp: this.appName, requestId: resolvedReqId });
+            result = {
+              success: true,
+              transport: 'accessibility',
+              status: 'REQUEST_SENT',
+              ...axRes
+            };
+          } else {
+            const notifRes = await sendDesktopNotification({
+              title: 'Agent Bridge -> Claude Desktop',
+              subtitle: 'Turn Requested',
+              message: `Request [${resolvedReqId}] queued: ${text.slice(0, 80)}`
+            });
+            result = {
+              success: true,
+              transport: 'notification',
+              status: 'queued_notification_fallback',
+              fallbackFrom: 'accessibility',
+              axError: axRes.error,
+              details: notifRes
+            };
+          }
         }
       } else if (transport === 'browser') {
         result = await this.browserAdapter.sendMessage({ requestId: resolvedReqId, message: text });

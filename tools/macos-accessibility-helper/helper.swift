@@ -9,6 +9,7 @@ struct RequestOp: Codable {
     let appName: String?
     let bundleId: String?
     let value: String?
+    let text: String?
     let requestId: String?
     let pid: pid_t?
     let identifier: String?
@@ -18,6 +19,26 @@ struct RequestOp: Codable {
     var targetApp: String {
         return app ?? appName ?? "Claude"
     }
+
+    var payloadText: String {
+        return text ?? value ?? ""
+    }
+}
+
+struct SendTurnResponse: Codable {
+    let ok: Bool
+    let status: String
+    let requestId: String?
+    let error: String?
+}
+
+struct ObserveTurnResponse: Codable {
+    let ok: Bool
+    let status: String
+    let requestId: String?
+    let response: String?
+    let latencyMs: Double?
+    let error: String?
 }
 
 struct WindowInfo: Codable {
@@ -166,6 +187,10 @@ func inspectElements(name: String) -> ElementsResponse {
 
     let pid = app.processIdentifier
     let axApp = AXUIElementCreateApplication(pid)
+    // Electron/WebKit applications may expose only window chrome until enhanced
+    // accessibility is enabled. This remains within the user-authorized AX API.
+    _ = AXUIElementSetAttributeValue(axApp, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+    _ = AXUIElementSetAttributeValue(axApp, "AXManualAccessibility" as CFString, kCFBooleanTrue)
 
     var windowsValue: AnyObject?
     guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsValue) == .success,
@@ -176,7 +201,7 @@ func inspectElements(name: String) -> ElementsResponse {
     var elements: [ElementInfo] = []
 
     func walk(_ element: AXUIElement, depth: Int) {
-        if depth > 5 || elements.count >= 80 { return }
+        if depth > 60 || elements.count >= 2000 { return }
 
         var roleVal: AnyObject?
         AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleVal)
@@ -213,7 +238,9 @@ func inspectElements(name: String) -> ElementsResponse {
         }
 
         // Only keep interactable or informative elements
-        if role == "AXTextArea" || role == "AXTextField" || role == "AXButton" || role == "AXStaticText" || role == "AXRow" || (idStr != nil && !idStr!.isEmpty) {
+        if role == "AXTextArea" || role == "AXTextField" || role == "AXButton" ||
+           role == "AXStaticText" || role == "AXHeading" || role == "AXRow" ||
+           role == "AXWebArea" || role == "AXGroup" || (idStr != nil && !idStr!.isEmpty) {
             elements.append(ElementInfo(
                 role: role,
                 subrole: subrole,
@@ -299,6 +326,367 @@ func setupObserver(name: String) -> SimpleResponse {
     return SimpleResponse(ok: true, status: "OBSERVER_ACTIVE", details: "Attached to PID \(pid)")
 }
 
+func sendPromptToClaude(name: String, text: String, requestId: String?) -> SendTurnResponse {
+    guard let app = findAppProcess(name: name) else {
+        return SendTurnResponse(ok: false, status: "APP_NOT_RUNNING", requestId: requestId, error: "Application \(name) is not running")
+    }
+
+    let pid = app.processIdentifier
+    let axApp = AXUIElementCreateApplication(pid)
+    _ = AXUIElementSetAttributeValue(axApp, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+    _ = AXUIElementSetAttributeValue(axApp, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+
+    var winVal: AnyObject?
+    let err = AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &winVal)
+    guard err == .success, let wins = winVal as? [AXUIElement], let win = wins.first else {
+        return SendTurnResponse(ok: false, status: "NO_WINDOW", requestId: requestId, error: "No open window found for \(name)")
+    }
+
+    func findInput(_ el: AXUIElement) -> AXUIElement? {
+        var roleVal: AnyObject?
+        AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleVal)
+        let role = (roleVal as? String) ?? ""
+        if role == "AXTextArea" { return el }
+        var childrenVal: AnyObject?
+        if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenVal) == .success,
+           let children = childrenVal as? [AXUIElement] {
+            for c in children {
+                if let found = findInput(c) { return found }
+            }
+        }
+        return nil
+    }
+
+    func findSendBtn(_ el: AXUIElement) -> AXUIElement? {
+        var descVal: AnyObject?
+        AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &descVal)
+        let desc = (descVal as? String) ?? ""
+        if desc == "Send message" { return el }
+        var childrenVal: AnyObject?
+        if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenVal) == .success,
+           let children = childrenVal as? [AXUIElement] {
+            for c in children {
+                if let found = findSendBtn(c) { return found }
+            }
+        }
+        return nil
+    }
+
+    guard let input = findInput(win) else {
+        return SendTurnResponse(ok: false, status: "INPUT_NOT_FOUND", requestId: requestId, error: "Prompt textarea not found")
+    }
+
+    let setErr = AXUIElementSetAttributeValue(input, kAXValueAttribute as CFString, text as CFTypeRef)
+    guard setErr == .success else {
+        return SendTurnResponse(ok: false, status: "VALUE_SET_FAILED", requestId: requestId, error: "AXError \(setErr.rawValue)")
+    }
+
+    var sendBtn: AXUIElement? = nil
+    for _ in 1...10 {
+        usleep(100_000) // 100ms
+        if let btn = findSendBtn(win) {
+            sendBtn = btn
+            break
+        }
+    }
+
+    guard let btn = sendBtn else {
+        return SendTurnResponse(ok: false, status: "SEND_BUTTON_NOT_FOUND", requestId: requestId, error: "Send button did not become available")
+    }
+
+    let pressErr = AXUIElementPerformAction(btn, kAXPressAction as CFString)
+    guard pressErr == .success else {
+        return SendTurnResponse(ok: false, status: "PRESS_FAILED", requestId: requestId, error: "AXError \(pressErr.rawValue)")
+    }
+
+    return SendTurnResponse(ok: true, status: "SUBMITTED", requestId: requestId, error: nil)
+}
+
+func captureTextSnapshot(name: String) -> [String] {
+    guard let app = findAppProcess(name: name) else { return [] }
+    let pid = app.processIdentifier
+    let axApp = AXUIElementCreateApplication(pid)
+    _ = AXUIElementSetAttributeValue(axApp, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+    _ = AXUIElementSetAttributeValue(axApp, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+
+    var winVal: AnyObject?
+    guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &winVal) == .success,
+          let wins = winVal as? [AXUIElement], let win = wins.first else { return [] }
+
+    var texts: [String] = []
+    func collect(_ el: AXUIElement, depth: Int) {
+        if depth > 20 { return }
+        var roleVal: AnyObject?
+        AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleVal)
+        let role = (roleVal as? String) ?? ""
+        if role == "AXStaticText" || role == "AXHeading" || role == "AXTextArea" || role == "AXTextField" {
+            var valueVal: AnyObject?
+            if AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &valueVal) == .success,
+               let s = valueVal as? String, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                texts.append(s)
+            }
+        }
+        var childrenVal: AnyObject?
+        if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenVal) == .success,
+           let children = childrenVal as? [AXUIElement] {
+            for child in children { collect(child, depth: depth + 1) }
+        }
+    }
+    collect(win, depth: 0)
+    return texts
+}
+
+func extractLatestClaudeResponse(_ raw: String, requestId: String?) -> String? {
+    var source = raw
+    let marker = requestId.map { "[AB:\($0)]" }
+
+    // Prefer the assistant turn that follows this request's correlation marker.
+    if let marker, let markerRange = source.range(of: marker) {
+        source = String(source[markerRange.lowerBound...])
+    }
+
+    // Claude's Electron accessibility tree exposes screen-reader headings
+    // "You said:" and "Claude responded:" around each rendered turn.
+    guard let responseRange = source.range(of: "Claude responded:", options: .caseInsensitive) else {
+        return nil
+    }
+
+    var response = String(source[responseRange.upperBound...])
+
+    let terminators = [
+        "\nYou said:",
+        "\nClaude responded:",
+        "\njust now",
+        "\n1 minute ago",
+        "\n2 minutes ago",
+        "\n3 minutes ago",
+        "\n4 minutes ago",
+        "\n5 minutes ago",
+        "\n10 minutes ago",
+        "\n20 minutes ago",
+        "\n30 minutes ago",
+        "\n1 hour ago",
+        "\n2 hours ago",
+        "\n3 hours ago",
+        "\nYesterday",
+        "\nAuto is on."
+    ]
+
+    var cut = response.endIndex
+    for terminator in terminators {
+        if let r = response.range(of: terminator, options: .caseInsensitive), r.lowerBound < cut {
+            cut = r.lowerBound
+        }
+    }
+
+    response = String(response[..<cut])
+        .replacingOccurrences(of: "Claude finished the response", with: "")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+
+    // The accessibility tree may expose both the sr-only heading and the
+    // rendered body. If they are identical, keep one copy.
+    let lines = response.components(separatedBy: "\n")
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+
+    if lines.count >= 2 {
+        let first = lines[0]
+        let second = lines[1]
+        let normalize: (String) -> String = { value in
+            value.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.map(String.init).joined().lowercased()
+        }
+
+        // Electron exposes both an accessible heading and the rendered body.
+        // Claude may normalize punctuation/underscores in the heading, so
+        // compare alphanumeric forms before deciding they are duplicates.
+        if normalize(first) == normalize(second) {
+            return second
+        }
+
+        let half = lines.count / 2
+        if lines.count % 2 == 0 {
+            let firstHalf = lines.prefix(half).joined(separator: "\n")
+            let secondHalf = lines.suffix(half).joined(separator: "\n")
+            if firstHalf == secondHalf {
+                return firstHalf
+            }
+        }
+    }
+
+    return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+func sendAndObserveClaude(name: String, text: String, requestId: String?, timeoutMs: Int) -> ObserveTurnResponse {
+    // CRITICAL: establish the response baseline BEFORE pressing Send.
+    // This closes the race where a fast Claude response finishes before a
+    // separate observeResponse invocation has captured its baseline.
+    let baseline = captureTextSnapshot(name: name)
+    let sent = sendPromptToClaude(name: name, text: text, requestId: requestId)
+    guard sent.ok else {
+        return ObserveTurnResponse(
+            ok: false,
+            status: sent.status,
+            requestId: requestId,
+            response: nil,
+            latencyMs: nil,
+            error: sent.error
+        )
+    }
+    return observeResponseFromClaude(
+        name: name,
+        requestId: requestId,
+        timeoutMs: timeoutMs,
+        baselineTexts: baseline
+    )
+}
+
+func observeResponseFromClaude(name: String, requestId: String?, timeoutMs: Int, baselineTexts: [String]? = nil) -> ObserveTurnResponse {
+    guard let app = findAppProcess(name: name) else {
+        return ObserveTurnResponse(ok: false, status: "APP_NOT_RUNNING", requestId: requestId, response: nil, latencyMs: nil, error: "Application is not running")
+    }
+
+    let pid = app.processIdentifier
+    let axApp = AXUIElementCreateApplication(pid)
+    _ = AXUIElementSetAttributeValue(axApp, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+    _ = AXUIElementSetAttributeValue(axApp, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+
+    var winVal: AnyObject?
+    guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &winVal) == .success,
+          let wins = winVal as? [AXUIElement], let win = wins.first else {
+        return ObserveTurnResponse(ok: false, status: "NO_WINDOW", requestId: requestId, response: nil, latencyMs: nil, error: "No window found")
+    }
+
+    let start = Date()
+    let maxDuration = Double(timeoutMs > 0 ? timeoutMs : 30000) / 1000.0
+
+    // Collect all text from the AX tree, depth up to 20
+    func collectAllText(_ el: AXUIElement, depth: Int, texts: inout [String]) {
+        if depth > 60 { return }
+        var roleVal: AnyObject?
+        AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleVal)
+        let role = (roleVal as? String) ?? ""
+        if role == "AXStaticText" || role == "AXHeading" || role == "AXTextArea" || role == "AXTextField" {
+            var valVal: AnyObject?
+            if AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &valVal) == .success,
+               let s = valVal as? String, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                texts.append(s)
+            }
+        }
+        var childrenVal: AnyObject?
+        if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenVal) == .success,
+           let children = childrenVal as? [AXUIElement] {
+            for c in children { collectAllText(c, depth: depth + 1, texts: &texts) }
+        }
+    }
+
+    // Detect generation in progress (stop/cancel button presence)
+    func checkGenerating(_ el: AXUIElement) -> Bool {
+        var roleVal: AnyObject?
+        AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleVal)
+        if (roleVal as? String) == "AXButton" {
+            var descVal: AnyObject?
+            AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &descVal)
+            let desc = ((descVal as? String) ?? "").lowercased()
+            var titleVal: AnyObject?
+            AXUIElementCopyAttributeValue(el, kAXTitleAttribute as CFString, &titleVal)
+            let title = ((titleVal as? String) ?? "").lowercased()
+            if desc.contains("stop") || title.contains("stop") || desc.contains("cancel") || title.contains("cancel") {
+                return true
+            }
+        }
+        var childrenVal: AnyObject?
+        if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenVal) == .success,
+           let children = childrenVal as? [AXUIElement] {
+            for c in children { if checkGenerating(c) { return true } }
+        }
+        return false
+    }
+
+    // Baseline snapshot MUST be captured before submission when the
+    // caller is performing a send+observe operation. Otherwise a fast
+    // response can complete before a second process establishes its baseline.
+    let baseTexts: [String]
+    if let providedBaseline = baselineTexts {
+        baseTexts = providedBaseline
+    } else {
+        var captured: [String] = []
+        collectAllText(win, depth: 0, texts: &captured)
+        baseTexts = captured
+    }
+    let baseSet = Set(baseTexts)
+    let baseLength = baseTexts.joined().count
+
+    var sawGenerating = false
+    var doneGenerating = false
+    var lastSnapshot: [String] = []
+    var stableRounds = 0
+
+    while Date().timeIntervalSince(start) < maxDuration {
+        usleep(350_000) // 350ms poll
+
+        let generating = checkGenerating(win)
+        if generating { sawGenerating = true; stableRounds = 0 }
+        else if sawGenerating && !doneGenerating { doneGenerating = true }
+
+        var snapshot: [String] = []
+        collectAllText(win, depth: 0, texts: &snapshot)
+
+        let newTexts = snapshot.filter { !baseSet.contains($0) && !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let currentLength = snapshot.joined().count
+
+        if !newTexts.isEmpty {
+            if snapshot == lastSnapshot { stableRounds += 1 } else { stableRounds = 0; lastSnapshot = snapshot }
+
+            if doneGenerating || stableRounds >= 3 {
+                let response = newTexts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !response.isEmpty,
+                   let extracted = extractLatestClaudeResponse(response, requestId: requestId),
+                   !extracted.isEmpty {
+                    let latency = Date().timeIntervalSince(start) * 1000.0
+                    return ObserveTurnResponse(ok: true, status: "COMPLETED", requestId: requestId, response: extracted, latencyMs: latency, error: nil)
+                }
+            }
+        }
+
+        // Fallback: text length grew significantly after generation finished
+        if doneGenerating && currentLength > baseLength + 20 {
+            let response = newTexts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !response.isEmpty,
+               let extracted = extractLatestClaudeResponse(response, requestId: requestId),
+               !extracted.isEmpty {
+                let latency = Date().timeIntervalSince(start) * 1000.0
+                return ObserveTurnResponse(ok: true, status: "COMPLETED", requestId: requestId, response: extracted, latencyMs: latency, error: nil)
+            }
+        }
+    }
+
+    // Last-chance: return any new content that appeared even if timeout
+    var finalTexts: [String] = []
+    collectAllText(win, depth: 0, texts: &finalTexts)
+    let finalNew = finalTexts.filter { !baseSet.contains($0) && !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    if !finalNew.isEmpty {
+        let raw = finalNew.joined(separator: "\n")
+        if let extracted = extractLatestClaudeResponse(raw, requestId: requestId), !extracted.isEmpty {
+            let latency = Date().timeIntervalSince(start) * 1000.0
+            return ObserveTurnResponse(ok: true, status: "COMPLETED", requestId: requestId, response: extracted, latencyMs: latency, error: nil)
+        }
+
+        // Content changed, but no assistant turn can yet be correlated.
+        // Do NOT report this as successful delivery.
+        return ObserveTurnResponse(
+            ok: false,
+            status: "RESPONSE_INCOMPLETE",
+            requestId: requestId,
+            response: nil,
+            latencyMs: nil,
+            error: "Claude UI changed but no correlated assistant response was observed"
+        )
+    }
+
+    return ObserveTurnResponse(ok: false, status: "TIMEOUT", requestId: requestId, response: nil, latencyMs: nil, error: "Timed out waiting for Claude response")
+}
+
+
 func handleRequest(_ req: RequestOp) {
     let encoder = JSONEncoder()
     switch req.op {
@@ -337,6 +725,23 @@ func handleRequest(_ req: RequestOp) {
         }
     case "observe":
         let resp = setupObserver(name: req.targetApp)
+        if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
+            print(str)
+        }
+    case "sendPrompt":
+        let resp = sendPromptToClaude(name: req.targetApp, text: req.payloadText, requestId: req.requestId)
+        if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
+            print(str)
+        }
+    case "observeResponse":
+        let timeout = req.timeoutMs ?? 30000
+        let resp = observeResponseFromClaude(name: req.targetApp, requestId: req.requestId, timeoutMs: timeout)
+        if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
+            print(str)
+        }
+    case "sendAndObserve":
+        let timeout = req.timeoutMs ?? 30000
+        let resp = sendAndObserveClaude(name: req.targetApp, text: req.payloadText, requestId: req.requestId, timeoutMs: timeout)
         if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
             print(str)
         }
