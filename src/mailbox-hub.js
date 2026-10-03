@@ -525,4 +525,87 @@ export class MailboxHub {
       completedAt: row.completed_at
     };
   }
+
+  getPendingRequests(agentId, limit = 10) {
+    try {
+      const rows = this.db.prepare(`
+        SELECT request_id, conversation_id, from_agent, to_agent, question, context, task_id, status, created_at
+        FROM bridge_requests
+        WHERE to_agent = ? AND status = 'pending'
+        ORDER BY created_at ASC
+        LIMIT ?
+      `).all(agentId, limit);
+      return rows.map(r => ({
+        requestId: r.request_id,
+        conversationId: r.conversation_id,
+        fromAgent: r.from_agent,
+        toAgent: r.to_agent,
+        question: r.question,
+        context: r.context ? (() => { try { return JSON.parse(r.context); } catch { return r.context; } })() : null,
+        taskId: r.task_id,
+        status: r.status,
+        createdAt: r.created_at
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  answerRequest({ requestId, agentId, response, status = 'completed', error = null }) {
+    if (!requestId) throw new Error('requestId is required');
+    if (!agentId) throw new Error('agentId is required');
+
+    let reqRow = null;
+    try {
+      reqRow = this.db.prepare('SELECT * FROM bridge_requests WHERE request_id = ?').get(requestId);
+    } catch {}
+
+    if (!reqRow) {
+      throw new Error(`Request not found: ${requestId}`);
+    }
+
+    if (reqRow.task_id) {
+      return this.submitTaskResult({
+        taskId: reqRow.task_id,
+        agentId,
+        status,
+        result: response,
+        error
+      });
+    }
+
+    // Direct request without backing task
+    const now = new Date().toISOString();
+    const resultStr = typeof response === 'string' ? response : (response ? JSON.stringify(response) : null);
+
+    this.db.prepare(`
+      UPDATE bridge_requests
+      SET status = ?, response = ?, error = ?, updated_at = ?, completed_at = ?
+      WHERE request_id = ?
+    `).run(status, resultStr, error, now, now, requestId);
+
+    if (this.eventBus) {
+      this.eventBus.publish({
+        type: 'response_delivered',
+        agentId: reqRow.from_agent,
+        fromAgent: agentId,
+        conversationId: reqRow.conversation_id,
+        requestId,
+        taskId: null,
+        status,
+        payload: {
+          snippet: resultStr ? (resultStr.length > 100 ? resultStr.slice(0, 100) + '...' : resultStr) : null,
+          status,
+          error: error ? (error.length > 80 ? error.slice(0, 80) + '...' : error) : null
+        }
+      });
+    }
+
+    return {
+      status: 'success',
+      requestId,
+      answeredBy: agentId,
+      result: response
+    };
+  }
 }

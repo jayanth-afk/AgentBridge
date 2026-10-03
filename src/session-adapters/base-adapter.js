@@ -19,12 +19,24 @@ export class AgentSessionAdapter {
     return this.connected;
   }
 
+  isIdle() {
+    return this.connected;
+  }
+
   async deliverIncomingRequest(request) {
     throw new Error(`deliverIncomingRequest not implemented for ${this.agentId}`);
   }
 
   async deliverResponse(response) {
     throw new Error(`deliverResponse not implemented for ${this.agentId}`);
+  }
+
+  async queueRequest(request) {
+    throw new Error(`queueRequest not implemented for ${this.agentId}`);
+  }
+
+  async recoverPendingRequests() {
+    return [];
   }
 
   async wake(reason = 'incoming_event') {
@@ -37,6 +49,9 @@ export class AgentSessionAdapter {
       autonomousExecution: false,
       headlessExecution: false,
       externalModelWakeup: false,
+      idleWakeupSupported: false,
+      activeTurnRpc: true,
+      desktopNotificationSupported: false,
       mcpStdio: true,
       requiresUserPrompt: true,
       notes: 'Base session adapter'

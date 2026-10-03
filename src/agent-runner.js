@@ -79,6 +79,13 @@ export class AgentRunner extends EventEmitter {
       });
     }
 
+    // 3. Recover any expired leases on startup
+    if (this.mailbox?.tasks?.recoverExpiredLeases) {
+      try {
+        this.mailbox.tasks.recoverExpiredLeases();
+      } catch {}
+    }
+
     this.emit('started', { agentId: this.agentId });
     // Catch up on any work already queued
     this.scheduleNextPoll(0);
@@ -159,6 +166,9 @@ export class AgentRunner extends EventEmitter {
         return this.scheduleNextPoll(0);
       } else {
         // Idle recovery backoff (only a fallback safety net; event bus delivers live wakeup)
+        if (this.mailbox?.tasks?.recoverExpiredLeases) {
+          try { this.mailbox.tasks.recoverExpiredLeases(); } catch {}
+        }
         this.currentIntervalMs = Math.min(
           this.currentIntervalMs * 1.5,
           this.pollIntervalMaxMs

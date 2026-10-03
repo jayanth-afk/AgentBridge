@@ -171,7 +171,22 @@ export class EventBus extends EventEmitter {
         const waiter = this.responseWaiters.get(event.requestId);
         this.responseWaiters.delete(event.requestId);
         if (waiter.timer) clearTimeout(waiter.timer);
-        waiter.resolve(event);
+
+        let finalResponse = event.payload?.snippet || null;
+        let finalError = event.payload?.error || null;
+        try {
+          const reqRow = this.db.prepare('SELECT response, error FROM bridge_requests WHERE request_id = ?').get(event.requestId);
+          if (reqRow) {
+            if (reqRow.response !== undefined && reqRow.response !== null) finalResponse = reqRow.response;
+            if (reqRow.error) finalError = reqRow.error;
+          }
+        } catch {}
+
+        waiter.resolve({
+          ...event,
+          response: finalResponse,
+          error: finalError
+        });
       }
     }
 
@@ -366,7 +381,22 @@ export class EventBus extends EventEmitter {
           const waiter = this.responseWaiters.get(event.requestId);
           this.responseWaiters.delete(event.requestId);
           if (waiter.timer) clearTimeout(waiter.timer);
-          waiter.resolve(event);
+
+          let finalResponse = event.payload?.snippet || null;
+          let finalError = event.payload?.error || null;
+          try {
+            const reqRow = this.db.prepare('SELECT response, error FROM bridge_requests WHERE request_id = ?').get(event.requestId);
+            if (reqRow) {
+              if (reqRow.response !== undefined && reqRow.response !== null) finalResponse = reqRow.response;
+              if (reqRow.error) finalError = reqRow.error;
+            }
+          } catch {}
+
+          waiter.resolve({
+            ...event,
+            response: finalResponse,
+            error: finalError
+          });
         }
       }
 

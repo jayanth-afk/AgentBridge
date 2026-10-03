@@ -79,6 +79,8 @@ export class DiagnosticsManager {
     let activeTask = null;
     let lastEvent = null;
     let lastResponse = null;
+    let lastError = null;
+    const recentRequests = [];
 
     if (db) {
       try {
@@ -116,12 +118,40 @@ export class DiagnosticsManager {
         }
 
         const lastRespRow = db.prepare(`
-          SELECT request_id, status, completed_at FROM bridge_requests
+          SELECT request_id, status, error, completed_at FROM bridge_requests
           WHERE (from_agent = ? OR to_agent = ?) AND status IN ('completed', 'failed')
           ORDER BY updated_at DESC LIMIT 1
         `).get(agentId, agentId);
         if (lastRespRow) {
           lastResponse = { requestId: lastRespRow.request_id, status: lastRespRow.status, completedAt: lastRespRow.completed_at };
+          if (lastRespRow.error) lastError = lastRespRow.error;
+        }
+
+        // Trace up to 3 recent requests
+        const recentRows = db.prepare(`
+          SELECT request_id, from_agent, to_agent, task_id, status, created_at, completed_at
+          FROM bridge_requests
+          WHERE from_agent = ? OR to_agent = ?
+          ORDER BY created_at DESC LIMIT 3
+        `).all(agentId, agentId);
+
+        for (const r of recentRows) {
+          let durationMs = null;
+          if (r.created_at && r.completed_at) {
+            const start = new Date(r.created_at).getTime();
+            const end = new Date(r.completed_at).getTime();
+            if (end >= start) durationMs = end - start;
+          }
+          recentRequests.push({
+            requestId: r.request_id,
+            fromAgent: r.from_agent,
+            toAgent: r.to_agent,
+            taskId: r.task_id,
+            status: r.status,
+            createdAt: r.created_at,
+            completedAt: r.completed_at,
+            durationMs
+          });
         }
       } catch {}
     }
@@ -131,6 +161,12 @@ export class DiagnosticsManager {
     if (presence?.isAlive) {
       state = (activeTask || activeRequests > 0) ? 'BUSY' : (presence.state || 'IDLE');
     }
+
+    const connection = {
+      transport: presence?.metadata?.transport || 'mcp-stdio',
+      isAlive: Boolean(presence?.isAlive),
+      lastHeartbeat: presence?.lastHeartbeat || null
+    };
 
     // Average tool latency across all calls if available
     let avgLatencyMs = null;
@@ -149,6 +185,7 @@ export class DiagnosticsManager {
     return {
       agent: agentId,
       state,
+      connection,
       cursor,
       pendingEvents,
       pendingRequests,
@@ -156,7 +193,9 @@ export class DiagnosticsManager {
       activeTask,
       lastEvent,
       lastResponse,
-      latency: avgLatencyMs !== null ? `${avgLatencyMs}ms` : null
+      lastError,
+      latency: avgLatencyMs !== null ? `${avgLatencyMs}ms` : null,
+      recentRequests
     };
   }
 }

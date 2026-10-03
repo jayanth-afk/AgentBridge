@@ -3,11 +3,15 @@ import { AntigravitySessionAdapter } from './antigravity-adapter.js';
 import { ClaudeDesktopSessionAdapter } from './claude-adapter.js';
 import { ChatGPTSessionAdapter } from './chatgpt-adapter.js';
 
+import { sendDesktopNotification, activateDesktopApp } from './desktop-notifier.js';
+
 export {
   AgentSessionAdapter,
   AntigravitySessionAdapter,
   ClaudeDesktopSessionAdapter,
-  ChatGPTSessionAdapter
+  ChatGPTSessionAdapter,
+  sendDesktopNotification,
+  activateDesktopApp
 };
 
 export function createSessionAdapter(agentId, options = {}) {

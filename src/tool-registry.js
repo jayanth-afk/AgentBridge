@@ -167,6 +167,7 @@ export class ToolRegistry {
         const context = await ctx.controller.buildContext(args.rootPath, args.agentId, args.query, args.maxResults);
         context.tasks = ctx.taskManager ? ctx.taskManager.listTasks({ agentId: args.agentId, limit: 6, compact: true }) : [];
         context.agents = ctx.presence ? ctx.presence.listAgents() : [];
+        context.pendingRequests = ctx.mailbox ? ctx.mailbox.getPendingRequests(args.agentId, 5) : [];
         return context;
       }
     });
@@ -779,6 +780,37 @@ export class ToolRegistry {
         required: ['requestId']
       },
       handler: async (args, ctx) => ctx.mailbox.getRequest(args.requestId)
+    });
+
+    this.registerTool({
+      name: 'bridge_get_pending_requests',
+      description: 'Get pending correlated requests awaiting answer for a specific agent.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agentId: { type: 'string', description: 'Agent ID whose pending requests to list' },
+          limit: { type: 'number', default: 10 }
+        },
+        required: ['agentId']
+      },
+      handler: async (args, ctx) => ctx.mailbox.getPendingRequests(args.agentId, args.limit || 10)
+    });
+
+    this.registerTool({
+      name: 'bridge_answer_request',
+      description: 'Directly answer an incoming correlated request from another agent using requestId.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          requestId: { type: 'string', description: 'The requestId being answered' },
+          agentId: { type: 'string', description: 'Responding agent ID' },
+          response: { type: 'string', description: 'The answer content or result' },
+          status: { type: 'string', enum: ['completed', 'failed'], default: 'completed' },
+          error: { type: 'string', description: 'Optional error description if status is failed' }
+        },
+        required: ['requestId', 'agentId', 'response']
+      },
+      handler: async (args, ctx) => ctx.mailbox.answerRequest(args)
     });
 
     this.registerTool({

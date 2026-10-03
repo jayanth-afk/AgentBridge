@@ -269,20 +269,74 @@ test('Event-Driven Autonomous Multi-Agent Communication Suite', async (t) => {
     const agCap = antigravityAdapter.capabilities();
     assert.strictEqual(agCap.autonomousExecution, true);
     assert.strictEqual(agCap.externalModelWakeup, true);
+    assert.strictEqual(agCap.idleWakeupSupported, true);
 
     const claudeCap = claudeAdapter.capabilities();
     assert.strictEqual(claudeCap.autonomousExecution, false);
     assert.strictEqual(claudeCap.externalModelWakeup, false);
     assert.strictEqual(claudeCap.requiresUserPrompt, true);
+    assert.strictEqual(claudeCap.desktopNotificationSupported, true);
 
     const chatgptCap = chatgptAdapter.capabilities();
     assert.strictEqual(chatgptCap.autonomousExecution, false);
     assert.strictEqual(chatgptCap.externalModelWakeup, false);
     assert.strictEqual(chatgptCap.requiresUserPrompt, true);
+    assert.strictEqual(chatgptCap.desktopNotificationSupported, true);
 
     // Testing truthful wake report on Claude
-    const claudeWake = await claudeAdapter.wake('external_signal');
+    const claudeWake = await claudeAdapter.wake('external_signal', { notifyUser: false });
     assert.strictEqual(claudeWake.success, false);
     assert.strictEqual(claudeWake.error, 'DESKTOP_MODEL_WAKEUP_UNSUPPORTED');
+
+    // Test queueRequest and recoverPendingRequests on Claude adapter
+    await claudeAdapter.connect();
+    assert.strictEqual(claudeAdapter.isActive(), true);
+    assert.strictEqual(claudeAdapter.isIdle(), true);
+
+    const qRes = await claudeAdapter.queueRequest({
+      requestId: 'req_claude_pending_test',
+      fromAgent: 'chatgpt-desktop',
+      question: 'Review this patch please'
+    }, { notifyUser: false });
+    assert.strictEqual(qRes.status, 'queued');
+
+    await claudeAdapter.disconnect();
+    assert.strictEqual(claudeAdapter.isActive(), false);
+  });
+
+  await t.test('10. Pending requests recovery and direct answerRequest correlated resolution', async () => {
+    // 1. Post a request for claude-desktop in asyncMode
+    const req = await mailbox.askAgent({
+      fromAgent: 'antigravity-ide',
+      toAgent: 'claude-desktop',
+      question: 'Can you confirm the architecture?',
+      asyncMode: true
+    });
+
+    // 2. Discover pending requests for claude-desktop
+    const pending = mailbox.getPendingRequests('claude-desktop');
+    assert.ok(pending.length >= 1);
+    const found = pending.find(p => p.requestId === req.requestId);
+    assert.ok(found, 'Should find pending request');
+    assert.strictEqual(found.fromAgent, 'antigravity-ide');
+
+    // 3. Antigravity waits for the response
+    const waiterPromise = eventBus.waitForResponse({
+      requestId: req.requestId,
+      timeoutMs: 5000
+    });
+
+    // 4. Claude answers using answerRequest
+    const ans = mailbox.answerRequest({
+      requestId: req.requestId,
+      agentId: 'claude-desktop',
+      response: 'Architecture confirmed valid by Claude.'
+    });
+    assert.strictEqual(ans.status, 'completed');
+
+    // 5. Correlated waiter receives response immediately
+    const delivered = await waiterPromise;
+    assert.strictEqual(delivered.status, 'completed');
+    assert.ok(delivered.response.includes('Architecture confirmed valid by Claude'));
   });
 });

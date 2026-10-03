@@ -28,6 +28,10 @@ export class AntigravitySessionAdapter extends AgentSessionAdapter {
     return this.connected && (this.runner ? this.runner.running : true);
   }
 
+  isIdle() {
+    return this.isActive() && (!this.runner || this.runner.state === 'IDLE');
+  }
+
   async deliverIncomingRequest(request) {
     if (this.runner) {
       this.runner.wakeUp('adapter_deliverIncomingRequest');
@@ -46,6 +50,24 @@ export class AntigravitySessionAdapter extends AgentSessionAdapter {
       agentId: this.agentId,
       requestId: response.requestId
     };
+  }
+
+  async queueRequest(request) {
+    if (this.runner) {
+      this.runner.wakeUp('adapter_queueRequest');
+    }
+    return {
+      status: 'queued_and_runner_notified',
+      agentId: this.agentId,
+      requestId: request.requestId || request.id
+    };
+  }
+
+  async recoverPendingRequests() {
+    if (this.mailbox && this.mailbox.getPendingRequests) {
+      return this.mailbox.getPendingRequests(this.agentId);
+    }
+    return [];
   }
 
   async wake(reason = 'external_event') {
@@ -67,11 +89,14 @@ export class AntigravitySessionAdapter extends AgentSessionAdapter {
       autonomousExecution: true,
       headlessExecution: true,
       externalModelWakeup: true,
+      idleWakeupSupported: true,
+      activeTurnRpc: true,
+      desktopNotificationSupported: false,
       fileAccess: true,
       gitAccess: true,
       mcpStdio: true,
       requiresUserPrompt: false,
-      notes: 'Antigravity IDE runs autonomous background workers (AgentRunner) that genuinely wake, claim tasks, execute tool operations, and deliver correlated responses without manual intervention.'
+      notes: 'Antigravity IDE runs autonomous background workers (AgentRunner) that genuinely wake from EventBus, claim tasks atomically, execute tool operations, and deliver correlated responses without manual intervention.'
     };
   }
 }
