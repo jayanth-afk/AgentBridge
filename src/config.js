@@ -69,5 +69,14 @@ export const CONFIG = {
 
   // Autonomous Git settings
   GIT_PROTECTED_BRANCHES: ['main', 'master', 'production', 'release'],
-  ALLOW_AUTONOMOUS_PROTECTED_PUSH: false
+  ALLOW_AUTONOMOUS_PROTECTED_PUSH: false,
+
+  // Sideways / Desktop UI Automation config
+  DESKTOP_AUTOMATION: {
+    enabled: false, // Explicit opt-in required
+    preferredTransport: 'mcp', // 'mcp' | 'desktop-ui' | 'notification'
+    requireUnambiguousTarget: true,
+    preventDuplicates: true,
+    focusOnSend: false
+  }
 };
