@@ -23,7 +23,7 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
     this.swiftBridge = options.swiftBridge || new SwiftAXBridge(options);
     this.correlator = options.correlator || new ResponseCorrelator(options);
     this.appName = options.appName || 'ChatGPT';
-    this.defaultTimeoutMs = options.timeoutMs || 60000;
+    this.defaultTimeoutMs = options.timeoutMs || 180000;
     this.activeTurns = new Map(); // requestId -> turnResult
   }
 
