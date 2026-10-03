@@ -41,6 +41,8 @@ test('Autonomous Structured Git Operations & Validation Suite', async (t) => {
   });
 
   await t.test('3. Branch Lifecycle: Creation, Switching & Deletion', async () => {
+    const initialBranches = await git.getBranches(CONFIG.BRIDGE_ROOT, 'antigravity-ide', true);
+    const originalBranch = initialBranches.current;
     const testBranch = `auto-branch-${Date.now()}`;
     // Create
     const resCreate = await git.createBranch(CONFIG.BRIDGE_ROOT, 'antigravity-ide', testBranch);
@@ -53,7 +55,7 @@ test('Autonomous Structured Git Operations & Validation Suite', async (t) => {
     assert.strictEqual(resSwitch.currentBranch, testBranch);
 
     // Switch back to original branch
-    await git.switchBranch(CONFIG.BRIDGE_ROOT, 'antigravity-ide', 'agent-bridge/autonomous-optimization');
+    await git.switchBranch(CONFIG.BRIDGE_ROOT, 'antigravity-ide', originalBranch);
 
     // Delete
     const resDelete = await git.deleteBranch(CONFIG.BRIDGE_ROOT, 'antigravity-ide', testBranch, true);
