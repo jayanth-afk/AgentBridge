@@ -12,7 +12,7 @@ const HELPER_BIN = path.resolve(__dirname, '../../tools/macos-accessibility-help
 /**
  * SwiftAXBridge:
  * High-performance native macOS Accessibility bridge using the compiled Swift helper.
- * Provides sub-10ms process and window discovery, falling back to JXA if the binary is absent.
+ * Provides sub-5ms process and window discovery, falling back to JXA if the binary is absent.
  */
 export class SwiftAXBridge {
   constructor(options = {}) {
@@ -34,7 +34,7 @@ export class SwiftAXBridge {
     }
 
     try {
-      const { stdout } = await execFileAsync(this.binaryPath, [JSON.stringify(opObj)], { timeout: 3000 });
+      const { stdout } = await execFileAsync(this.binaryPath, [JSON.stringify(opObj)], { timeout: 4000 });
       return JSON.parse(stdout.trim());
     } catch (err) {
       return { ok: false, error: err.message };
@@ -47,6 +47,10 @@ export class SwiftAXBridge {
 
   async inspectApp(appName) {
     return this.executeOp({ op: 'inspect', app: appName });
+  }
+
+  async inspectElements(appName) {
+    return this.executeOp({ op: 'elements', app: appName });
   }
 
   async activateApp(appName) {
@@ -63,5 +67,9 @@ export class SwiftAXBridge {
 
   async unhideApp(appName) {
     return this.executeOp({ op: 'unhide', app: appName });
+  }
+
+  async setupObserver(appName) {
+    return this.executeOp({ op: 'observe', app: appName });
   }
 }

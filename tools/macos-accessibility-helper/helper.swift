@@ -6,10 +6,24 @@ import AppKit
 struct RequestOp: Codable {
     let op: String
     let app: String?
+    let appName: String?
     let bundleId: String?
     let value: String?
     let requestId: String?
     let pid: pid_t?
+    let identifier: String?
+    let role: String?
+    let timeoutMs: Int?
+
+    var targetApp: String {
+        return app ?? appName ?? "Claude"
+    }
+}
+
+struct WindowInfo: Codable {
+    let title: String
+    let minimized: Bool
+    let main: Bool
 }
 
 struct InspectResponse: Codable {
@@ -19,6 +33,27 @@ struct InspectResponse: Codable {
     let pid: pid_t?
     let windowCount: Int
     let windows: [String]
+    let windowDetails: [WindowInfo]
+    let hidden: Bool
+    let error: String?
+}
+
+struct ElementInfo: Codable {
+    let role: String
+    let subrole: String?
+    let title: String?
+    let description: String?
+    let identifier: String?
+    let value: String?
+    let enabled: Bool
+    let depth: Int
+}
+
+struct ElementsResponse: Codable {
+    let ok: Bool
+    let app: String
+    let pid: pid_t
+    let elements: [ElementInfo]
     let error: String?
 }
 
@@ -39,6 +74,9 @@ func findAppProcess(name: String) -> NSRunningApplication? {
     let apps = NSWorkspace.shared.runningApplications
     return apps.first { app in
         if let appName = app.localizedName, appName.caseInsensitiveCompare(name) == .orderedSame {
+            return true
+        }
+        if let bundle = app.bundleIdentifier, bundle.lowercased().contains(name.lowercased()) {
             return true
         }
         return false
@@ -63,32 +101,142 @@ func getFrontmostApp() -> FrontmostResponse {
 
 func inspectApp(name: String) -> InspectResponse {
     guard let app = findAppProcess(name: name) else {
-        return InspectResponse(ok: false, app: name, running: false, pid: nil, windowCount: 0, windows: [], error: "APP_NOT_RUNNING")
+        return InspectResponse(ok: false, app: name, running: false, pid: nil, windowCount: 0, windows: [], windowDetails: [], hidden: false, error: "APP_NOT_RUNNING")
     }
 
     let pid = app.processIdentifier
+    let isHidden = app.isHidden
     let axApp = AXUIElementCreateApplication(pid)
 
     var windowsValue: AnyObject?
     let result = AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsValue)
 
     var windowTitles: [String] = []
+    var windowDetails: [WindowInfo] = []
     var windowCount = 0
 
     if result == .success, let windows = windowsValue as? [AXUIElement] {
         windowCount = windows.count
         for win in windows {
             var titleVal: AnyObject?
+            let titleStr: String
             if AXUIElementCopyAttributeValue(win, kAXTitleAttribute as CFString, &titleVal) == .success,
-               let titleStr = titleVal as? String {
-                windowTitles.append(titleStr)
+               let str = titleVal as? String {
+                titleStr = str
             } else {
-                windowTitles.append("Untitled Window")
+                titleStr = "Untitled Window"
+            }
+            windowTitles.append(titleStr)
+
+            var minVal: AnyObject?
+            var isMin = false
+            if AXUIElementCopyAttributeValue(win, kAXMinimizedAttribute as CFString, &minVal) == .success,
+               let b = minVal as? Bool {
+                isMin = b
+            }
+
+            var mainVal: AnyObject?
+            var isMain = false
+            if AXUIElementCopyAttributeValue(win, kAXMainAttribute as CFString, &mainVal) == .success,
+               let b = mainVal as? Bool {
+                isMain = b
+            }
+
+            windowDetails.append(WindowInfo(title: titleStr, minimized: isMin, main: isMain))
+        }
+    }
+
+    return InspectResponse(
+        ok: true,
+        app: name,
+        running: true,
+        pid: pid,
+        windowCount: windowCount,
+        windows: windowTitles,
+        windowDetails: windowDetails,
+        hidden: isHidden,
+        error: nil
+    )
+}
+
+func inspectElements(name: String) -> ElementsResponse {
+    guard let app = findAppProcess(name: name) else {
+        return ElementsResponse(ok: false, app: name, pid: 0, elements: [], error: "APP_NOT_RUNNING")
+    }
+
+    let pid = app.processIdentifier
+    let axApp = AXUIElementCreateApplication(pid)
+
+    var windowsValue: AnyObject?
+    guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsValue) == .success,
+          let windows = windowsValue as? [AXUIElement], let mainWin = windows.first else {
+        return ElementsResponse(ok: false, app: name, pid: pid, elements: [], error: "NO_ACCESSIBLE_WINDOW")
+    }
+
+    var elements: [ElementInfo] = []
+
+    func walk(_ element: AXUIElement, depth: Int) {
+        if depth > 5 || elements.count >= 80 { return }
+
+        var roleVal: AnyObject?
+        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleVal)
+        let role = (roleVal as? String) ?? "unknown"
+
+        var subroleVal: AnyObject?
+        AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleVal)
+        let subrole = subroleVal as? String
+
+        var titleVal: AnyObject?
+        AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &titleVal)
+        let title = titleVal as? String
+
+        var descVal: AnyObject?
+        AXUIElementCopyAttributeValue(element, kAXDescriptionAttribute as CFString, &descVal)
+        let desc = descVal as? String
+
+        var idVal: AnyObject?
+        AXUIElementCopyAttributeValue(element, kAXIdentifierAttribute as CFString, &idVal)
+        let idStr = idVal as? String
+
+        var valVal: AnyObject?
+        var valStr: String? = nil
+        if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valVal) == .success,
+           let str = valVal as? String {
+            valStr = str.count > 100 ? String(str.prefix(100)) + "..." : str
+        }
+
+        var enabledVal: AnyObject?
+        var isEnabled = true
+        if AXUIElementCopyAttributeValue(element, kAXEnabledAttribute as CFString, &enabledVal) == .success,
+           let b = enabledVal as? Bool {
+            isEnabled = b
+        }
+
+        // Only keep interactable or informative elements
+        if role == "AXTextArea" || role == "AXTextField" || role == "AXButton" || role == "AXStaticText" || role == "AXRow" || (idStr != nil && !idStr!.isEmpty) {
+            elements.append(ElementInfo(
+                role: role,
+                subrole: subrole,
+                title: title,
+                description: desc,
+                identifier: idStr,
+                value: valStr,
+                enabled: isEnabled,
+                depth: depth
+            ))
+        }
+
+        var childrenVal: AnyObject?
+        if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenVal) == .success,
+           let children = childrenVal as? [AXUIElement] {
+            for child in children {
+                walk(child, depth: depth + 1)
             }
         }
     }
 
-    return InspectResponse(ok: true, app: name, running: true, pid: pid, windowCount: windowCount, windows: windowTitles, error: nil)
+    walk(mainWin, depth: 0)
+    return ElementsResponse(ok: true, app: name, pid: pid, elements: elements, error: nil)
 }
 
 func activateApp(name: String) -> SimpleResponse {
@@ -116,6 +264,41 @@ func unhideApp(name: String) -> SimpleResponse {
     return SimpleResponse(ok: success, status: success ? "UNHIDDEN" : "FAILED", details: nil)
 }
 
+// AXObserver state
+var activeObserver: AXObserver? = nil
+var activeRunLoopSource: CFRunLoopSource? = nil
+
+func setupObserver(name: String) -> SimpleResponse {
+    guard let app = findAppProcess(name: name) else {
+        return SimpleResponse(ok: false, status: "APP_NOT_RUNNING", details: nil)
+    }
+
+    let pid = app.processIdentifier
+    var observerRef: AXObserver?
+    let err = AXObserverCreate(pid, { (observer, element, notification, refcon) in
+        let notifStr = notification as String
+        print("{\"event\":\"ax_notification\",\"type\":\"\(notifStr)\",\"timestamp\":\(Date().timeIntervalSince1970)}")
+        fflush(stdout)
+    }, &observerRef)
+
+    guard err == .success, let observer = observerRef else {
+        return SimpleResponse(ok: false, status: "OBSERVER_CREATE_FAILED", details: "\(err.rawValue)")
+    }
+
+    let axApp = AXUIElementCreateApplication(pid)
+    _ = AXObserverAddNotification(observer, axApp, kAXValueChangedNotification as CFString, nil)
+    _ = AXObserverAddNotification(observer, axApp, kAXWindowCreatedNotification as CFString, nil)
+    _ = AXObserverAddNotification(observer, axApp, kAXFocusedUIElementChangedNotification as CFString, nil)
+
+    activeObserver = observer
+    activeRunLoopSource = AXObserverGetRunLoopSource(observer)
+    if let source = activeRunLoopSource {
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .defaultMode)
+    }
+
+    return SimpleResponse(ok: true, status: "OBSERVER_ACTIVE", details: "Attached to PID \(pid)")
+}
+
 func handleRequest(_ req: RequestOp) {
     let encoder = JSONEncoder()
     switch req.op {
@@ -127,12 +310,17 @@ func handleRequest(_ req: RequestOp) {
             print(str)
         }
     case "inspect":
-        let resp = inspectApp(name: req.app ?? "Claude")
+        let resp = inspectApp(name: req.targetApp)
+        if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
+            print(str)
+        }
+    case "elements":
+        let resp = inspectElements(name: req.targetApp)
         if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
             print(str)
         }
     case "activate":
-        let resp = activateApp(name: req.app ?? "Claude")
+        let resp = activateApp(name: req.targetApp)
         if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
             print(str)
         }
@@ -143,7 +331,12 @@ func handleRequest(_ req: RequestOp) {
             print(str)
         }
     case "unhide":
-        let resp = unhideApp(name: req.app ?? "Claude")
+        let resp = unhideApp(name: req.targetApp)
+        if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
+            print(str)
+        }
+    case "observe":
+        let resp = setupObserver(name: req.targetApp)
         if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
             print(str)
         }

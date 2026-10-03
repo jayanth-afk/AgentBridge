@@ -4,7 +4,11 @@ import { SwiftAXBridge } from './swift-ax-bridge.js';
 import { ResponseObserver } from './response-observer.js';
 import { CdpDesktopAdapter } from './cdp-adapter.js';
 import { BrowserSessionAdapter } from './browser-session-adapter.js';
+import { ChatGptLocalEngineAdapter } from './chatgpt-local-engine.js';
 import { PersistentDesktopSessionManager, SessionState } from './persistent-session-manager.js';
+import { PersistentSessionRegistry, RegistrySessionState } from './persistent-session-registry.js';
+import { PersistentDesktopLauncher } from './persistent-desktop-launcher.js';
+import { ResponseCorrelator } from './response-correlator.js';
 import { PriorityScheduler, RequestEnvelope, RequestState } from '../protocol/envelope.js';
 import { sendDesktopNotification, activateDesktopApp } from '../session-adapters/desktop-notifier.js';
 
@@ -12,7 +16,7 @@ import { sendDesktopNotification, activateDesktopApp } from '../session-adapters
  * DesktopControlPlane:
  * Central orchestration plane for all desktop agent transports.
  * Selects the highest legitimate route available without silent unsafe downgrade.
- * Manages session persistence, focus restoration, and cross-route deduplication.
+ * Manages session persistence, focus restoration, authentic model execution, and cross-route deduplication.
  */
 export class DesktopControlPlane {
   constructor(options = {}) {
@@ -22,6 +26,14 @@ export class DesktopControlPlane {
     this.observer = new ResponseObserver(options);
     this.cdpAdapter = new CdpDesktopAdapter(options.cdp || {});
     this.browserAdapter = new BrowserSessionAdapter(options.browser || {});
+    this.chatgptLocalEngine = new ChatGptLocalEngineAdapter(options.chatgptEngine || {});
+    this.registry = new PersistentSessionRegistry({ ...options, swiftBridge: this.swiftBridge });
+    this.launcher = new PersistentDesktopLauncher({
+      ...options,
+      swiftBridge: this.swiftBridge,
+      registry: this.registry
+    });
+    this.correlator = new ResponseCorrelator(options.correlator || {});
     this.sessionManager = new PersistentDesktopSessionManager({
       ...options,
       swiftBridge: this.swiftBridge
@@ -40,12 +52,20 @@ export class DesktopControlPlane {
    * Determine the optimal route for a given target agent
    */
   async selectRoute(targetAgent, mcpAdapter = null) {
+    const isClaude = targetAgent.toLowerCase().includes('claude');
+    const isChatGpt = targetAgent.toLowerCase().includes('chatgpt');
+
     // 1. Tier 1: Active MCP session turn (Authoritative)
     if (mcpAdapter && typeof mcpAdapter.isActiveTurn === 'function' && mcpAdapter.isActiveTurn()) {
       return { route: 'mcp', confidence: 'authoritative', transport: 'mcp-turn' };
     }
 
-    // 2. Tier 2: CDP if explicitly enabled and verified
+    // 2. Tier 2: Real ChatGPT Desktop Local Engine (Official bundled codex-cli, non-interactive idle turn)
+    if (isChatGpt && this.chatgptLocalEngine.isInstalled()) {
+      return { route: 'chatgpt-local-engine', confidence: 'authoritative', transport: 'chatgpt-local-engine' };
+    }
+
+    // 3. Tier 3: CDP if explicitly enabled and verified
     if (this.cdpAdapter.enabled) {
       const cdpHealth = await this.cdpAdapter.health();
       if (cdpHealth.status === AdapterHealth.AVAILABLE) {
@@ -53,7 +73,7 @@ export class DesktopControlPlane {
       }
     }
 
-    // 3. Tier 3: Persistent Browser Session if explicitly enabled
+    // 4. Tier 4: Persistent Browser Session if explicitly enabled
     if (this.browserAdapter.enabled) {
       const browserHealth = await this.browserAdapter.health();
       if (browserHealth.status === AdapterHealth.AVAILABLE) {
@@ -61,16 +81,16 @@ export class DesktopControlPlane {
       }
     }
 
-    // 4. Tier 4: User-authorized macOS Accessibility (UI automation)
+    // 5. Tier 5: User-authorized macOS Accessibility (UI automation)
     if (this.enabled) {
-      const appName = targetAgent.includes('claude') ? 'Claude' : 'ChatGPT';
+      const appName = isClaude ? 'Claude' : 'ChatGPT';
       const windowState = await this.axEngine.ensureAccessibleWindow(appName);
       if (windowState.ok) {
         return { route: 'accessibility', confidence: 'high', transport: 'macos-accessibility' };
       }
     }
 
-    // 5. Tier 5: Native desktop notification fallback
+    // 6. Tier 6: Native desktop notification fallback
     return { route: 'notification', confidence: 'fallback', transport: 'macos-notification' };
   }
 
@@ -132,6 +152,43 @@ export class DesktopControlPlane {
         envelope.transition(RequestState.SENT, { route: 'mcp' });
         result = await mcpAdapter.sendMessage(envelope.message, { requestId: envelope.requestId });
         envelope.transition(RequestState.COMPLETED);
+      } else if (route === 'chatgpt-local-engine') {
+        envelope.transition(RequestState.SENT, { route: 'chatgpt-local-engine' });
+        envelope.transition(RequestState.MODEL_TURN_CONFIRMED);
+        envelope.transition(RequestState.PROCESSING);
+
+        // Embed compact correlation marker
+        const taggedPrompt = this.correlator.tagMessage(envelope.message, envelope.requestId);
+        const engineRes = await this.chatgptLocalEngine.executeTurn({
+          prompt: taggedPrompt,
+          requestId: envelope.requestId
+        });
+
+        if (engineRes.ok) {
+          const correlation = this.correlator.correlateTurn({
+            rawResponse: engineRes.response,
+            expectedRequestId: envelope.requestId
+          });
+          envelope.transition(RequestState.RESPONSE_CORRELATED);
+          envelope.transition(RequestState.COMPLETED);
+          result = {
+            success: true,
+            transport: 'chatgpt-local-engine',
+            response: correlation.cleanedText,
+            rawResponse: engineRes.response,
+            usage: engineRes.usage,
+            threadId: engineRes.threadId,
+            status: 'completed'
+          };
+        } else {
+          envelope.transition(RequestState.FAILED, { error: engineRes.error });
+          result = {
+            success: false,
+            transport: 'chatgpt-local-engine',
+            error: engineRes.error,
+            status: 'failed'
+          };
+        }
       } else if (route === 'cdp') {
         envelope.transition(RequestState.SENT, { route: 'cdp' });
         result = await this.cdpAdapter.sendMessage(envelope);
@@ -205,6 +262,7 @@ export class DesktopControlPlane {
   async diagnostics() {
     const cdpHealth = await this.cdpAdapter.health();
     const browserHealth = await this.browserAdapter.health();
+    const chatgptEngineHealth = await this.chatgptLocalEngine.health();
     const swiftAvailable = this.swiftBridge.isBinaryAvailable();
 
     return {
@@ -213,6 +271,7 @@ export class DesktopControlPlane {
       preferredRoute: this.preferredRoute,
       routes: {
         mcp: { supported: true, preferred: true },
+        chatgptLocalEngine: { supported: true, available: chatgptEngineHealth.status === AdapterHealth.AVAILABLE },
         cdp: { supported: true, enabled: this.cdpAdapter.enabled, health: cdpHealth.status },
         browser: { supported: true, enabled: this.browserAdapter.enabled, health: browserHealth.status },
         accessibility: { supported: true, enabled: this.enabled, swiftHelperAvailable: swiftAvailable },

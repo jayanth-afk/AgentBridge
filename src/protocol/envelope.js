@@ -2,16 +2,38 @@ import crypto from 'node:crypto';
 
 /**
  * Request Lifecycle States
+ * Fully represents the 12-state delivery semantics and failure classifications.
  */
 export const RequestState = Object.freeze({
+  // Core Lifecycle
   CREATED: 'CREATED',
   ROUTING: 'ROUTING',
+  TRANSPORT_CONNECTED: 'TRANSPORT_CONNECTED',
+  UI_TARGET_VERIFIED: 'UI_TARGET_VERIFIED',
+  INPUT_ACCEPTED: 'INPUT_ACCEPTED',
   SENT: 'SENT',
+  SUBMITTED: 'SUBMITTED',
   ACKNOWLEDGED: 'ACKNOWLEDGED',
+  MODEL_TURN_CONFIRMED: 'MODEL_TURN_CONFIRMED',
+  ASSISTANT_STARTED: 'ASSISTANT_STARTED',
+  ASSISTANT_STREAMING: 'ASSISTANT_STREAMING',
   PROCESSING: 'PROCESSING',
+  ASSISTANT_COMPLETED: 'ASSISTANT_COMPLETED',
+  RESPONSE_CORRELATED: 'RESPONSE_CORRELATED',
   COMPLETED: 'COMPLETED',
+  DELIVERED: 'DELIVERED',
+
+  // Failure & Reconciliation States
   FAILED: 'FAILED',
-  UNKNOWN: 'UNKNOWN'
+  UNKNOWN: 'UNKNOWN',
+  TARGET_AMBIGUOUS: 'TARGET_AMBIGUOUS',
+  APP_OFFLINE: 'APP_OFFLINE',
+  WINDOW_UNAVAILABLE: 'WINDOW_UNAVAILABLE',
+  TRANSPORT_FAILED: 'TRANSPORT_FAILED',
+  SUBMISSION_UNCERTAIN: 'SUBMISSION_UNCERTAIN',
+  MODEL_TURN_NOT_CONFIRMED: 'MODEL_TURN_NOT_CONFIRMED',
+  RESPONSE_TIMEOUT: 'RESPONSE_TIMEOUT',
+  RESPONSE_AMBIGUOUS: 'RESPONSE_AMBIGUOUS'
 });
 
 /**
@@ -71,6 +93,23 @@ export class RequestEnvelope {
       ...(details ? { details } : {})
     });
     return this;
+  }
+
+  isTerminal() {
+    return [
+      RequestState.COMPLETED,
+      RequestState.DELIVERED,
+      RequestState.FAILED,
+      RequestState.UNKNOWN,
+      RequestState.TARGET_AMBIGUOUS,
+      RequestState.APP_OFFLINE,
+      RequestState.WINDOW_UNAVAILABLE,
+      RequestState.TRANSPORT_FAILED,
+      RequestState.SUBMISSION_UNCERTAIN,
+      RequestState.MODEL_TURN_NOT_CONFIRMED,
+      RequestState.RESPONSE_TIMEOUT,
+      RequestState.RESPONSE_AMBIGUOUS
+    ].includes(this.state);
   }
 
   toJSON() {
