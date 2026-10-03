@@ -1,4 +1,5 @@
 import { CONFIG } from './config.js';
+import { createSessionAdapter } from './session-adapters/index.js';
 
 /**
  * Unified Tool Registry: Single Source of Truth for all Bridge tools across
@@ -739,18 +740,66 @@ export class ToolRegistry {
 
     this.registerTool({
       name: 'bridge_ask_agent',
-      description: 'Directly query another connected agent and await response or task queue.',
+      description: 'Directly query another connected agent and await correlated response over cross-process event bus.',
       inputSchema: {
         type: 'object',
         properties: {
           fromAgent: { type: 'string' },
           toAgent: { type: 'string' },
           question: { type: 'string' },
-          context: { type: 'string' }
+          context: { type: 'string' },
+          conversationId: { type: 'string' },
+          requestId: { type: 'string' },
+          timeoutMs: { type: 'number' },
+          asyncMode: { type: 'boolean' }
         },
         required: ['fromAgent', 'toAgent', 'question']
       },
       handler: async (args, ctx) => ctx.mailbox.askAgent(args)
+    });
+
+    this.registerTool({
+      name: 'bridge_get_request_status',
+      description: 'Get status and response details for a correlated request.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          requestId: { type: 'string' }
+        },
+        required: ['requestId']
+      },
+      handler: async (args, ctx) => ctx.mailbox.getRequest(args.requestId)
+    });
+
+    this.registerTool({
+      name: 'bridge_get_events',
+      description: 'Get compact events from the cross-process event bus with cursor support.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agentId: { type: 'string' },
+          afterEventId: { type: 'number' },
+          limit: { type: 'number' },
+          compact: { type: 'boolean' }
+        }
+      },
+      handler: async (args, ctx) => ctx.eventBus ? ctx.eventBus.getEvents(args) : []
+    });
+
+    this.registerTool({
+      name: 'bridge_get_adapter_capabilities',
+      description: 'Inspect session adapter capabilities and execution boundaries for connected agents.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agentId: { type: 'string' }
+        },
+        required: ['agentId']
+      },
+      handler: async (args, ctx) => {
+        const adapter = createSessionAdapter(args.agentId, { mailboxHub: ctx.mailbox, eventBus: ctx.eventBus });
+        return adapter.capabilities();
+      }
     });
 
     this.registerTool({

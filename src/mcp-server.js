@@ -20,6 +20,8 @@ import { PresenceManager } from './presence-manager.js';
 import { AgentIdentityManager } from './agent-identity.js';
 import { GitController } from './git-controller.js';
 import { ToolRegistry } from './tool-registry.js';
+import { EventBus } from './event-bus.js';
+import { createSessionAdapter } from './session-adapters/index.js';
 
 export class BridgeMcpServer {
   constructor(options = {}) {
@@ -35,8 +37,9 @@ export class BridgeMcpServer {
     this.diagnostics = options.diagnosticsManager || new DiagnosticsManager();
     this.presence = options.presenceManager || new PresenceManager(this.logger);
     this.identity = options.identityManager || new AgentIdentityManager(this.logger, this.agentId);
+    this.eventBus = options.eventBus || new EventBus(this.logger);
     this.taskManager = options.taskManager || new TaskManager(this.logger);
-    this.mailbox = options.mailboxHub || new MailboxHub(this.logger, this.taskManager);
+    this.mailbox = options.mailboxHub || new MailboxHub(this.logger, this.taskManager, this.eventBus);
     this.collaboration = options.collaborationManager || new CollaborationManager(this.logger);
     this.fileActivity = options.fileActivityManager || new FileActivityManager(this.logger);
     this.git = options.gitController || new GitController(this.guard, this.logger);
@@ -48,6 +51,10 @@ export class BridgeMcpServer {
       this.cache,
       this.git
     );
+    this.sessionAdapter = options.sessionAdapter || createSessionAdapter(this.agentId, {
+      mailboxHub: this.mailbox,
+      eventBus: this.eventBus
+    });
 
     // Single unified source of truth for tools
     this.registry = options.toolRegistry || new ToolRegistry();
@@ -88,6 +95,8 @@ export class BridgeMcpServer {
       identity: this.identity,
       diagnostics: this.diagnostics,
       cache: this.cache,
+      eventBus: this.eventBus,
+      sessionAdapter: this.sessionAdapter,
       boundAgentId: this.agentId
     };
 
@@ -131,6 +140,9 @@ export class BridgeMcpServer {
     const cleanup = () => {
       if (this.presenceSession) {
         this.presenceSession.cleanup();
+      }
+      if (this.eventBus) {
+        this.eventBus.close();
       }
     };
     process.on('SIGINT', cleanup);

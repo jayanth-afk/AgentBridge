@@ -9,6 +9,7 @@ export class AuditLogger {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
+    this.dbPath = dbPath;
     this.db = new DatabaseSync(dbPath);
     // Each agent (ChatGPT / Claude / Antigravity) runs its own bridge process and
     // all of them share this one file. Without a busy timeout, a concurrent writer
@@ -58,6 +59,46 @@ export class AuditLogger {
         status TEXT NOT NULL,
         result TEXT
       );
+
+      CREATE TABLE IF NOT EXISTS bridge_events (
+        event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        type TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        from_agent TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        request_id TEXT,
+        task_id TEXT,
+        status TEXT,
+        payload TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS bridge_requests (
+        request_id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        from_agent TEXT NOT NULL,
+        to_agent TEXT NOT NULL,
+        question TEXT NOT NULL,
+        context TEXT,
+        task_id TEXT,
+        status TEXT NOT NULL,
+        response TEXT,
+        error TEXT,
+        timeout_ms INTEGER DEFAULT 30000,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS agent_event_cursors (
+        agent_id TEXT PRIMARY KEY,
+        last_event_id INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_bridge_events_agent_id ON bridge_events(agent_id, event_id);
+      CREATE INDEX IF NOT EXISTS idx_bridge_events_req_id ON bridge_events(request_id);
+      CREATE INDEX IF NOT EXISTS idx_bridge_requests_to_status ON bridge_requests(to_agent, status);
     `);
   }
 

@@ -11,8 +11,9 @@ export class AgentRunner extends EventEmitter {
     presenceManager,
     projectController,
     gitController = null,
-    pollIntervalMinMs = 250,
-    pollIntervalMaxMs = 2500,
+    eventBus = null,
+    pollIntervalMinMs = 50,
+    pollIntervalMaxMs = 3000,
     autoStart = false
   }) {
     super();
@@ -21,6 +22,8 @@ export class AgentRunner extends EventEmitter {
     this.presence = presenceManager;
     this.controller = projectController;
     this.git = gitController;
+    this.eventBus = eventBus || mailboxHub?.eventBus || null;
+
     this.pollIntervalMinMs = pollIntervalMinMs;
     this.pollIntervalMaxMs = pollIntervalMaxMs;
     this.currentIntervalMs = pollIntervalMinMs;
@@ -29,18 +32,19 @@ export class AgentRunner extends EventEmitter {
     this.running = false;
     this.pollTimer = null;
     this.heartbeatSession = null;
+    this.eventSubscription = null;
     this.customHandlers = new Map();
 
-    // Listen to local task events for immediate wakeup
+    // Listen to local task events for immediate in-process wakeup
     if (this.mailbox?.tasks) {
       this.mailbox.tasks.on('taskCreated', (task) => {
         if (task.assignee === this.agentId && this.running) {
-          this.wakeUp('event_task_created');
+          this.wakeUp('event_local_task_created');
         }
       });
       this.mailbox.tasks.on('taskUnblocked', (taskId) => {
         if (this.running) {
-          this.wakeUp('event_task_unblocked');
+          this.wakeUp('event_local_task_unblocked');
         }
       });
     }
@@ -63,13 +67,33 @@ export class AgentRunner extends EventEmitter {
     if (this.presence) {
       this.heartbeatSession = this.presence.startHeartbeatLoop(this.agentId, 5000, {
         transport: 'agent-autonomous-worker',
-        capabilities: ['read', 'write', 'execute', 'git', 'tasks', 'patches']
+        capabilities: ['read', 'write', 'execute', 'git', 'tasks', 'patches', 'events']
       });
       this.presence.setState(this.agentId, 'IDLE');
     }
 
+    // 2. Subscribe to cross-process event bus for immediate wakeup
+    if (this.eventBus) {
+      this.eventSubscription = this.eventBus.subscribe(this.agentId, (event) => {
+        this.handleIncomingEvent(event);
+      });
+    }
+
     this.emit('started', { agentId: this.agentId });
+    // Catch up on any work already queued
     this.scheduleNextPoll(0);
+  }
+
+  handleIncomingEvent(event) {
+    if (!this.running) return;
+
+    if (
+      event.type === 'request_created' ||
+      event.type === 'task_created' ||
+      event.type === 'task_unblocked'
+    ) {
+      this.wakeUp(`cross_process_event:${event.type}`);
+    }
   }
 
   stop() {
@@ -77,6 +101,12 @@ export class AgentRunner extends EventEmitter {
     if (this.pollTimer) {
       clearTimeout(this.pollTimer);
       this.pollTimer = null;
+    }
+    if (this.eventSubscription) {
+      try {
+        this.eventSubscription.unsubscribe();
+      } catch {}
+      this.eventSubscription = null;
     }
     if (this.heartbeatSession) {
       this.heartbeatSession.cleanup();
@@ -96,14 +126,22 @@ export class AgentRunner extends EventEmitter {
       this.pollTimer = null;
     }
     this.currentIntervalMs = this.pollIntervalMinMs;
+    // Immediate execution
     this.scheduleNextPoll(0);
   }
 
   scheduleNextPoll(delayMs = this.currentIntervalMs) {
     if (!this.running) return;
+    if (this.pollTimer) {
+      clearTimeout(this.pollTimer);
+    }
     this.pollTimer = setTimeout(async () => {
+      this.pollTimer = null;
       await this.pollCycle();
     }, delayMs);
+    if (this.pollTimer && this.pollTimer.unref) {
+      this.pollTimer.unref();
+    }
   }
 
   async pollCycle() {
@@ -112,13 +150,13 @@ export class AgentRunner extends EventEmitter {
     try {
       const task = this.mailbox.claimNextTask(this.agentId);
       if (task) {
-        // Work found!
+        // Work found! Process immediately
         this.currentIntervalMs = this.pollIntervalMinMs;
         await this.processTask(task);
-        // Immediately check for next task without idle delay
+        // Immediately check for next queued task
         return this.scheduleNextPoll(0);
       } else {
-        // Idle backoff
+        // Idle recovery backoff (only a fallback safety net; event bus delivers live wakeup)
         this.currentIntervalMs = Math.min(
           this.currentIntervalMs * 1.5,
           this.pollIntervalMaxMs
@@ -146,13 +184,13 @@ export class AgentRunner extends EventEmitter {
           try { taskManager.touchTask({ taskId: task.id, agentId: this.agentId }); } catch {}
         }, heartbeatMs)
       : null;
+
     try {
-      // Mark ownership as active and keep the lease alive during long-running work.
       if (taskManager?.touchTask) {
         try { taskManager.touchTask({ taskId: task.id, agentId: this.agentId }); } catch {}
       }
 
-      // Execute the task
+      // Execute task logic
       const result = await this.executeTaskLogic(task);
 
       // Transition: REPORTING
@@ -170,7 +208,6 @@ export class AgentRunner extends EventEmitter {
 
       this.emit('taskCompleted', { task, result, executionMs: Date.now() - t0 });
     } catch (err) {
-      // Transition: FAILED
       this.state = 'FAILED';
       if (this.presence) {
         this.presence.setState(this.agentId, 'FAILED', task.id);
@@ -195,7 +232,6 @@ export class AgentRunner extends EventEmitter {
 
   /**
    * Autonomous Task Execution Engine.
-   * Handles smoke tests, acknowledgment queries, file workflows, and custom handlers.
    */
   async executeTaskLogic(task) {
     const text = `${task.title} ${task.instructions}`.toLowerCase();
@@ -224,22 +260,34 @@ export class AgentRunner extends EventEmitter {
       const expectedToken = isAutonomous ? 'AUTONOMOUS_OK' : 'ANTIGRAVITY_LINK_OK';
       const targetPath = path.join(workspace, filename);
 
-      // Create file
-      await this.controller.createFile(targetPath, this.agentId, expectedToken, true);
+      if (this.controller) {
+        // Create file
+        await this.controller.createFile(targetPath, this.agentId, expectedToken, true);
 
-      // Read back
-      const readRes = await this.controller.readFile(targetPath, this.agentId, 1, 10, true);
+        // Read back
+        const readRes = await this.controller.readFile(targetPath, this.agentId, 1, 10, true);
 
-      return {
-        status: 'SUCCESS',
-        smokeTest: isAutonomous ? 'AUTONOMOUS_EXECUTION' : 'LINKAGE_ACK',
-        file: targetPath,
-        content: readRes.content,
-        hash: readRes.fileHash,
-        token: expectedToken,
-        executedBy: this.agentId,
-        timestamp: new Date().toISOString()
-      };
+        return {
+          status: 'SUCCESS',
+          smokeTest: isAutonomous ? 'AUTONOMOUS_EXECUTION' : 'LINKAGE_ACK',
+          file: targetPath,
+          content: readRes.content,
+          hash: readRes.fileHash,
+          token: expectedToken,
+          executedBy: this.agentId,
+          timestamp: new Date().toISOString()
+        };
+      } else {
+        fs.writeFileSync(targetPath, expectedToken);
+        return {
+          status: 'SUCCESS',
+          smokeTest: 'AUTONOMOUS_EXECUTION',
+          file: targetPath,
+          token: expectedToken,
+          executedBy: this.agentId,
+          timestamp: new Date().toISOString()
+        };
+      }
     }
 
     // 3. Git status request
