@@ -303,6 +303,7 @@ export class TaskManager extends EventEmitter {
       completedAt = now;
     }
 
+    const serializedResult = (result !== null && typeof result === 'object') ? JSON.stringify(result) : result;
     const stmt = this.db.prepare(`
       UPDATE tasks
       SET status = ?, result = COALESCE(?, result), error = ?, updated_at = ?,
@@ -310,7 +311,7 @@ export class TaskManager extends EventEmitter {
       WHERE id = ?
     `);
 
-    stmt.run(status, result, error, now, startedAt, completedAt, taskId);
+    stmt.run(status, serializedResult, error, now, startedAt, completedAt, taskId);
 
     this.logger.log({
       agentId,

@@ -71,12 +71,31 @@ export const CONFIG = {
   GIT_PROTECTED_BRANCHES: ['main', 'master', 'production', 'release'],
   ALLOW_AUTONOMOUS_PROTECTED_PUSH: false,
 
-  // Sideways / Desktop UI Automation config
+  // Sideways / Desktop UI Automation & Control Plane config
   DESKTOP_AUTOMATION: {
     enabled: false, // Explicit opt-in required
-    preferredTransport: 'mcp', // 'mcp' | 'desktop-ui' | 'notification'
+    preferredRoute: 'auto', // 'auto' | 'mcp' | 'accessibility' | 'cdp' | 'browser' | 'notification'
+    preferredTransport: 'mcp', // legacy compatibility
     requireUnambiguousTarget: true,
     preventDuplicates: true,
-    focusOnSend: false
+    focusOnSend: false,
+    accessibility: {
+      enabled: true,
+      useNativeSwiftHelper: true,
+      allowHiddenWindowActivation: true,
+      activationTimeoutMs: 2500
+    },
+    cdp: {
+      enabled: false,
+      port: 9222,
+      allowedHosts: ['127.0.0.1', 'localhost']
+    },
+    browser: {
+      enabled: false,
+      headless: false
+    },
+    notifications: {
+      enabled: true
+    }
   }
 };

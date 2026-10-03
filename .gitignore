@@ -1,3 +1,4 @@
 node_modules/
 data/*.sqlite*
 .DS_Store
+tools/macos-accessibility-helper/bridge-ax-helper

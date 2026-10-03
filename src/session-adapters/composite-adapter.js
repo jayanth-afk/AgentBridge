@@ -4,6 +4,7 @@ import { ClaudeDesktopSessionAdapter } from './claude-adapter.js';
 import { ChatGPTSessionAdapter } from './chatgpt-adapter.js';
 import { ClaudeDesktopUIAdapter, ChatGPTDesktopUIAdapter } from './desktop-ui-adapter.js';
 import { sendDesktopNotification } from './desktop-notifier.js';
+import { DesktopControlPlane } from '../control-plane/desktop-control-plane.js';
 
 /**
  * CompositeSessionAdapter:
@@ -49,6 +50,12 @@ export class CompositeSessionAdapter extends AgentSessionAdapter {
 
     this.preferredTransport = options.preferredTransport || 'mcp';
     this.desktopAutomationEnabled = Boolean(options.desktopAutomation?.enabled || options.enableDesktopUI);
+
+    this.controlPlane = options.controlPlane || new DesktopControlPlane({
+      enabled: this.desktopAutomationEnabled,
+      preferredRoute: options.desktopAutomation?.preferredRoute || options.preferredRoute || 'auto',
+      ...options.desktopAutomation
+    });
   }
 
   getActiveAdapter() {
@@ -87,7 +94,8 @@ export class CompositeSessionAdapter extends AgentSessionAdapter {
   async sendMessage(textOrPayload, options = {}) {
     // 1. If MCP has an active turn, route via MCP
     if (this.mcpAdapter && typeof this.mcpAdapter.isActiveTurn === 'function' && this.mcpAdapter.isActiveTurn()) {
-      return await this.mcpAdapter.sendMessage(textOrPayload, options);
+      const res = await this.mcpAdapter.sendMessage(textOrPayload, options);
+      return { ...res, route: 'mcp' };
     }
 
     // 2. If desktop UI automation is enabled and available, route via desktop UI
@@ -95,7 +103,7 @@ export class CompositeSessionAdapter extends AgentSessionAdapter {
     if (uiActive) {
       const uiRes = await this.uiAdapter.sendMessage(textOrPayload, options);
       if (uiRes.success) {
-        return uiRes;
+        return { ...uiRes, route: 'accessibility' };
       }
     }
 
@@ -111,6 +119,7 @@ export class CompositeSessionAdapter extends AgentSessionAdapter {
       success: true,
       delivered: true,
       transport: 'notification',
+      route: 'notification',
       agentId: this.agentId,
       status: 'delivered_notification',
       details: notifRes
@@ -172,6 +181,7 @@ export class CompositeSessionAdapter extends AgentSessionAdapter {
     return {
       agentId: this.agentId,
       connected: this.connected,
+      route: this.getActiveAdapter() === this.uiAdapter ? 'accessibility' : 'mcp',
       mcp: {
         connected: Boolean(this.mcpAdapter && this.mcpAdapter.isConnected && this.mcpAdapter.isConnected()),
         activeTurn: Boolean(this.mcpAdapter && this.mcpAdapter.isActiveTurn && this.mcpAdapter.isActiveTurn())
@@ -180,6 +190,7 @@ export class CompositeSessionAdapter extends AgentSessionAdapter {
         configured: Boolean(this.uiAdapter),
         enabled: this.desktopAutomationEnabled
       },
+      controlPlane: Boolean(this.controlPlane),
       preferredTransport: this.preferredTransport
     };
   }
