@@ -711,6 +711,292 @@ func observeResponseFromClaude(name: String, requestId: String?, timeoutMs: Int,
 }
 
 
+// ============================================================
+// Profile-aware autonomous send + observe for desktop LLM clients.
+// Claude keeps its proven dedicated path; ChatGPT uses the generic
+// path below (composer identified by role, "Send" button, marker-based
+// response correlation over the complete live AX tree).
+// ============================================================
+
+func axString(_ el: AXUIElement, _ attr: String) -> String {
+    var v: AnyObject?
+    if AXUIElementCopyAttributeValue(el, attr as CFString, &v) == .success, let x = v as? String { return x }
+    return ""
+}
+
+func axBool(_ el: AXUIElement, _ attr: String) -> Bool {
+    var v: AnyObject?
+    if AXUIElementCopyAttributeValue(el, attr as CFString, &v) == .success, let x = v as? Bool { return x }
+    return false
+}
+
+func profileFor(_ name: String) -> String {
+    return name.lowercased().contains("chatgpt") ? "chatgpt" : "claude"
+}
+
+// Resolve the target application and its first accessible window, activating
+// and unhiding the app when requested. Returns (app, window?) without throwing.
+func resolveWindow(_ name: String, activate: Bool) -> (NSRunningApplication?, AXUIElement?) {
+    guard let app = findAppProcess(name: name) else { return (nil, nil) }
+    if activate {
+        app.unhide()
+        _ = app.activate(options: [])
+    }
+    for _ in 1...12 {
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        _ = AXUIElementSetAttributeValue(axApp, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+        _ = AXUIElementSetAttributeValue(axApp, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        var winVal: AnyObject?
+        if AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &winVal) == .success,
+           let wins = winVal as? [AXUIElement], let w = wins.first {
+            return (app, w)
+        }
+        usleep(250_000)
+    }
+    return (app, nil)
+}
+
+// Discover the message composer/input. Enforces an unambiguous single
+// candidate; never blindly guesses a random text field.
+func findComposerElement(_ win: AXUIElement, profile: String) -> AXUIElement? {
+    var candidates: [AXUIElement] = []
+    var preferred: AXUIElement? = nil
+    func walk(_ el: AXUIElement, _ depth: Int) {
+        if depth > 90 || candidates.count > 8 { return }
+        let role = axString(el, kAXRoleAttribute)
+        if role == "AXTextArea" || role == "AXTextField" {
+            let desc = axString(el, kAXDescriptionAttribute).lowercased()
+            if profile == "chatgpt" && desc.contains("ask chatgpt") { preferred = el; return }
+            if axBool(el, kAXEnabledAttribute) { candidates.append(el) }
+        }
+        var cv: AnyObject?
+        if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &cv) == .success,
+           let kids = cv as? [AXUIElement] {
+            for k in kids { walk(k, depth + 1) }
+        }
+    }
+    walk(win, 0)
+    if let p = preferred { return p }
+    if candidates.count == 1 { return candidates[0] }
+    return nil
+}
+
+// Discover the enabled Send/Submit control by accessible title or description.
+func findSendButton(_ win: AXUIElement) -> AXUIElement? {
+    let names: Set<String> = ["send", "send message", "submit"]
+    func walk(_ el: AXUIElement, _ depth: Int) -> AXUIElement? {
+        if depth > 90 { return nil }
+        if axString(el, kAXRoleAttribute) == "AXButton" {
+            let title = axString(el, kAXTitleAttribute).lowercased()
+            let desc = axString(el, kAXDescriptionAttribute).lowercased()
+            if (names.contains(title) || names.contains(desc)) && axBool(el, kAXEnabledAttribute) {
+                return el
+            }
+        }
+        var cv: AnyObject?
+        if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &cv) == .success,
+           let kids = cv as? [AXUIElement] {
+            for k in kids { if let f = walk(k, depth + 1) { return f } }
+        }
+        return nil
+    }
+    return walk(win, 0)
+}
+
+// Detect an in-progress generation (Stop control, or "is responding" label).
+func isGenerating(_ win: AXUIElement, profile: String) -> Bool {
+    func walk(_ el: AXUIElement, _ depth: Int) -> Bool {
+        if depth > 90 { return false }
+        let role = axString(el, kAXRoleAttribute)
+        if role == "AXButton" {
+            let d = axString(el, kAXDescriptionAttribute).lowercased()
+            let t = axString(el, kAXTitleAttribute).lowercased()
+            if d.contains("stop") || t.contains("stop") { return true }
+        }
+        if role == "AXStaticText" || role == "AXHeading" {
+            if axString(el, kAXValueAttribute).contains("is responding") { return true }
+        }
+        var cv: AnyObject?
+        if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &cv) == .success,
+           let kids = cv as? [AXUIElement] {
+            for k in kids { if walk(k, depth + 1) { return true } }
+        }
+        return false
+    }
+    return walk(win, 0)
+}
+
+// Response extraction for ChatGPT. Correlates strictly on the request marker:
+// the newest node containing [AB:requestId] is the submitted user turn, and the
+// assistant text is the run of nodes that follows, terminated at known UI
+// chrome. Never returns an unrelated/historical response.
+func extractChatGptResponse(_ texts: [String], requestId: String?) -> String? {
+    guard let requestId else { return nil }
+    let marker = "[AB:\(requestId)]"
+    var markerIdx = -1
+    for (i, t) in texts.enumerated() where t.contains(marker) { markerIdx = i }
+    guard markerIdx >= 0 else { return nil }
+
+    let skipExact: Set<String> = ["chatgpt said:", "chatgpt is responding"]
+    let terminators: Set<String> = [
+        "ask chatgpt",
+        "response complete",
+        "chatgpt can make mistakes. check important info.",
+        "latest response"
+    ]
+
+    var parts: [String] = []
+    var i = markerIdx + 1
+    while i < texts.count {
+        let t = texts[i].trimmingCharacters(in: .whitespacesAndNewlines)
+        i += 1
+        if t.isEmpty { continue }
+        let low = t.lowercased()
+        if terminators.contains(low) { break }
+        if skipExact.contains(low) { continue }
+        // Drop ChatGPT's per-turn chrome labels (e.g. "Worked for 7s", "Thought for 3s").
+        if low.hasPrefix("worked for ") || low.hasPrefix("thought for ") || low.hasPrefix("thinking for ") || low.hasPrefix("reasoned for ") { continue }
+        parts.append(t)
+    }
+
+    let joined = parts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    return joined.isEmpty ? nil : joined
+}
+
+func extractCorrelatedResponse(_ texts: [String], requestId: String?, profile: String) -> String? {
+    if profile == "claude" {
+        return extractLatestClaudeResponse(texts.joined(separator: "\n"), requestId: requestId)
+    }
+    return extractChatGptResponse(texts, requestId: requestId)
+}
+
+func collectTextValues(_ win: AXUIElement) -> [String] {
+    var texts: [String] = []
+    func walk(_ el: AXUIElement, _ depth: Int) {
+        if depth > 90 { return }
+        let role = axString(el, kAXRoleAttribute)
+        if role == "AXStaticText" || role == "AXHeading" || role == "AXTextArea" || role == "AXTextField" {
+            let v = axString(el, kAXValueAttribute)
+            if !v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { texts.append(v) }
+        }
+        var cv: AnyObject?
+        if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &cv) == .success,
+           let kids = cv as? [AXUIElement] {
+            for k in kids { walk(k, depth + 1) }
+        }
+    }
+    walk(win, 0)
+    return texts
+}
+
+func sendPromptGeneric(name: String, text: String, profile: String) -> SendTurnResponse {
+    let (app, maybeWin) = resolveWindow(name, activate: true)
+    guard app != nil else {
+        return SendTurnResponse(ok: false, status: "APP_NOT_RUNNING", requestId: nil, error: "\(name) is not running")
+    }
+    guard let win = maybeWin else {
+        return SendTurnResponse(ok: false, status: "NO_WINDOW", requestId: nil, error: "No accessible window for \(name)")
+    }
+    guard let composer = findComposerElement(win, profile: profile) else {
+        return SendTurnResponse(ok: false, status: "CHATGPT_COMPOSER_NOT_FOUND", requestId: nil, error: "No unambiguous composer element found")
+    }
+
+    let prefix = String(text.prefix(24))
+    var setOk = false
+    for attempt in 1...3 {
+        let setErr = AXUIElementSetAttributeValue(composer, kAXValueAttribute as CFString, text as CFTypeRef)
+        if setErr != .success && attempt == 3 {
+            return SendTurnResponse(ok: false, status: "VALUE_SET_FAILED", requestId: nil, error: "AXError \(setErr.rawValue)")
+        }
+        usleep(250_000)
+        // Re-resolve so a React re-render cannot leave us reading a stale node.
+        if let w2 = resolveWindow(name, activate: false).1 ?? maybeWin,
+           let c2 = findComposerElement(w2, profile: profile),
+           axString(c2, kAXValueAttribute).contains(prefix) {
+            setOk = true
+            break
+        }
+    }
+    if !setOk {
+        return SendTurnResponse(ok: false, status: "VALUE_NOT_REGISTERED", requestId: nil, error: "Composer did not retain the submitted value")
+    }
+
+    var sendOk = false
+    for _ in 1...20 {
+        guard let w3 = resolveWindow(name, activate: false).1 ?? maybeWin else { usleep(150_000); continue }
+        if let btn = findSendButton(w3) {
+            if AXUIElementPerformAction(btn, kAXPressAction as CFString) == .success { sendOk = true; break }
+        }
+        usleep(150_000)
+    }
+    guard sendOk else {
+        return SendTurnResponse(ok: false, status: "CHATGPT_SUBMISSION_FAILED", requestId: nil, error: "Send control could not be activated")
+    }
+    return SendTurnResponse(ok: true, status: "SUBMITTED", requestId: nil, error: nil)
+}
+
+func observeResponseGeneric(name: String, requestId: String?, profile: String, timeoutMs: Int) -> ObserveTurnResponse {
+    let (app, maybeWin) = resolveWindow(name, activate: false)
+    guard app != nil else {
+        return ObserveTurnResponse(ok: false, status: "APP_NOT_RUNNING", requestId: requestId, response: nil, latencyMs: nil, error: "Application is not running")
+    }
+    guard var win = maybeWin else {
+        return ObserveTurnResponse(ok: false, status: "NO_WINDOW", requestId: requestId, response: nil, latencyMs: nil, error: "No accessible window")
+    }
+
+    let start = Date()
+    let maxDuration = Double(timeoutMs > 0 ? timeoutMs : 30000) / 1000.0
+    var lastResponse = ""
+    var stableRounds = 0
+    var sawMarker = false
+
+    while Date().timeIntervalSince(start) < maxDuration {
+        usleep(300_000)
+
+        // Recover window if it momentarily disappears (e.g. during re-render).
+        if let w = resolveWindow(name, activate: false).1 { win = w }
+
+        let generating = isGenerating(win, profile: profile)
+        if generating { stableRounds = 0 }
+
+        let texts = collectTextValues(win)
+        if let rid = requestId, texts.contains(where: { $0.contains("[AB:\(rid)]") }) { sawMarker = true }
+
+        if let extracted = extractCorrelatedResponse(texts, requestId: requestId, profile: profile), !extracted.isEmpty {
+            if extracted == lastResponse {
+                stableRounds += 1
+            } else {
+                lastResponse = extracted
+                stableRounds = 0
+            }
+            if !generating && stableRounds >= 2 {
+                let latency = Date().timeIntervalSince(start) * 1000.0
+                return ObserveTurnResponse(ok: true, status: "COMPLETED", requestId: requestId, response: extracted, latencyMs: latency, error: nil)
+            }
+        }
+    }
+
+    let finalTexts = collectTextValues(win)
+    if let extracted = extractCorrelatedResponse(finalTexts, requestId: requestId, profile: profile), !extracted.isEmpty {
+        let latency = Date().timeIntervalSince(start) * 1000.0
+        return ObserveTurnResponse(ok: true, status: "COMPLETED_RECONCILED", requestId: requestId, response: extracted, latencyMs: latency, error: nil)
+    }
+    let markerPresent = requestId.map { rid in finalTexts.contains { $0.contains("[AB:\(rid)]") } } ?? false
+    if sawMarker || markerPresent {
+        return ObserveTurnResponse(ok: false, status: "CHATGPT_RESPONSE_TIMEOUT", requestId: requestId, response: nil, latencyMs: nil, error: "Request was accepted but no correlated assistant response was observed before timeout")
+    }
+    return ObserveTurnResponse(ok: false, status: "CHATGPT_RESPONSE_CORRELATION_FAILED", requestId: requestId, response: nil, latencyMs: nil, error: "Correlation marker was not found in the live accessibility tree")
+}
+
+func sendAndObserveGeneric(name: String, text: String, requestId: String?, profile: String, timeoutMs: Int) -> ObserveTurnResponse {
+    let sent = sendPromptGeneric(name: name, text: text, profile: profile)
+    guard sent.ok else {
+        return ObserveTurnResponse(ok: false, status: sent.status, requestId: requestId, response: nil, latencyMs: nil, error: sent.error)
+    }
+    return observeResponseGeneric(name: name, requestId: requestId, profile: profile, timeoutMs: timeoutMs)
+}
+
+
 func handleRequest(_ req: RequestOp) {
     let encoder = JSONEncoder()
     switch req.op {
@@ -753,19 +1039,28 @@ func handleRequest(_ req: RequestOp) {
             print(str)
         }
     case "sendPrompt":
-        let resp = sendPromptToClaude(name: req.targetApp, text: req.payloadText, requestId: req.requestId)
+        let profile = profileFor(req.targetApp)
+        let resp = profile == "claude"
+            ? sendPromptToClaude(name: req.targetApp, text: req.payloadText, requestId: req.requestId)
+            : sendPromptGeneric(name: req.targetApp, text: req.payloadText, profile: profile)
         if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
             print(str)
         }
     case "observeResponse":
         let timeout = req.timeoutMs ?? 30000
-        let resp = observeResponseFromClaude(name: req.targetApp, requestId: req.requestId, timeoutMs: timeout)
+        let profile = profileFor(req.targetApp)
+        let resp = profile == "claude"
+            ? observeResponseFromClaude(name: req.targetApp, requestId: req.requestId, timeoutMs: timeout)
+            : observeResponseGeneric(name: req.targetApp, requestId: req.requestId, profile: profile, timeoutMs: timeout)
         if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
             print(str)
         }
     case "sendAndObserve":
         let timeout = req.timeoutMs ?? 30000
-        let resp = sendAndObserveClaude(name: req.targetApp, text: req.payloadText, requestId: req.requestId, timeoutMs: timeout)
+        let profile = profileFor(req.targetApp)
+        let resp = profile == "claude"
+            ? sendAndObserveClaude(name: req.targetApp, text: req.payloadText, requestId: req.requestId, timeoutMs: timeout)
+            : sendAndObserveGeneric(name: req.targetApp, text: req.payloadText, requestId: req.requestId, profile: profile, timeoutMs: timeout)
         if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
             print(str)
         }

@@ -1,5 +1,6 @@
 import { AgentSessionAdapter } from './base-adapter.js';
 import { sendDesktopNotification, activateDesktopApp } from './desktop-notifier.js';
+import { ChatGptAutonomousSession } from '../control-plane/chatgpt-autonomous-session.js';
 
 export class ChatGPTSessionAdapter extends AgentSessionAdapter {
   constructor(options = {}) {
@@ -9,6 +10,9 @@ export class ChatGPTSessionAdapter extends AgentSessionAdapter {
     this.presence = options.presenceManager || null;
     this.enableNotifications = options.enableNotifications !== false;
     this.activateAppOnWake = Boolean(options.activateAppOnWake);
+    // Opt-in autonomous delivery through the REAL ChatGPT Desktop app.
+    // Disabled by default so existing notification/buffer semantics are preserved.
+    this.autonomousSession = options.chatgptSession || (options.autonomous ? new ChatGptAutonomousSession(options.chatgptDesktop || options) : null);
   }
 
   async connect() {
@@ -45,6 +49,26 @@ export class ChatGPTSessionAdapter extends AgentSessionAdapter {
   }
 
   async deliverIncomingRequest(request) {
+    // Autonomous path: submit to the REAL ChatGPT Desktop app and wait for the
+    // real, correlated model response. We never report "delivered" as success
+    // here — the response itself is the proof of a completed model turn.
+    if (this.autonomousSession) {
+      const turn = await this.autonomousSession.send({
+        text: request.question || request.message || '',
+        requestId: request.requestId
+      });
+      return {
+        status: turn.success ? 'model_turn_completed' : 'model_turn_failed',
+        agentId: this.agentId,
+        requestId: request.requestId,
+        response: turn.response,
+        transport: turn.transport,
+        modelTurnConfirmed: turn.modelTurnConfirmed,
+        error: turn.error,
+        latencyMs: turn.latencyMs
+      };
+    }
+
     const queued = await this.queueRequest(request);
     return {
       status: 'buffered_in_durable_queue',
@@ -93,6 +117,21 @@ export class ChatGPTSessionAdapter extends AgentSessionAdapter {
   }
 
   async wake(reason = 'incoming_event', { notifyUser = this.enableNotifications, activateApp = this.activateAppOnWake } = {}) {
+    // Autonomous path: wake by driving the real ChatGPT Desktop app. Any pending
+    // correlated requests are recovered and answered with real model turns.
+    if (this.autonomousSession) {
+      const available = await this.autonomousSession.isAvailable().catch(() => false);
+      return {
+        success: available,
+        agentId: this.agentId,
+        wakeupType: 'chatgpt-desktop-accessibility',
+        reason,
+        appActivated: available,
+        sessionAvailable: available,
+        error: available ? null : 'CHATGPT_ACCESSIBILITY_UNAVAILABLE'
+      };
+    }
+
     let userNotified = false;
     if (notifyUser) {
       userNotified = await sendDesktopNotification({
@@ -119,6 +158,24 @@ export class ChatGPTSessionAdapter extends AgentSessionAdapter {
   }
 
   capabilities() {
+    if (this.autonomousSession) {
+      return {
+        agentId: this.agentId,
+        autonomousExecution: true,
+        headlessExecution: false,
+        externalModelWakeup: true,
+        idleWakeupSupported: true,
+        activeTurnRpc: true,
+        transport: 'chatgpt-desktop-accessibility',
+        desktopNotificationSupported: true,
+        fileAccess: true,
+        gitAccess: true,
+        mcpStdio: true,
+        requiresUserPrompt: false,
+        notes: 'Autonomous delivery to the REAL ChatGPT Desktop app via user-authorized macOS Accessibility. Request submission and real model response correlation are enabled.'
+      };
+    }
+
     return {
       agentId: this.agentId,
       autonomousExecution: false,
