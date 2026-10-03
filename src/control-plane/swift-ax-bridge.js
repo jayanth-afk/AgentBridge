@@ -33,12 +33,31 @@ export class SwiftAXBridge {
       return { ok: false, error: 'SWIFT_BINARY_NOT_FOUND' };
     }
 
+    const timeoutMs = (opObj.timeoutMs || 4000) + 2000;
     try {
-      const { stdout } = await execFileAsync(this.binaryPath, [JSON.stringify(opObj)], { timeout: 4000 });
+      const { stdout } = await execFileAsync(this.binaryPath, [JSON.stringify(opObj)], { timeout: timeoutMs });
       return JSON.parse(stdout.trim());
     } catch (err) {
       return { ok: false, error: err.message };
     }
+  }
+
+  async sendPrompt(appName, text, requestId) {
+    return this.executeOp({ op: 'sendPrompt', app: appName, text, requestId, timeoutMs: 6000 });
+  }
+
+  async observeResponse(appName, requestId, timeoutMs = 30000) {
+    return this.executeOp({ op: 'observeResponse', app: appName, requestId, timeoutMs });
+  }
+
+  async sendAndObserve(appName, text, requestId, timeoutMs = 30000) {
+    return this.executeOp({
+      op: 'sendAndObserve',
+      app: appName,
+      text,
+      requestId,
+      timeoutMs
+    });
   }
 
   async ping() {

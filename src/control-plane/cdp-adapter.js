@@ -22,9 +22,47 @@ export class CdpDesktopAdapter extends DesktopControlAdapter {
   }
 
   /**
+   * Dynamic discovery of active CDP remote debugging port
+   */
+  async discoverPort() {
+    try {
+      const { stdout } = await execFileAsync('ps', ['-ef']);
+      const lines = stdout.split('\n');
+      for (const line of lines) {
+        if (line.includes(this.targetApp) || line.includes('Claude')) {
+          const match = line.match(/--remote-debugging-port=(\d+)/);
+          if (match && match[1]) {
+            this.port = parseInt(match[1], 10);
+            return { discovered: true, port: this.port, source: 'process_arg' };
+          }
+        }
+      }
+    } catch {}
+
+    if (process.env.CLAUDE_CDP_PORT) {
+      this.port = parseInt(process.env.CLAUDE_CDP_PORT, 10);
+      return { discovered: true, port: this.port, source: 'env' };
+    }
+
+    const candidates = Array.from(new Set([this.port, 9222, 9223, 9224, 9225]));
+    for (const p of candidates) {
+      try {
+        const { stdout } = await execFileAsync('lsof', ['-i', `:${p}`, '-sTCP:LISTEN']);
+        if (stdout.toLowerCase().includes(this.targetApp.toLowerCase()) || stdout.includes('Electron') || stdout.includes('Claude')) {
+          this.port = p;
+          return { discovered: true, port: p, source: 'lsof_scan' };
+        }
+      } catch {}
+    }
+
+    return { discovered: false, port: this.port, source: 'default' };
+  }
+
+  /**
    * Verify the localhost port is owned by the expected process name
    */
   async verifyPortOwnership() {
+    await this.discoverPort();
     try {
       // lsof -i :<port> -sTCP:LISTEN
       const { stdout } = await execFileAsync('lsof', ['-i', `:${this.port}`, '-sTCP:LISTEN']);
@@ -36,7 +74,7 @@ export class CdpDesktopAdapter extends DesktopControlAdapter {
       if (!matching) {
         return { verified: false, reason: 'PROCESS_MISMATCH', details: `Port ${this.port} is not owned by ${this.targetApp}` };
       }
-      return { verified: true };
+      return { verified: true, port: this.port };
     } catch {
       return { verified: false, reason: 'LSOF_CHECK_FAILED' };
     }
