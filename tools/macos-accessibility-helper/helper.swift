@@ -437,22 +437,30 @@ func captureTextSnapshot(name: String) -> [String] {
 }
 
 func extractLatestClaudeResponse(_ raw: String, requestId: String?) -> String? {
-    var source = raw
-    let marker = requestId.map { "[AB:\($0)]" }
+    guard !raw.isEmpty else { return nil }
 
-    // Prefer the assistant turn that follows this request's correlation marker.
-    if let marker, let markerRange = source.range(of: marker) {
-        source = String(source[markerRange.lowerBound...])
+    var source = raw
+
+    // Correlation is mandatory for live desktop delivery. The accessibility
+    // tree contains the submitted user marker followed by Claude's response
+    // heading/body. Never fall back to an arbitrary older "Claude responded:"
+    // node because that can silently return a stale turn.
+    if let requestId {
+        let marker = "[AB:\(requestId)]"
+        guard let markerRange = source.range(of: marker) else {
+            return nil
+        }
+        source = String(source[markerRange.upperBound...])
     }
 
-    // Claude's Electron accessibility tree exposes screen-reader headings
-    // "You said:" and "Claude responded:" around each rendered turn.
     guard let responseRange = source.range(of: "Claude responded:", options: .caseInsensitive) else {
         return nil
     }
 
     var response = String(source[responseRange.upperBound...])
 
+    // Keep only the response belonging to this assistant turn. Claude exposes
+    // subsequent turns as another "You said:" / "Claude responded:" pair.
     let terminators = [
         "\nYou said:",
         "\nClaude responded:",
@@ -483,8 +491,6 @@ func extractLatestClaudeResponse(_ raw: String, requestId: String?) -> String? {
         .replacingOccurrences(of: "Claude finished the response", with: "")
         .trimmingCharacters(in: .whitespacesAndNewlines)
 
-    // The accessibility tree may expose both the sr-only heading and the
-    // rendered body. If they are identical, keep one copy.
     let lines = response.components(separatedBy: "\n")
         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         .filter { !$0.isEmpty }
@@ -493,12 +499,14 @@ func extractLatestClaudeResponse(_ raw: String, requestId: String?) -> String? {
         let first = lines[0]
         let second = lines[1]
         let normalize: (String) -> String = { value in
-            value.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.map(String.init).joined().lowercased()
+            value.unicodeScalars
+                .filter { CharacterSet.alphanumerics.contains($0) }
+                .map(String.init)
+                .joined()
+                .lowercased()
         }
 
-        // Electron exposes both an accessible heading and the rendered body.
-        // Claude may normalize punctuation/underscores in the heading, so
-        // compare alphanumeric forms before deciding they are duplicates.
+        // Electron may expose both an accessible heading and rendered body.
         if normalize(first) == normalize(second) {
             return second
         }
@@ -602,88 +610,104 @@ func observeResponseFromClaude(name: String, requestId: String?, timeoutMs: Int,
         return false
     }
 
-    // Baseline snapshot MUST be captured before submission when the
-    // caller is performing a send+observe operation. Otherwise a fast
-    // response can complete before a second process establishes its baseline.
-    let baseTexts: [String]
+    // The baseline is still captured before submission to preserve the
+    // send/observe ordering guarantee. Correlation itself is now performed
+    // against the complete live AX tree so historical nodes cannot shadow the
+    // current request.
     if let providedBaseline = baselineTexts {
-        baseTexts = providedBaseline
+        _ = providedBaseline
     } else {
         var captured: [String] = []
         collectAllText(win, depth: 0, texts: &captured)
-        baseTexts = captured
+        _ = captured
     }
-    let baseSet = Set(baseTexts)
-    let baseLength = baseTexts.joined().count
 
     var sawGenerating = false
-    var doneGenerating = false
-    var lastSnapshot: [String] = []
-    var stableRounds = 0
+    var lastCorrelatedResponse = ""
+    var stableResponseRounds = 0
 
     while Date().timeIntervalSince(start) < maxDuration {
-        usleep(350_000) // 350ms poll
+        usleep(300_000)
 
         let generating = checkGenerating(win)
-        if generating { sawGenerating = true; stableRounds = 0 }
-        else if sawGenerating && !doneGenerating { doneGenerating = true }
+        if generating {
+            sawGenerating = true
+            stableResponseRounds = 0
+        }
 
         var snapshot: [String] = []
         collectAllText(win, depth: 0, texts: &snapshot)
 
-        let newTexts = snapshot.filter { !baseSet.contains($0) && !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        let currentLength = snapshot.joined().count
-
-        if !newTexts.isEmpty {
-            if snapshot == lastSnapshot { stableRounds += 1 } else { stableRounds = 0; lastSnapshot = snapshot }
-
-            if doneGenerating || stableRounds >= 3 {
-                let response = newTexts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-                if !response.isEmpty,
-                   let extracted = extractLatestClaudeResponse(response, requestId: requestId),
-                   !extracted.isEmpty {
-                    let latency = Date().timeIntervalSince(start) * 1000.0
-                    return ObserveTurnResponse(ok: true, status: "COMPLETED", requestId: requestId, response: extracted, latencyMs: latency, error: nil)
-                }
+        // IMPORTANT: parse the COMPLETE current AX tree, not only values that
+        // differ from the baseline. Claude can reuse/accessibly replace nodes,
+        // and Set-based baseline subtraction can discard the exact correlated
+        // heading/body needed to identify the current response.
+        let rawSnapshot = snapshot.joined(separator: "\n")
+        if let extracted = extractLatestClaudeResponse(rawSnapshot, requestId: requestId),
+           !extracted.isEmpty {
+            if extracted == lastCorrelatedResponse {
+                stableResponseRounds += 1
+            } else {
+                lastCorrelatedResponse = extracted
+                stableResponseRounds = 0
             }
-        }
 
-        // Fallback: text length grew significantly after generation finished
-        if doneGenerating && currentLength > baseLength + 20 {
-            let response = newTexts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !response.isEmpty,
-               let extracted = extractLatestClaudeResponse(response, requestId: requestId),
-               !extracted.isEmpty {
+            // Require the response to settle. If Claude exposes a stop/cancel
+            // control, completion is only accepted after it disappears. If no
+            // such control is exposed, two identical observations provide the
+            // conservative completion signal.
+            if (!generating && (sawGenerating || stableResponseRounds >= 2)) {
                 let latency = Date().timeIntervalSince(start) * 1000.0
-                return ObserveTurnResponse(ok: true, status: "COMPLETED", requestId: requestId, response: extracted, latencyMs: latency, error: nil)
+                return ObserveTurnResponse(
+                    ok: true,
+                    status: "COMPLETED",
+                    requestId: requestId,
+                    response: extracted,
+                    latencyMs: latency,
+                    error: nil
+                )
             }
         }
     }
 
-    // Last-chance: return any new content that appeared even if timeout
+    // Final reconciliation uses the COMPLETE current AX tree. Never return an
+    // unrelated historical response merely because it is visible in Claude.
     var finalTexts: [String] = []
     collectAllText(win, depth: 0, texts: &finalTexts)
-    let finalNew = finalTexts.filter { !baseSet.contains($0) && !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-    if !finalNew.isEmpty {
-        let raw = finalNew.joined(separator: "\n")
-        if let extracted = extractLatestClaudeResponse(raw, requestId: requestId), !extracted.isEmpty {
-            let latency = Date().timeIntervalSince(start) * 1000.0
-            return ObserveTurnResponse(ok: true, status: "COMPLETED", requestId: requestId, response: extracted, latencyMs: latency, error: nil)
-        }
+    let finalRaw = finalTexts.joined(separator: "\n")
 
-        // Content changed, but no assistant turn can yet be correlated.
-        // Do NOT report this as successful delivery.
+    if let extracted = extractLatestClaudeResponse(finalRaw, requestId: requestId),
+       !extracted.isEmpty {
+        let latency = Date().timeIntervalSince(start) * 1000.0
+        return ObserveTurnResponse(
+            ok: true,
+            status: "COMPLETED_RECONCILED",
+            requestId: requestId,
+            response: extracted,
+            latencyMs: latency,
+            error: nil
+        )
+    }
+
+    if finalRaw.contains(requestId.map { "[AB:\($0)]" } ?? "") {
         return ObserveTurnResponse(
             ok: false,
             status: "RESPONSE_INCOMPLETE",
             requestId: requestId,
             response: nil,
             latencyMs: nil,
-            error: "Claude UI changed but no correlated assistant response was observed"
+            error: "Claude accepted the correlated request but no correlated assistant response was observed"
         )
     }
 
-    return ObserveTurnResponse(ok: false, status: "TIMEOUT", requestId: requestId, response: nil, latencyMs: nil, error: "Timed out waiting for Claude response")
+    return ObserveTurnResponse(
+        ok: false,
+        status: "CORRELATION_NOT_FOUND",
+        requestId: requestId,
+        response: nil,
+        latencyMs: nil,
+        error: "Claude response correlation marker was not found in the live accessibility tree"
+    )
 }
 
 
