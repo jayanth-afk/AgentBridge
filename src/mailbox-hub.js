@@ -128,7 +128,9 @@ export class MailboxHub {
     priority = 'normal',
     dependencies = [],
     conversationId = null,
-    requestId = null
+    requestId = null,
+    notifyInbox = true,
+    emitEvent = true
   }) {
     const task = this.tasks.createTask({
       fromAgent,
@@ -143,19 +145,21 @@ export class MailboxHub {
 
     const convId = conversationId || `conv_task_${task.id}`;
 
-    // Send an inbox message for durable mail fallback
-    this.sendMessage({
-      fromAgent,
-      toAgent,
-      subject: `[Task Delegation] ${title}`,
-      content: `New task assigned (${task.id}): ${instructions}`,
-      replyToId: null,
-      conversationId: convId,
-      requestId
-    });
+    // Send an inbox message for durable mail fallback only if requested
+    if (notifyInbox) {
+      this.sendMessage({
+        fromAgent,
+        toAgent,
+        subject: `[Task Delegation] ${title}`,
+        content: `New task assigned (${task.id}): ${instructions}`,
+        replyToId: null,
+        conversationId: convId,
+        requestId
+      });
+    }
 
     // Cross-process event bus notification for instant wakeup
-    if (this.eventBus) {
+    if (emitEvent && this.eventBus) {
       this.eventBus.publish({
         type: 'task_created',
         agentId: toAgent,
@@ -216,7 +220,7 @@ export class MailboxHub {
       };
     }
 
-    // 2. Correlated Request Generation
+    // 2. Correlated Request Generation (clean REQUEST semantics: 1 request row, 1 task row, 1 event)
     const reqId = requestId || `req_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const convId = conversationId || `conv_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const now = new Date().toISOString();
@@ -237,7 +241,7 @@ export class MailboxHub {
       ) VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', NULL, NULL, ?, ?, ?)
     `).run(reqId, convId, fromAgent, toAgent, question, ctxString, timeoutMs, now, now);
 
-    // Create backing task
+    // Create backing task without redundant inbox messages or duplicate task_created events
     const task = this.delegateTask({
       fromAgent,
       toAgent,
@@ -246,15 +250,17 @@ export class MailboxHub {
       context: taskContext,
       priority: 'high',
       conversationId: convId,
-      requestId: reqId
+      requestId: reqId,
+      notifyInbox: false,
+      emitEvent: false
     });
 
-    // Update request with backing task id
+    // Explicit bidirectional mapping: request_id <-> task_id
     this.db.prepare(`
       UPDATE bridge_requests SET task_id = ? WHERE request_id = ?
     `).run(task.id, reqId);
 
-    // Emit request_created event
+    // Emit single authoritative request_created event
     if (this.eventBus) {
       this.eventBus.publish({
         type: 'request_created',
@@ -417,6 +423,7 @@ export class MailboxHub {
       const snippet = resultStr ? (resultStr.length > 100 ? resultStr.slice(0, 100) + '...' : resultStr) : null;
 
       if (requestId) {
+        // Authoritative response event for correlated request
         this.eventBus.publish({
           type: 'response_delivered',
           agentId: recipient,
@@ -431,26 +438,27 @@ export class MailboxHub {
             error: error ? (error.length > 80 ? error.slice(0, 80) + '...' : error) : null
           }
         });
-      }
-
-      this.eventBus.publish({
-        type: status === 'completed' ? 'task_completed' : 'task_failed',
-        agentId: recipient,
-        fromAgent: agentId,
-        conversationId: conversationId || `conv_task_${taskId}`,
-        requestId,
-        taskId,
-        status,
-        payload: {
-          snippet,
+      } else {
+        // Standalone task outcome
+        this.eventBus.publish({
+          type: status === 'completed' ? 'task_completed' : 'task_failed',
+          agentId: recipient,
+          fromAgent: agentId,
+          conversationId: conversationId || `conv_task_${taskId}`,
+          requestId: null,
+          taskId,
           status,
-          error: error ? (error.length > 80 ? error.slice(0, 80) + '...' : error) : null
-        }
-      });
+          payload: {
+            snippet,
+            status,
+            error: error ? (error.length > 80 ? error.slice(0, 80) + '...' : error) : null
+          }
+        });
+      }
     }
 
-    // 2. Durable mailbox notification fallback
-    if (task && task.creator && task.creator !== agentId) {
+    // 2. Durable mailbox notification fallback only for standalone tasks (not active correlated requests)
+    if (!requestId && task && task.creator && task.creator !== agentId) {
       this.sendMessage({
         fromAgent: agentId,
         toAgent: task.creator,
@@ -460,11 +468,11 @@ export class MailboxHub {
           status,
           result: task.result,
           error: task.error,
-          requestId,
+          requestId: null,
           conversationId
         }),
         conversationId,
-        requestId
+        requestId: null
       });
     }
 

@@ -226,5 +226,11 @@ test('Optimizations, Atomic Patching & Token Efficiency Suite', async (t) => {
     assert.strictEqual(snapshot.tools.bridge_read_file.errors, 1);
     assert.strictEqual(snapshot.tasks.completed, 1);
     assert.ok(snapshot.memoryMb);
+
+    const agentDiag = diagnostics.getAgentDiagnostics('antigravity-ide', { db: logger.db });
+    assert.strictEqual(agentDiag.agent, 'antigravity-ide');
+    assert.ok('cursor' in agentDiag);
+    assert.ok('pendingEvents' in agentDiag);
+    assert.ok('pendingRequests' in agentDiag);
   });
 });

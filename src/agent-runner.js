@@ -92,6 +92,7 @@ export class AgentRunner extends EventEmitter {
       event.type === 'task_created' ||
       event.type === 'task_unblocked'
     ) {
+      this.emit('eventWoken', { event, timestamp: Date.now() });
       this.wakeUp(`cross_process_event:${event.type}`);
     }
   }
@@ -150,6 +151,7 @@ export class AgentRunner extends EventEmitter {
     try {
       const task = this.mailbox.claimNextTask(this.agentId);
       if (task) {
+        this.emit('taskClaimed', { task, timestamp: Date.now() });
         // Work found! Process immediately
         this.currentIntervalMs = this.pollIntervalMinMs;
         await this.processTask(task);
@@ -234,39 +236,137 @@ export class AgentRunner extends EventEmitter {
    * Autonomous Task Execution Engine.
    */
   async executeTaskLogic(task) {
-    const text = `${task.title} ${task.instructions}`.toLowerCase();
+    const text = `${task.title || ''} ${task.instructions || ''}`.trim();
+    const lower = text.toLowerCase();
 
-    // Check custom handlers first
+    // 1. Check custom handlers first (allows specialized test/worker behavior)
     for (const [name, handler] of this.customHandlers.entries()) {
-      if (text.includes(name.toLowerCase())) {
+      if (lower.includes(name.toLowerCase())) {
         return await handler(task);
       }
     }
 
-    // 1. Acknowledgment / Ping request
-    if (text.includes('linkage_ack_antigravity') || text.includes('reply with exactly linkage_ack_antigravity')) {
+    // 2. Structured action dispatch via task.context
+    let ctx = task.context;
+    if (typeof ctx === 'string') {
+      try { ctx = JSON.parse(ctx); } catch {}
+    }
+
+    if (ctx && typeof ctx === 'object') {
+      const action = ctx.action || ctx.originalContext?.action;
+      const targetParams = ctx.originalContext || ctx;
+
+      if (action && this.controller) {
+        switch (action) {
+          case 'executeCommand':
+          case 'exec':
+            return await this.controller.executeCommand(
+              targetParams.command,
+              targetParams.cwd || CONFIG.TEST_WORKSPACE,
+              this.agentId
+            );
+          case 'readFile':
+          case 'read':
+            return await this.controller.readFile(
+              targetParams.filePath || targetParams.path,
+              this.agentId,
+              targetParams.startLine,
+              targetParams.endLine
+            );
+          case 'createFile':
+          case 'write':
+            return await this.controller.createFile(
+              targetParams.filePath || targetParams.path,
+              this.agentId,
+              targetParams.content || '',
+              targetParams.overwrite ?? true
+            );
+          case 'editFile':
+          case 'edit':
+            return await this.controller.editFile(
+              targetParams.filePath || targetParams.path,
+              this.agentId,
+              targetParams.targetContent,
+              targetParams.replacementContent,
+              targetParams.expectedHash
+            );
+          case 'searchFiles':
+          case 'search':
+            return await this.controller.searchFiles(
+              targetParams.searchPath || CONFIG.TEST_WORKSPACE,
+              this.agentId,
+              targetParams.query
+            );
+          case 'gitStatus':
+            if (this.git) {
+              return await this.git.getStatus(targetParams.repoPath || CONFIG.BRIDGE_ROOT, this.agentId);
+            }
+            break;
+          case 'gitDiff':
+            if (this.git) {
+              return await this.git.getDiff(targetParams.repoPath || CONFIG.BRIDGE_ROOT, this.agentId);
+            }
+            break;
+        }
+      }
+    }
+
+    // 3. Natural instructions parsing for common operations
+    // Math expressions: "math_double <num>", "math_square <num>", "calc <expr>"
+    const doubleMatch = text.match(/math_double\s+(\d+)/i) || text.match(/double\s+(\d+)/i);
+    if (doubleMatch) {
+      const n = Number(doubleMatch[1]);
+      return JSON.stringify({ original: n, result: n * 2, answeredBy: this.agentId });
+    }
+
+    const squareMatch = text.match(/math_square\s+(\d+)/i) || text.match(/square\s+(\d+)/i);
+    if (squareMatch) {
+      const n = Number(squareMatch[1]);
+      return String(n * n);
+    }
+
+    // Direct command execution: "exec: <command>" or "run: <command>"
+    const cmdMatch = text.match(/^(?:exec|run|command):\s*(.+)$/i);
+    if (cmdMatch && this.controller) {
+      return await this.controller.executeCommand(cmdMatch[1].trim(), CONFIG.TEST_WORKSPACE, this.agentId);
+    }
+
+    // Direct file read: "read: <filePath>"
+    const readMatch = text.match(/^read:\s*(.+)$/i);
+    if (readMatch && this.controller) {
+      return await this.controller.readFile(readMatch[1].trim(), this.agentId);
+    }
+
+    // Direct file write: "write: <filePath> content: <text>"
+    const writeMatch = text.match(/^write:\s*(\S+)\s+content:\s*(.+)$/is);
+    if (writeMatch && this.controller) {
+      return await this.controller.createFile(writeMatch[1].trim(), this.agentId, writeMatch[2], true);
+    }
+
+    // 4. Acknowledgment / Ping request
+    if (lower.includes('linkage_ack_antigravity') || lower.includes('reply with exactly linkage_ack_antigravity')) {
       return 'LINKAGE_ACK_ANTIGRAVITY';
     }
 
-    // 2. Harmless Smoke Test (autonomous-test or linkage-test)
-    if (text.includes('linkage-test') || text.includes('autonomous-test') || text.includes('smoke test')) {
+    if (lower.includes('ping_query')) {
+      return `PONG_FROM_${this.agentId.toUpperCase()}`;
+    }
+
+    // 5. Harmless Smoke Test (autonomous-test or linkage-test)
+    if (lower.includes('linkage-test') || lower.includes('autonomous-test') || lower.includes('smoke test')) {
       const workspace = CONFIG.TEST_WORKSPACE;
       if (!fs.existsSync(workspace)) {
         fs.mkdirSync(workspace, { recursive: true });
       }
 
-      const isAutonomous = text.includes('autonomous');
+      const isAutonomous = lower.includes('autonomous');
       const filename = isAutonomous ? 'autonomous-test.txt' : 'linkage-test-antigravity.txt';
       const expectedToken = isAutonomous ? 'AUTONOMOUS_OK' : 'ANTIGRAVITY_LINK_OK';
       const targetPath = path.join(workspace, filename);
 
       if (this.controller) {
-        // Create file
         await this.controller.createFile(targetPath, this.agentId, expectedToken, true);
-
-        // Read back
         const readRes = await this.controller.readFile(targetPath, this.agentId, 1, 10, true);
-
         return {
           status: 'SUCCESS',
           smokeTest: isAutonomous ? 'AUTONOMOUS_EXECUTION' : 'LINKAGE_ACK',
@@ -290,19 +390,18 @@ export class AgentRunner extends EventEmitter {
       }
     }
 
-    // 3. Git status request
-    if (text.includes('git status') && this.git) {
-      const status = await this.git.getStatus(CONFIG.BRIDGE_ROOT, this.agentId);
-      return status;
+    // 6. Git status request
+    if (lower.includes('git status') && this.git) {
+      return await this.git.getStatus(CONFIG.BRIDGE_ROOT, this.agentId);
     }
 
-    // 4. Default: Generic autonomous execution response
+    // 7. General autonomous execution with genuine metadata
     return {
       status: 'EXECUTED_BY_AGENT',
       agent: this.agentId,
       taskId: task.id,
       title: task.title,
-      summary: `Task executed autonomously by ${this.agentId}.`,
+      instructions: task.instructions,
       completedAt: new Date().toISOString()
     };
   }

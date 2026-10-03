@@ -129,12 +129,22 @@ export class ToolRegistry {
 
     this.registerTool({
       name: 'bridge_diagnostics',
-      description: 'Get compact performance metrics, tool latencies, and cache statistics.',
+      description: 'Get compact performance metrics, tool latencies, cache statistics, or per-agent observability.',
       inputSchema: {
         type: 'object',
-        properties: {}
+        properties: {
+          agentId: { type: 'string', description: 'Optional agent ID to retrieve specific agent state, cursor, and pending metrics' }
+        }
       },
       handler: async (args, ctx) => {
+        if (args.agentId && ctx.diagnostics) {
+          return ctx.diagnostics.getAgentDiagnostics(args.agentId, {
+            db: ctx.db || ctx.audit?.db,
+            eventBus: ctx.eventBus,
+            presenceManager: ctx.presence,
+            taskManager: ctx.taskManager
+          });
+        }
         return ctx.diagnostics ? ctx.diagnostics.getSnapshot(ctx.cache) : { status: 'no_diagnostics' };
       }
     });

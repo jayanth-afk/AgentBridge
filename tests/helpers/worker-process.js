@@ -46,6 +46,18 @@ if (mode === 'worker') {
     return `PONG_FROM_${agentId.toUpperCase()}`;
   });
 
+  runner.on('eventWoken', (data) => {
+    process.stdout.write(`TIMING_B_WAKE:${JSON.stringify({ timestamp: data.timestamp, eventType: data.event?.type })}\n`);
+  });
+
+  runner.on('taskClaimed', (data) => {
+    process.stdout.write(`TIMING_B_CLAIM:${JSON.stringify({ timestamp: data.timestamp, taskId: data.task?.id })}\n`);
+  });
+
+  runner.on('taskCompleted', (data) => {
+    process.stdout.write(`TIMING_B_COMPLETE:${JSON.stringify({ timestamp: data.timestamp, executionMs: data.executionMs })}\n`);
+  });
+
   runner.start();
   process.stdout.write(`WORKER_READY:${agentId}\n`);
 
@@ -74,6 +86,7 @@ if (mode === 'worker') {
 
   async function run() {
     try {
+      const t0 = Date.now();
       // Direct correlated askAgent without any polling, check_inbox, or get_task_status
       const outcome = await mailbox.askAgent({
         fromAgent: agentId,
@@ -81,7 +94,9 @@ if (mode === 'worker') {
         question,
         timeoutMs: 15000
       });
+      const tDelivery = Date.now();
 
+      process.stdout.write(`REQUEST_TIMING:${JSON.stringify({ t0, tDelivery, totalRoundTripMs: tDelivery - t0 })}\n`);
       process.stdout.write(`REQUEST_RESULT:${JSON.stringify(outcome)}\n`);
       eventBus.close();
       logger.close();
