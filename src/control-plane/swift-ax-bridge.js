@@ -52,4 +52,16 @@ export class SwiftAXBridge {
   async activateApp(appName) {
     return this.executeOp({ op: 'activate', app: appName });
   }
+
+  async getFrontmostApp() {
+    return this.executeOp({ op: 'frontmost' });
+  }
+
+  async restoreFocus(pid) {
+    return this.executeOp({ op: 'restoreFocus', pid });
+  }
+
+  async unhideApp(appName) {
+    return this.executeOp({ op: 'unhide', app: appName });
+  }
 }

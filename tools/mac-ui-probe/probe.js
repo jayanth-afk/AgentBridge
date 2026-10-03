@@ -146,7 +146,7 @@ export async function probeApplicationUI(appName) {
   }
 }
 
-if (process.argv[1].endsWith('probe.js')) {
+if (process.argv[1] && process.argv[1].endsWith('probe.js')) {
   const target = process.argv[2] || 'Claude';
   probeApplicationUI(target).then((res) => {
     console.log(JSON.stringify(res, null, 2));

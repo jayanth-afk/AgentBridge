@@ -9,6 +9,7 @@ struct RequestOp: Codable {
     let bundleId: String?
     let value: String?
     let requestId: String?
+    let pid: pid_t?
 }
 
 struct InspectResponse: Codable {
@@ -19,6 +20,13 @@ struct InspectResponse: Codable {
     let windowCount: Int
     let windows: [String]
     let error: String?
+}
+
+struct FrontmostResponse: Codable {
+    let ok: Bool
+    let name: String
+    let pid: pid_t
+    let bundleId: String?
 }
 
 struct SimpleResponse: Codable {
@@ -35,6 +43,22 @@ func findAppProcess(name: String) -> NSRunningApplication? {
         }
         return false
     }
+}
+
+func findAppByPid(pid: pid_t) -> NSRunningApplication? {
+    return NSRunningApplication(processIdentifier: pid)
+}
+
+func getFrontmostApp() -> FrontmostResponse {
+    if let front = NSWorkspace.shared.frontmostApplication {
+        return FrontmostResponse(
+            ok: true,
+            name: front.localizedName ?? "Unknown",
+            pid: front.processIdentifier,
+            bundleId: front.bundleIdentifier
+        )
+    }
+    return FrontmostResponse(ok: false, name: "None", pid: 0, bundleId: nil)
 }
 
 func inspectApp(name: String) -> InspectResponse {
@@ -71,30 +95,25 @@ func activateApp(name: String) -> SimpleResponse {
     guard let app = findAppProcess(name: name) else {
         return SimpleResponse(ok: false, status: "APP_NOT_RUNNING", details: nil)
     }
-    let success = app.activate(options: [.activateIgnoringOtherApps])
+    app.unhide()
+    let success = app.activate(options: [])
     return SimpleResponse(ok: success, status: success ? "ACTIVATED" : "FAILED", details: nil)
 }
 
-// Process single JSON command from argument or stdin
-let args = CommandLine.arguments
-if args.count > 1 {
-    let commandJson = args[1]
-    if let data = commandJson.data(using: .utf8),
-       let req = try? JSONDecoder().decode(RequestOp.self, from: data) {
-        handleRequest(req)
-    } else {
-        print("{\"ok\":false,\"error\":\"INVALID_JSON\"}")
+func restoreFocusToPid(pid: pid_t) -> SimpleResponse {
+    guard let app = findAppByPid(pid: pid) else {
+        return SimpleResponse(ok: false, status: "PROCESS_NOT_FOUND", details: nil)
     }
-} else {
-    // Read from standard input line by line
-    while let line = readLine() {
-        if let data = line.data(using: .utf8),
-           let req = try? JSONDecoder().decode(RequestOp.self, from: data) {
-            handleRequest(req)
-        } else {
-            print("{\"ok\":false,\"error\":\"INVALID_JSON\"}")
-        }
+    let success = app.activate(options: [])
+    return SimpleResponse(ok: success, status: success ? "RESTORED" : "FAILED", details: nil)
+}
+
+func unhideApp(name: String) -> SimpleResponse {
+    guard let app = findAppProcess(name: name) else {
+        return SimpleResponse(ok: false, status: "APP_NOT_RUNNING", details: nil)
     }
+    let success = app.unhide()
+    return SimpleResponse(ok: success, status: success ? "UNHIDDEN" : "FAILED", details: nil)
 }
 
 func handleRequest(_ req: RequestOp) {
@@ -102,6 +121,11 @@ func handleRequest(_ req: RequestOp) {
     switch req.op {
     case "ping":
         print("{\"ok\":true,\"status\":\"pong\"}")
+    case "frontmost":
+        let resp = getFrontmostApp()
+        if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
+            print(str)
+        }
     case "inspect":
         let resp = inspectApp(name: req.app ?? "Claude")
         if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
@@ -112,7 +136,45 @@ func handleRequest(_ req: RequestOp) {
         if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
             print(str)
         }
+    case "restoreFocus":
+        let targetPid = req.pid ?? 0
+        let resp = restoreFocusToPid(pid: targetPid)
+        if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
+            print(str)
+        }
+    case "unhide":
+        let resp = unhideApp(name: req.app ?? "Claude")
+        if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
+            print(str)
+        }
     default:
         print("{\"ok\":false,\"error\":\"UNKNOWN_OP\"}")
+    }
+    fflush(stdout)
+}
+
+// Support command-line JSON argument or persistent line-by-line stdin
+let args = CommandLine.arguments
+if args.count > 1 && args[1] != "--daemon" {
+    let commandJson = args[1]
+    if let data = commandJson.data(using: .utf8),
+       let req = try? JSONDecoder().decode(RequestOp.self, from: data) {
+        handleRequest(req)
+    } else {
+        print("{\"ok\":false,\"error\":\"INVALID_JSON\"}")
+    }
+} else {
+    // Daemon or stream mode: continuously process lines from stdin
+    while let line = readLine() {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { continue }
+        if trimmed == "quit" || trimmed == "exit" { break }
+        if let data = trimmed.data(using: .utf8),
+           let req = try? JSONDecoder().decode(RequestOp.self, from: data) {
+            handleRequest(req)
+        } else {
+            print("{\"ok\":false,\"error\":\"INVALID_JSON\"}")
+            fflush(stdout)
+        }
     }
 }

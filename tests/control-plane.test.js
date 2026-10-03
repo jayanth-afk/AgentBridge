@@ -8,6 +8,9 @@ import {
   ResponseObserver,
   ObserverState,
   CdpDesktopAdapter,
+  BrowserSessionAdapter,
+  PersistentDesktopSessionManager,
+  SessionState,
   RequestEnvelope,
   PriorityScheduler,
   RequestState,
@@ -199,5 +202,67 @@ test('Desktop Control Plane, Protocols & Extreme Sideways Integration Suite', as
     const diag = await plane.diagnostics();
     assert.strictEqual(diag.desktopControlPlane, true);
     assert.strictEqual(diag.routes.accessibility.swiftHelperAvailable, true);
+  });
+
+  await t.test('9. PersistentDesktopSessionManager: state detection and focus restoration', async () => {
+    const mockSwift = {
+      inspectApp: async (app) => ({ ok: true, running: true, pid: 12345, windowCount: 1, windows: ['Claude'] }),
+      getFrontmostApp: async () => ({ ok: true, name: 'Brave Browser', pid: 9999, bundleId: 'com.brave.Browser' }),
+      restoreFocus: async (pid) => ({ ok: true, status: 'RESTORED' }),
+      unhideApp: async (app) => ({ ok: true })
+    };
+
+    const mockLocator = {
+      findActiveConversation: async () => ({ unambiguous: true, conversation: { title: 'Agent Bridge Session', windowTitle: 'Claude' } })
+    };
+
+    const manager = new PersistentDesktopSessionManager({
+      swiftBridge: mockSwift,
+      locator: mockLocator
+    });
+
+    const state = await manager.getSessionState('Claude');
+    assert.strictEqual(state, SessionState.ACCESSIBLE_WINDOW);
+
+    const prevFocus = await manager.captureUserFocus();
+    assert.strictEqual(prevFocus.name, 'Brave Browser');
+
+    const restoreRes = await manager.restoreUserFocus(prevFocus);
+    assert.strictEqual(restoreRes.restored, true);
+    assert.strictEqual(restoreRes.restoredTo, 'Brave Browser');
+
+    const convRes = await manager.ensureConversation('Claude', 'Agent Bridge');
+    assert.strictEqual(convRes.ok, true);
+    assert.strictEqual(convRes.dedicated, true);
+  });
+
+  await t.test('10. BrowserSessionAdapter: profile path handling and health status', async () => {
+    const browser = new BrowserSessionAdapter({ enabled: false, targetService: 'claude' });
+    const healthBlocked = await browser.health();
+    assert.strictEqual(healthBlocked.status, AdapterHealth.BLOCKED);
+
+    browser.enabled = true;
+    const healthAvailable = await browser.health();
+    assert.strictEqual(healthAvailable.status, AdapterHealth.AVAILABLE);
+
+    const sendRes = await browser.sendMessage({ requestId: 'req_browser_01' });
+    assert.strictEqual(sendRes.success, true);
+    assert.strictEqual(sendRes.transport, 'browser');
+  });
+
+  await t.test('11. DesktopControlPlane: cross-route single-flight lock and error handling', async () => {
+    const plane = new DesktopControlPlane({ enabled: true });
+    plane.axEngine.ensureAccessibleWindow = async () => ({ ok: false, error: 'NO_WINDOW' });
+
+    // Manually acquire in-flight lock for req_lock_01
+    plane.inFlightLocks.add('req_lock_01');
+
+    const dupRes = await plane.dispatch('Test', {
+      targetAgent: 'claude-desktop',
+      requestId: 'req_lock_01'
+    });
+
+    assert.strictEqual(dupRes.success, false);
+    assert.strictEqual(dupRes.error, 'DUPLICATE_IN_FLIGHT');
   });
 });

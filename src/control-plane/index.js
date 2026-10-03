@@ -5,4 +5,6 @@ export { AXEngine } from './ax-engine.js';
 export { SwiftAXBridge } from './swift-ax-bridge.js';
 export { ResponseObserver, ObserverState } from './response-observer.js';
 export { CdpDesktopAdapter } from './cdp-adapter.js';
+export { BrowserSessionAdapter } from './browser-session-adapter.js';
+export { PersistentDesktopSessionManager, SessionState, FocusPolicy } from './persistent-session-manager.js';
 export { RequestEnvelope, PriorityScheduler, RequestState, PriorityLevel } from '../protocol/envelope.js';
