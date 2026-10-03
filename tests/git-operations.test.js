@@ -125,11 +125,13 @@ test('Autonomous Structured Git Operations & Validation Suite', async (t) => {
       try { fs.rmdirSync(invalidDir); } catch {}
     }
 
-    // 2. Invalid Remote Validation
+    // 2. Invalid Remote Validation. Use the active branch so this
+    // validation remains valid after feature branches are merged/deleted.
+    const activeBranchForValidation = (await git.getBranches(CONFIG.BRIDGE_ROOT, 'antigravity-ide', true)).current;
     await assert.rejects(async () => {
       await git.push(CONFIG.BRIDGE_ROOT, 'antigravity-ide', {
         remote: 'non-existent-remote-999',
-        branch: 'agent-bridge/autonomous-optimization'
+        branch: activeBranchForValidation
       });
     }, /InvalidGitRemote/);
 
