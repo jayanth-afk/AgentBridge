@@ -1,6 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveSecret } from './config-resolver.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -38,6 +39,24 @@ export const CONFIG = {
   // hardcoded, and does not include the hostname or username.
   ENVIRONMENT_LABEL:
     process.env.AGENT_BRIDGE_ENVIRONMENT || `${os.platform()} ${os.arch()}`,
+
+  // Control-plane authentication boundary.
+  //
+  // `api_key` may be a literal secret or an `env:CONTROL_PLANE_API_KEY`
+  // reference. When the reference is used but the variable is missing/empty,
+  // resolution throws at startup instead of silently disabling authentication.
+  // `require_api_key` forces the HTTP control plane to reject unauthenticated
+  // requests; it must have a usable key or startup fails.
+  CONTROL_PLANE: (() => {
+    // `control_plane.api_key` accepts a literal value or an `env:NAME`
+    // indirection. A present but unresolvable reference throws here at startup.
+    const rawKey = process.env.CONTROL_PLANE_API_KEY_CONFIG ?? process.env.CONTROL_PLANE_API_KEY;
+    const requireFlag = process.env.CONTROL_PLANE_REQUIRE_API_KEY;
+    return {
+      API_KEY: resolveSecret(rawKey, { name: 'control_plane.api_key' }),
+      REQUIRE_API_KEY: requireFlag === '1' || requireFlag === 'true'
+    };
+  })(),
 
   // Known agent identities
   AGENT_IDENTITIES: [

@@ -820,23 +820,37 @@ export class ProjectController {
         command: cmdCheck.command,
         exitCode: 0,
         stdout: stdout.trim(),
-        stderr: stderr.trim()
+        stderr: stderr.trim(),
+        timedOut: false,
+        isError: false
       };
     } catch (err) {
+      // A timeout or non-zero exit is a real failure. Surface it as such instead
+      // of returning a normal-shaped result the client would read as success.
+      const timedOut = err.killed === true || err.signal != null || err.code === 'ETIMEDOUT'
+        || /timed out/i.test(err.message || '');
+      const exitCode = typeof err.code === 'number' ? err.code : (timedOut ? 124 : 1);
+
       this.logger.log({
         agentId,
         action: 'execute_command',
         command: cmdCheck.command,
         status: 'failed',
         executionMs: Date.now() - t0,
-        details: { exitCode: err.code || 1, error: err.message }
+        details: { exitCode, timedOut, error: err.message }
       });
 
       return {
         command: cmdCheck.command,
-        exitCode: err.code || 1,
-        stdout: (err.stdout || '').trim(),
-        stderr: (err.stderr || err.message).trim()
+        exitCode,
+        stdout: String(err.stdout || '').trim(),
+        stderr: String(err.stderr || err.message || '').trim(),
+        timedOut,
+        timeoutMs: timedOut ? timeoutMs : undefined,
+        isError: true,
+        error: timedOut
+          ? `Command timed out after ${timeoutMs}ms: ${cmdCheck.command}`
+          : `Command exited with code ${exitCode}: ${cmdCheck.command}`
       };
     }
   }

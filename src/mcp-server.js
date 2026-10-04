@@ -111,7 +111,9 @@ export class BridgeMcpServer {
 
       try {
         const result = await this.registry.executeTool(name, args, toolContext);
+        const isError = Boolean(result && typeof result === 'object' && result.isError === true);
         return {
+          ...(isError ? { isError: true } : {}),
           content: [
             {
               type: 'text',

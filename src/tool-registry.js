@@ -258,7 +258,7 @@ export class ToolRegistry {
         },
         required: ['filePath', 'agentId']
       },
-      handler: async (args, ctx) => ctx.controller.readFile(args.filePath, args.agentId, args.startLine, args.endLine, args.compact)
+      handler: async (args, ctx) => ctx.controller.readFile(args.filePath, args.agentId, args.startLine, args.endLine, args.compact, args.knownHash)
     });
 
     this.registerTool({
@@ -419,11 +419,17 @@ export class ToolRegistry {
         properties: {
           commandLine: { type: 'string' },
           cwd: { type: 'string' },
+          timeoutMs: { type: 'number', description: 'Execution timeout in milliseconds (default 30000)' },
           agentId: { type: 'string' }
         },
         required: ['commandLine', 'agentId']
       },
-      handler: async (args, ctx) => ctx.controller.executeCommand(args.commandLine, args.cwd, args.agentId)
+      handler: async (args, ctx) => ctx.controller.executeCommand(
+        args.commandLine,
+        args.cwd,
+        args.agentId,
+        typeof args.timeoutMs === 'number' && args.timeoutMs > 0 ? args.timeoutMs : undefined
+      )
     });
 
     // 3. Structured Git Tools

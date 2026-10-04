@@ -1,9 +1,21 @@
 import path from 'node:path';
+import fs from 'node:fs';
 import { CONFIG } from './config.js';
 
 export class PermissionGuard {
   constructor(config = CONFIG) {
     this.config = config;
+
+    // Resolve allowed roots once, following symlinks, so containment checks are
+    // performed against the real filesystem location rather than a lexical path.
+    // Falls back to the lexical path when a root does not yet exist.
+    this.realAllowedRoots = (this.config.ALLOWED_ROOTS || []).map(root => {
+      try {
+        return fs.realpathSync(root);
+      } catch {
+        return path.resolve(root);
+      }
+    });
 
     // Granular per-agent policies: autonomous git push authorized
     this.agentPolicies = {
@@ -68,6 +80,70 @@ export class PermissionGuard {
     return { allowed: true };
   }
 
+  /**
+   * Resolve the canonical filesystem location of a path for authorization.
+   *
+   * A lexical `path.resolve()` is not sufficient: a symlink placed inside an
+   * allowed root can point at `/etc/passwd`, so the checked path and the file
+   * actually read/written differ. This resolves symlinks (including dangling
+   * leaf symlinks and missing-leaf paths) so containment is proven on the real
+   * target. Fails closed (throws) when the location cannot be proven.
+   */
+  resolveRealPath(targetPath, depth = 0) {
+    if (depth > 40) {
+      throw new Error('Symlink loop detected while resolving path.');
+    }
+
+    const resolved = path.resolve(targetPath);
+
+    try {
+      return fs.realpathSync(resolved);
+    } catch (err) {
+      if (err.code === 'ELOOP') {
+        throw new Error('Symlink loop detected while resolving path.');
+      }
+    }
+
+    // Leaf may be a dangling symlink (existsSync/realpath follow it and fail).
+    // Resolve the link target explicitly so writes cannot be redirected outside.
+    try {
+      const stat = fs.lstatSync(resolved);
+      if (stat.isSymbolicLink()) {
+        const linkTarget = fs.readlinkSync(resolved);
+        const absoluteTarget = path.isAbsolute(linkTarget)
+          ? linkTarget
+          : path.resolve(path.dirname(resolved), linkTarget);
+        return this.resolveRealPath(absoluteTarget, depth + 1);
+      }
+    } catch (err) {
+      if (err.code === 'ELOOP') {
+        throw new Error('Symlink loop detected while resolving path.');
+      }
+      // Leaf does not exist yet: fall through to ancestor resolution.
+    }
+
+    // Leaf does not exist: resolve the nearest existing ancestor and re-append
+    // the not-yet-created suffix. Any ancestor that is a symlink is resolved by
+    // the realpathSync call on that ancestor.
+    const suffix = [];
+    let cursor = resolved;
+    while (true) {
+      const parent = path.dirname(cursor);
+      if (parent === cursor) break;
+      suffix.unshift(path.basename(cursor));
+      cursor = parent;
+      try {
+        fs.lstatSync(cursor);
+        break;
+      } catch {
+        continue;
+      }
+    }
+
+    const realParent = fs.realpathSync(cursor);
+    return suffix.length ? path.join(realParent, ...suffix) : realParent;
+  }
+
   validatePathAccess(targetPath, mode = 'READ') {
     if (!targetPath) {
       return { allowed: false, reason: 'Target path is empty.' };
@@ -75,9 +151,21 @@ export class PermissionGuard {
 
     const resolved = path.resolve(targetPath);
 
+    // Resolve the real target first. If we cannot prove where the path points,
+    // deny rather than fall back to an unchecked lexical path.
+    let realResolved;
+    try {
+      realResolved = this.resolveRealPath(resolved);
+    } catch (err) {
+      return {
+        allowed: false,
+        reason: `Path '${resolved}' could not be safely resolved (${err.message}).`
+      };
+    }
+
     // 1. Check if path matches any forbidden pattern (secrets, credentials, etc.)
     for (const pattern of this.config.FORBIDDEN_PATH_PATTERNS) {
-      if (pattern.test(resolved)) {
+      if (pattern.test(resolved) || pattern.test(realResolved)) {
         return {
           allowed: false,
           reason: `Access to protected path '${resolved}' is forbidden by security policy (matches ${pattern}).`
@@ -85,16 +173,18 @@ export class PermissionGuard {
       }
     }
 
-    // 2. Check if within allowed roots
-    const inAllowedRoot = this.config.ALLOWED_ROOTS.some(root => {
-      const resolvedRoot = path.resolve(root);
-      return resolved === resolvedRoot || resolved.startsWith(resolvedRoot + path.sep);
+    // 2. Check if within allowed roots (on the real, symlink-resolved location)
+    const inAllowedRoot = this.realAllowedRoots.some(root => {
+      return realResolved === root || realResolved.startsWith(root + path.sep);
     });
 
     if (!inAllowedRoot) {
+      const escaped = realResolved !== resolved;
       return {
         allowed: false,
-        reason: `Path '${resolved}' is outside allowed roots: ${this.config.ALLOWED_ROOTS.join(', ')}`
+        reason: escaped
+          ? `Path '${resolved}' resolves to '${realResolved}', which is outside allowed roots: ${this.config.ALLOWED_ROOTS.join(', ')}`
+          : `Path '${realResolved}' is outside allowed roots: ${this.config.ALLOWED_ROOTS.join(', ')}`
       };
     }
 
@@ -118,7 +208,7 @@ export class PermissionGuard {
       }
     }
 
-    return { allowed: true, path: resolved };
+    return { allowed: true, path: realResolved };
   }
 
   validateCommand(commandLine, cwd) {
