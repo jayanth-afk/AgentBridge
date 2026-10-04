@@ -148,6 +148,33 @@ export class PresenceManager {
     };
   }
 
+  /**
+   * Normalized presence view consumed by diagnostics and other observers.
+   * Keeps a single canonical shape (isAlive/lastHeartbeat) instead of leaking
+   * the raw DB column names, so callers cannot silently read undefined fields.
+   */
+  getPresence(agentId) {
+    const agent = this.getAgent(agentId);
+    if (!agent) {
+      return {
+        agentId,
+        isAlive: false,
+        state: 'OFFLINE',
+        lastHeartbeat: null,
+        metadata: null,
+        transport: null
+      };
+    }
+    return {
+      agentId: agent.agent_id,
+      isAlive: agent.isLive === true,
+      state: agent.isLive ? agent.state : 'OFFLINE',
+      lastHeartbeat: agent.last_heartbeat,
+      metadata: agent.metadata,
+      transport: agent.transport
+    };
+  }
+
   listAgents(ttlMs = this.ttlMs) {
     const stmt = this.db.prepare(`SELECT * FROM agent_presence ORDER BY last_heartbeat DESC`);
     const rows = stmt.all();

@@ -101,7 +101,7 @@ export class DiagnosticsManager {
 
         const taskRow = db.prepare(`
           SELECT id, title, status FROM tasks
-          WHERE assignee = ? AND status = 'in_progress'
+          WHERE to_agent = ? AND status IN ('in_progress', 'claimed')
           ORDER BY updated_at DESC LIMIT 1
         `).get(agentId);
         if (taskRow) {
@@ -156,7 +156,26 @@ export class DiagnosticsManager {
       } catch {}
     }
 
-    const presence = presenceManager ? presenceManager.getPresence(agentId) : null;
+    // Accept either the normalized getPresence() API or the raw getAgent()
+    // record, and read both camelCase and snake_case field spellings so a
+    // rename can never silently degrade a live agent to OFFLINE.
+    let presence = null;
+    if (presenceManager) {
+      if (typeof presenceManager.getPresence === 'function') {
+        presence = presenceManager.getPresence(agentId);
+      } else if (typeof presenceManager.getAgent === 'function') {
+        const raw = presenceManager.getAgent(agentId);
+        if (raw) {
+          presence = {
+            isAlive: raw.isLive === true,
+            state: raw.isLive ? raw.state : 'OFFLINE',
+            lastHeartbeat: raw.lastHeartbeat || raw.last_heartbeat || null,
+            metadata: raw.metadata
+          };
+        }
+      }
+    }
+
     let state = 'OFFLINE';
     if (presence?.isAlive) {
       state = (activeTask || activeRequests > 0) ? 'BUSY' : (presence.state || 'IDLE');

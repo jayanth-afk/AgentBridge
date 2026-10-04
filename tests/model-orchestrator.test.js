@@ -113,7 +113,7 @@ test('ChatGptLocalEngineAdapter Advanced Capabilities Suite', async (t) => {
     assert.equal(turnRes.error, 'CANCELLED');
   });
 
-  await t.test('3. Real streaming events emission', async () => {
+  await t.test('3. Real streaming events emission', { skip: process.env.AGENT_BRIDGE_LIVE_MODELS === '1' ? false : 'requires live ChatGPT/Codex quota; set AGENT_BRIDGE_LIVE_MODELS=1' }, async () => {
     const events = [];
     const res = await engine.executeTurn({
       prompt: 'Reply with the number 42.',
@@ -141,7 +141,7 @@ test('ModelOrchestrator Autonomous Multi-Hop & Delegation Suite', async (t) => {
     assert.equal(status.agents.antigravity.idleModelWake, true);
   });
 
-  await t.test('2. LIVE_MODEL Delegation to ChatGPT Desktop', async () => {
+  await t.test('2. LIVE_MODEL Delegation to ChatGPT Desktop', { skip: process.env.AGENT_BRIDGE_LIVE_MODELS === '1' ? false : 'requires live ChatGPT/Codex quota; set AGENT_BRIDGE_LIVE_MODELS=1' }, async () => {
     const res = await orchestrator.delegateModelTask({
       fromAgent: 'antigravity-ide',
       toAgent: 'chatgpt-desktop',

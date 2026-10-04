@@ -202,7 +202,7 @@ export class TaskManager extends EventEmitter {
       const retryCount = (task.retry_count || 0) + 1;
       const maxRetries = task.max_retries || 3;
       const now = new Date().toISOString();
-      const error = `Task lease expired after ${'${'}timeoutMs}ms`;
+      const error = `Task lease expired after ${timeoutMs}ms`;
 
       if (retryCount <= maxRetries) {
         this.db.prepare(`
@@ -222,7 +222,7 @@ export class TaskManager extends EventEmitter {
           UPDATE tasks
           SET status = 'failed', retry_count = ?, error = ?, updated_at = ?, completed_at = ?
           WHERE id = ? AND status IN ('claimed', 'in_progress')
-        `).run(retryCount, `Failed after ${'${'}retryCount} attempts: ${'${'}error}`, now, now, task.id);
+        `).run(retryCount, `Failed after ${retryCount} attempts: ${error}`, now, now, task.id);
         recovered.push({ taskId: task.id, status: 'failed', retryCount });
         this.logger.log({
           agentId: agentId || task.to_agent,
@@ -247,7 +247,7 @@ export class TaskManager extends EventEmitter {
     `).run(now, now, taskId, agentId);
 
     if (result.changes === 0) {
-      throw new Error(`Task '${'${'}taskId}' is not actively owned by '${'${'}agentId}'.`);
+      throw new Error(`Task '${taskId}' is not actively owned by '${agentId}'.`);
     }
 
     return this.getTask(taskId, true);
@@ -291,6 +291,18 @@ export class TaskManager extends EventEmitter {
     const task = this.db.prepare(`SELECT * FROM tasks WHERE id = ?`).get(taskId);
     if (!task) {
       throw new Error(`Task '${taskId}' not found.`);
+    }
+
+    // Authorization: only the assignee (owner) or the creator may move a task
+    // into a terminal state. Prevents an unrelated agent from completing or
+    // failing someone else's task by guessing its id.
+    if (['completed', 'failed', 'cancelled'].includes(status)) {
+      const actor = agentId ? String(agentId).trim().toLowerCase() : null;
+      const owner = task.to_agent ? String(task.to_agent).trim().toLowerCase() : null;
+      const creator = task.from_agent ? String(task.from_agent).trim().toLowerCase() : null;
+      if (actor && owner && actor !== owner && actor !== creator) {
+        throw new Error(`Forbidden: task '${taskId}' is owned by '${task.to_agent}'; '${agentId}' may not mark it '${status}'.`);
+      }
     }
 
     let startedAt = task.started_at;

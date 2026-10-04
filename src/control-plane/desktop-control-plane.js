@@ -22,7 +22,7 @@ export class DesktopControlPlane {
   constructor(options = {}) {
     this.options = options;
     this.swiftBridge = new SwiftAXBridge(options);
-    this.axEngine = new AXEngine(options);
+    this.axEngine = new AXEngine({ ...options, swiftBridge: this.swiftBridge });
     this.observer = new ResponseObserver(options);
     this.cdpAdapter = new CdpDesktopAdapter(options.cdp || {});
     this.browserAdapter = new BrowserSessionAdapter(options.browser || {});

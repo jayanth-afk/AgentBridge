@@ -506,6 +506,9 @@ export class MailboxHub {
   }
 
   getRequest(requestId) {
+    if (!requestId || typeof requestId !== 'string') {
+      throw new Error('requestId is required and must be a non-empty string.');
+    }
     const row = this.db.prepare('SELECT * FROM bridge_requests WHERE request_id = ?').get(requestId);
     if (!row) return null;
     return {

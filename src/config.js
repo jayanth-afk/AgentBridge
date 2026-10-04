@@ -58,6 +58,13 @@ export const CONFIG = {
     };
   })(),
 
+  // Legacy compatibility: allow a bound connection to *act as* a different
+  // known identity. Off by default because it is an impersonation vector.
+  // Operators that truly need it can set AGENT_BRIDGE_ALLOW_IDENTITY_COMPATIBILITY=1.
+  ALLOW_IDENTITY_COMPATIBILITY:
+    process.env.AGENT_BRIDGE_ALLOW_IDENTITY_COMPATIBILITY === '1' ||
+    process.env.AGENT_BRIDGE_ALLOW_IDENTITY_COMPATIBILITY === 'true',
+
   // Known agent identities
   AGENT_IDENTITIES: [
     'chatgpt-desktop',

@@ -211,6 +211,53 @@ export class PermissionGuard {
     return { allowed: true, path: realResolved };
   }
 
+  /**
+   * Detects shell syntax that could chain, substitute, redirect, or expand into
+   * execution of a non-whitelisted program. `exec()` runs the whole line through
+   * a shell, so checking only the first token is not sufficient: for example
+   * `echo hi; touch /tmp/x` would otherwise run `touch`.
+   *
+   * Operators are only rejected when they appear OUTSIDE quotes, so literal text
+   * such as `echo "a; b"` or `node -e "a;b"` remains valid. Command substitution
+   * and backticks are rejected inside double quotes too, because they expand there.
+   *
+   * Returns a human-readable reason when unsafe syntax is found, else null.
+   */
+  detectUnsafeShellSyntax(commandLine) {
+    let inSingle = false;
+    let inDouble = false;
+
+    for (let i = 0; i < commandLine.length; i++) {
+      const ch = commandLine[i];
+      const next = commandLine[i + 1];
+
+      if (inSingle) {
+        if (ch === "'") inSingle = false;
+        continue;
+      }
+
+      if (inDouble) {
+        if (ch === '\\') { i++; continue; }
+        if (ch === '"') { inDouble = false; continue; }
+        if (ch === '`') return 'command substitution (backtick) inside quotes';
+        if (ch === '$' && next === '(') return 'command substitution $(...) inside quotes';
+        if (ch === '$' && next === '{') return 'parameter expansion ${...} inside quotes';
+        continue;
+      }
+
+      if (ch === "'") { inSingle = true; continue; }
+      if (ch === '"') { inDouble = true; continue; }
+      if (ch === '\\') return 'backslash escaping outside quotes';
+      if (ch === '`') return 'command substitution (backtick)';
+      if (ch === '$') return 'variable/command expansion ($)';
+      if (';&|<>'.includes(ch)) return `shell control operator '${ch}'`;
+      if (ch === '\n' || ch === '\r') return 'newline';
+    }
+
+    if (inSingle || inDouble) return 'unterminated quote';
+    return null;
+  }
+
   validateCommand(commandLine, cwd) {
     if (!commandLine || typeof commandLine !== 'string') {
       return { allowed: false, reason: 'Empty command line.' };
@@ -228,7 +275,17 @@ export class PermissionGuard {
       }
     }
 
-    // 2. Check executable name
+    // 2. Reject shell operators that could chain/substitute/redirect into a
+    //    non-whitelisted program (the whitelist only names the first token).
+    const unsafe = this.detectUnsafeShellSyntax(trimmed);
+    if (unsafe) {
+      return {
+        allowed: false,
+        reason: `Command blocked: ${unsafe}. Shell chaining/substitution/redirection is not permitted.`
+      };
+    }
+
+    // 3. Check executable name
     const firstToken = trimmed.split(/\s+/)[0];
     const execBase = path.basename(firstToken);
 
@@ -239,7 +296,7 @@ export class PermissionGuard {
       };
     }
 
-    // 3. Check CWD safety
+    // 4. Check CWD safety
     if (cwd) {
       const pathCheck = this.validatePathAccess(cwd, 'READ');
       if (!pathCheck.allowed) {

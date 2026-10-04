@@ -18,7 +18,7 @@ export class ClaudeAutonomousSession extends ModelExecutionAdapter {
   constructor(options = {}) {
     super('claude-autonomous-session', options);
     this.swiftBridge = options.swiftBridge || new SwiftAXBridge(options);
-    this.axEngine = options.axEngine || new AXEngine(options);
+    this.axEngine = options.axEngine || new AXEngine({ ...options, swiftBridge: this.swiftBridge });
     this.observer = options.observer || new ResponseObserver(options);
     this.cdpAdapter = options.cdpAdapter || new CdpDesktopAdapter(options.cdp || {});
     this.browserAdapter = options.browserAdapter || new BrowserSessionAdapter(options.browser || {});

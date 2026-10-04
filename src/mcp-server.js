@@ -25,7 +25,9 @@ import { createSessionAdapter } from './session-adapters/index.js';
 
 export class BridgeMcpServer {
   constructor(options = {}) {
-    this.agentId = options.agentId || process.env.AGENT_ID || 'system';
+    // Default to the least-privileged broad identity, never the most-privileged
+    // 'system'. A launched client binds its real identity via AGENT_ID.
+    this.agentId = options.agentId || process.env.AGENT_ID || 'freebuff';
     this.startedAt = new Date().toISOString();
     this.instanceId = `bridge_${process.pid}_${Date.now()}`;
 

@@ -52,7 +52,7 @@ export class AgentIdentityManager {
    * Resolves caller identity securely.
    * Prevents arbitrary escalation (e.g. claiming to be 'system' when connected as 'claude-desktop').
    */
-  resolveIdentity(suppliedAgentId, { token = null, allowCompatibility = true } = {}) {
+  resolveIdentity(suppliedAgentId, { token = null, allowCompatibility = CONFIG.ALLOW_IDENTITY_COMPATIBILITY } = {}) {
     // 1. If an auth token is provided and valid, it takes top precedence
     if (token) {
       const tokenAgent = this.verifyToken(token);
@@ -96,8 +96,9 @@ export class AgentIdentityManager {
         );
       }
 
-      // Compatibility path: If caller explicitly requested a different unprivileged identity
-      if (allowCompatibility && CONFIG.AGENT_IDENTITIES.includes(normalizedSupplied)) {
+      // Explicit legacy compatibility opt-in: adopt a different unprivileged
+      // identity. Off by default; enabling it re-introduces impersonation.
+      if (allowCompatibility === true && CONFIG.AGENT_IDENTITIES.includes(normalizedSupplied)) {
         return {
           authenticated: false,
           compatibilityMode: true,
@@ -107,11 +108,14 @@ export class AgentIdentityManager {
         };
       }
 
-      // Default back to bound identity with a warning
+      // A bound connection is authoritative. It can never act as a different
+      // agent: the requested identity is ignored and the bound identity is
+      // used (recorded for observability) instead of silently impersonating.
       return {
         authenticated: true,
         agentId: normalizedBound,
-        method: 'connection_binding'
+        requestedAgentId: normalizedSupplied === normalizedBound ? undefined : normalizedSupplied,
+        method: normalizedSupplied === normalizedBound ? 'connection_binding' : 'connection_binding_forced'
       };
     }
 

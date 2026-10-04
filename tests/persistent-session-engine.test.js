@@ -139,7 +139,7 @@ test('ChatGptLocalEngineAdapter Suite', async (t) => {
     assert.ok(isInstalled);
   });
 
-  await t.test('2. Real non-interactive model execution test', async () => {
+  await t.test('2. Real non-interactive model execution test', { skip: process.env.AGENT_BRIDGE_LIVE_MODELS === '1' ? false : 'requires live ChatGPT/Codex quota; set AGENT_BRIDGE_LIVE_MODELS=1' }, async () => {
     const testToken = `TEST_TOKEN_${Date.now()}`;
     const result = await engine.executeTurn({
       prompt: `Respond with only the token: ${testToken}`,

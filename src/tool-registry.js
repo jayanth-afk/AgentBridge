@@ -35,13 +35,21 @@ export class ToolRegistry {
     const t0 = Date.now();
     let success = true;
 
-    // Resolve caller identity through AgentIdentityManager
+    // Resolve caller identity through AgentIdentityManager. The resolved
+    // identity is authoritative for authorization; a caller cannot substitute
+    // an arbitrary agentId/fromAgent for a different identity.
     let callerAgentId = rawArgs.agentId || rawArgs.fromAgent || null;
     if (context.identity) {
-      const resolved = context.identity.resolveIdentity(callerAgentId, { token: rawArgs.token });
+      const resolved = context.identity.resolveIdentity(callerAgentId, {
+        token: rawArgs.token,
+        allowCompatibility: context.allowIdentityCompatibility
+      });
+      if (context.requireAuthentication === true && resolved.authenticated !== true) {
+        throw new Error(`Unauthorized: caller for tool '${name}' could not be authenticated.`);
+      }
       callerAgentId = resolved.agentId;
     } else if (!callerAgentId) {
-      callerAgentId = 'system';
+      callerAgentId = 'freebuff';
     }
 
     // Attach resolved agentId to arguments

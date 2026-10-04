@@ -30,8 +30,13 @@ test('Desktop Session Verifier & Honest Capability Audit Suite', async (t) => {
     assert.ok(claudeInspect.pid > 0);
 
     const claudeState = await sessionManager.getSessionState('Claude');
-    // Classify state honestly: if windows are closed to dock, it is RUNNING_BUT_WINDOWLESS
-    assert.ok([SessionState.ACCESSIBLE_WINDOW, SessionState.RUNNING_BUT_WINDOWLESS].includes(claudeState));
+    // Honest running states: accessible window, windowless (docked), or hidden
+    // (window present but no unambiguous active conversation, e.g. locked screen).
+    assert.ok([
+      SessionState.ACCESSIBLE_WINDOW,
+      SessionState.RUNNING_BUT_WINDOWLESS,
+      SessionState.RUNNING_BUT_HIDDEN
+    ].includes(claudeState));
   });
 
   await t.test('Category D & F: Real ChatGPT Desktop Process Inspection', async () => {
@@ -42,7 +47,11 @@ test('Desktop Session Verifier & Honest Capability Audit Suite', async (t) => {
     assert.ok(chatgptInspect.pid > 0);
 
     const gptState = await sessionManager.getSessionState('ChatGPT');
-    assert.ok([SessionState.ACCESSIBLE_WINDOW, SessionState.RUNNING_BUT_WINDOWLESS].includes(gptState));
+    assert.ok([
+      SessionState.ACCESSIBLE_WINDOW,
+      SessionState.RUNNING_BUT_WINDOWLESS,
+      SessionState.RUNNING_BUT_HIDDEN
+    ].includes(gptState));
   });
 
   await t.test('Category G & H: CDP and Browser Fallback Configuration', async () => {

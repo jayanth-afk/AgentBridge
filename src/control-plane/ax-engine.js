@@ -16,6 +16,20 @@ export class AXEngine {
     this.locator = new ConversationLocator(options);
     this.allowHiddenActivation = options.allowHiddenWindowActivation !== false;
     this.activationTimeoutMs = options.activationTimeoutMs || 2500;
+    // Optional native Swift helper. The JXA path below cannot observe Electron
+    // (Claude/ChatGPT) windows under typical TCC settings and silently reports
+    // zero windows, which wrongly rejects the accessibility route.
+    this.swiftBridge = options.swiftBridge || null;
+  }
+
+  async inspectNative(targetApp) {
+    if (!this.swiftBridge || typeof this.swiftBridge.isBinaryAvailable !== 'function') return null;
+    if (!this.swiftBridge.isBinaryAvailable()) return null;
+    try {
+      return await this.swiftBridge.inspectApp(targetApp);
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -137,13 +151,40 @@ export class AXEngine {
    * If windows.length === 0, attempt activation with bounded timeout.
    */
   async ensureAccessibleWindow(targetApp) {
+    const withNative = async (inspection) => {
+      try {
+        const probe = await this.inspectNative(targetApp);
+        if (probe && probe.windowCount > 0) {
+          return {
+            ...inspection,
+            running: probe.running !== false,
+            windowCount: probe.windowCount,
+            windows: probe.windows || inspection.windows,
+            nativeConfirmed: true
+          };
+        }
+      } catch {}
+      return null;
+    };
+
     let inspection = await this.inspectApp(targetApp);
     if (!inspection.running) {
-      return { ok: false, error: 'APP_NOT_RUNNING', details: inspection.error };
+      // JXA may fail to see the process even while the app is running.
+      const nativeProbe = await this.inspectNative(targetApp);
+      if (!nativeProbe || !nativeProbe.running) {
+        return { ok: false, error: 'APP_NOT_RUNNING', details: inspection.error };
+      }
+      inspection = { ...inspection, ...nativeProbe, running: true };
     }
 
     if (inspection.windowCount > 0) {
       return { ok: true, inspection };
+    }
+
+    // JXA reported no windows; confirm against the native helper before deciding.
+    const confirmed = await withNative(inspection);
+    if (confirmed) {
+      return { ok: true, inspection: confirmed };
     }
 
     if (!this.allowHiddenActivation) {
@@ -154,10 +195,14 @@ export class AXEngine {
     await activateDesktopApp(targetApp);
     await new Promise(r => setTimeout(r, 600));
 
-    // Re-inspect
+    // Re-inspect (JXA then native fallback)
     inspection = await this.inspectApp(targetApp);
     if (inspection.windowCount > 0) {
       return { ok: true, inspection, activated: true };
+    }
+    const confirmedAfter = await withNative(inspection);
+    if (confirmedAfter) {
+      return { ok: true, inspection: confirmedAfter, activated: true };
     }
 
     return {
