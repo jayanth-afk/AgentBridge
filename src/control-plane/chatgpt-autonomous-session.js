@@ -57,6 +57,54 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
     return Boolean(probe?.ok);
   }
 
+  async captureForegroundApp() {
+    if (!this.background || typeof this.swiftBridge.getFrontmostApp !== 'function') return null;
+    const front = await this.swiftBridge.getFrontmostApp().catch(() => null);
+    if (!front?.ok || !front.pid) return null;
+    return {
+      pid: front.pid,
+      name: front.name || 'Unknown',
+      bundleId: front.bundleId || null
+    };
+  }
+
+  async restoreForegroundIfChatGPTStoleFocus(snapshot) {
+    if (!this.background || !snapshot?.pid || typeof this.swiftBridge.getFrontmostApp !== 'function') {
+      return { attempted: false, restored: false };
+    }
+
+    const current = await this.swiftBridge.getFrontmostApp().catch(() => null);
+    if (!current?.ok || !current.pid) {
+      return { attempted: false, restored: false, reason: 'FRONTMOST_UNAVAILABLE' };
+    }
+
+    // Only take focus back when ChatGPT is the app that stole it. If the user
+    // intentionally switched to some other app while GPT was working, do not
+    // interrupt that choice.
+    const chatgptCurrent = String(current.bundleId || '').toLowerCase() === 'com.openai.codex'
+      || String(current.name || '').toLowerCase() === this.appName.toLowerCase();
+
+    if (!chatgptCurrent || current.pid === snapshot.pid) {
+      return { attempted: false, restored: false, current };
+    }
+
+    if (typeof this.swiftBridge.restoreFocus !== 'function') {
+      return { attempted: false, restored: false, reason: 'RESTORE_FOCUS_UNAVAILABLE', current };
+    }
+
+    const restored = await this.swiftBridge.restoreFocus(snapshot.pid).catch(() => null);
+    const verified = await this.swiftBridge.getFrontmostApp().catch(() => null);
+    const ok = Boolean(restored?.ok && verified?.pid === snapshot.pid);
+
+    return {
+      attempted: true,
+      restored: ok,
+      current,
+      restoredTo: snapshot,
+      verification: verified || null
+    };
+  }
+
   async submitBackgroundDom(tagged, requestId) {
     const marker = `[AB:${requestId}]`;
     const script = `(() => {
@@ -183,8 +231,14 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
     const tagged = this.correlator.tagMessage(resolvedText, resolvedId);
 
     if (this.background) {
-      // Fail closed on target identity. A background worker must never send to
-      // whatever chat happens to be open.
+      // Capture the user's current app before any target navigation. Some
+      // AppKit/WebKit accessibility operations can restore ChatGPT even when
+      // the request itself uses activate:false.
+      const foregroundSnapshot = await this.captureForegroundApp();
+
+      try {
+        // Fail closed on target identity. A background worker must never send to
+        // whatever chat happens to be open.
       if (!this.backgroundTarget) {
         return {
           success: false,
@@ -307,6 +361,12 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
       this.activeTurns.set(resolvedId, result);
       if (result.modelTurnConfirmed) this.emit('turn_completed', result);
       return result;
+      } finally {
+        // Never leave ChatGPT in the foreground merely because ZiA used it.
+        // If the user deliberately switched to another app during the turn,
+        // preserve that newer choice instead of stealing focus back.
+        await this.restoreForegroundIfChatGPTStoleFocus(foregroundSnapshot).catch(() => {});
+      }
     }
 
     const turn = await this.swiftBridge.sendAndObserve(

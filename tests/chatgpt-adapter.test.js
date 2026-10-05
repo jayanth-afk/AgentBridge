@@ -21,8 +21,17 @@ function makeFakeBridge(overrides = {}) {
   const calls = [];
   return {
     calls,
+    frontmost: { ok: true, name: 'Visual Studio Code', pid: 12345, bundleId: 'com.microsoft.VSCode' },
     isBinaryAvailable: () => true,
     inspectApp: async () => ({ ok: true, running: true, windowCount: 1 }),
+    async getFrontmostApp() {
+      return this.frontmost;
+    },
+    async restoreFocus(pid) {
+      this.calls.push({ restoreFocus: pid });
+      this.frontmost = { ok: true, name: 'Visual Studio Code', pid, bundleId: 'com.microsoft.VSCode' };
+      return { ok: true, status: 'RESTORED' };
+    },
     async sendAndObserve(app, text, requestId, timeout, options = {}) {
       calls.push({ app, text, requestId, timeout, activate: options && options.activate });
       return { ok: true, status: 'COMPLETED', response: 'REAL_MODEL_RESPONSE', latencyMs: 5, error: null };
@@ -126,6 +135,47 @@ test('ChatGPT Autonomous Desktop Delivery Suite', async (t) => {
     const session = new ChatGptAutonomousSession({ swiftBridge: fakeBridge });
     await session.send({ text: 'foreground turn', requestId: 'req_foreground_01' });
     assert.equal(fakeBridge.calls[0].activate, true);
+  });
+
+  await t.test('6a. Background mode restores the user app if ChatGPT steals focus', async () => {
+    const fakeBridge = makeFakeBridge();
+    let frontmostReads = 0;
+    fakeBridge.getFrontmostApp = async () => {
+      frontmostReads += 1;
+      if (frontmostReads === 1) {
+        return { ok: true, name: 'Visual Studio Code', pid: 12345, bundleId: 'com.microsoft.VSCode' };
+      }
+      if (frontmostReads === 2) {
+        return { ok: true, name: 'ChatGPT', pid: 44815, bundleId: 'com.openai.codex' };
+      }
+      return { ok: true, name: 'Visual Studio Code', pid: 12345, bundleId: 'com.microsoft.VSCode' };
+    };
+
+    const backgroundTarget = { resolvePersisted: async () => ({ ok: true, status: 'BACKGROUND_TARGET_READY' }) };
+    const session = new ChatGptAutonomousSession({ swiftBridge: fakeBridge, background: true, backgroundTarget });
+    const res = await session.send({ text: 'focus guard', requestId: 'req_focus_guard_01' });
+
+    assert.equal(res.success, true);
+    assert.deepEqual(fakeBridge.calls.find(call => call.restoreFocus)?.restoreFocus, 12345);
+  });
+
+  await t.test('6aa. Background mode does not steal focus back after the user switches apps', async () => {
+    const fakeBridge = makeFakeBridge();
+    let frontmostReads = 0;
+    fakeBridge.getFrontmostApp = async () => {
+      frontmostReads += 1;
+      if (frontmostReads === 1) {
+        return { ok: true, name: 'Visual Studio Code', pid: 12345, bundleId: 'com.microsoft.VSCode' };
+      }
+      return { ok: true, name: 'Safari', pid: 54321, bundleId: 'com.apple.Safari' };
+    };
+
+    const backgroundTarget = { resolvePersisted: async () => ({ ok: true, status: 'BACKGROUND_TARGET_READY' }) };
+    const session = new ChatGptAutonomousSession({ swiftBridge: fakeBridge, background: true, backgroundTarget });
+    const res = await session.send({ text: 'respect app switch', requestId: 'req_focus_guard_02' });
+
+    assert.equal(res.success, true);
+    assert.equal(fakeBridge.calls.some(call => call.restoreFocus), false);
   });
 
   await t.test('6b. ZiA Background GPT falls back to non-activating AX when JS is unavailable', async () => {
