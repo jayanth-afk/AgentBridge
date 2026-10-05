@@ -121,14 +121,16 @@ export class ChatGPTSessionAdapter extends AgentSessionAdapter {
     // correlated requests are recovered and answered with real model turns.
     if (this.autonomousSession) {
       const available = await this.autonomousSession.isAvailable().catch(() => false);
+      const background = Boolean(this.autonomousSession.background);
       return {
         success: available,
         agentId: this.agentId,
-        wakeupType: 'chatgpt-desktop-accessibility',
+        wakeupType: background ? 'chatgpt-desktop-accessibility-background' : 'chatgpt-desktop-accessibility',
         reason,
-        appActivated: available,
+        appActivated: background ? false : available,
         sessionAvailable: available,
-        error: available ? null : 'CHATGPT_ACCESSIBILITY_UNAVAILABLE'
+        backgroundTransport: background ? this.autonomousSession.backgroundTransport : null,
+        error: available ? null : (background ? 'CHATGPT_BACKGROUND_TRANSPORT_UNAVAILABLE' : 'CHATGPT_ACCESSIBILITY_UNAVAILABLE')
       };
     }
 
@@ -166,7 +168,9 @@ export class ChatGPTSessionAdapter extends AgentSessionAdapter {
         externalModelWakeup: true,
         idleWakeupSupported: true,
         activeTurnRpc: true,
-        transport: 'chatgpt-desktop-accessibility',
+        transport: this.autonomousSession.background ? 'chatgpt-desktop-accessibility-background' : 'chatgpt-desktop-accessibility',
+        backgroundExecution: Boolean(this.autonomousSession.background),
+        backgroundTransport: this.autonomousSession.background ? this.autonomousSession.backgroundTransport : null,
         desktopNotificationSupported: true,
         fileAccess: true,
         gitAccess: true,

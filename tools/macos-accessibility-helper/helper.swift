@@ -15,6 +15,7 @@ struct RequestOp: Codable {
     let identifier: String?
     let role: String?
     let timeoutMs: Int?
+    let activate: Bool?
 
     var targetApp: String {
         return app ?? appName ?? "Claude"
@@ -292,8 +293,8 @@ func unhideApp(name: String) -> SimpleResponse {
 }
 
 // AXObserver state
-var activeObserver: AXObserver? = nil
-var activeRunLoopSource: CFRunLoopSource? = nil
+nonisolated(unsafe) var activeObserver: AXObserver? = nil
+nonisolated(unsafe) var activeRunLoopSource: CFRunLoopSource? = nil
 
 func setupObserver(name: String) -> SimpleResponse {
     guard let app = findAppProcess(name: name) else {
@@ -889,8 +890,8 @@ func collectTextValues(_ win: AXUIElement) -> [String] {
     return texts
 }
 
-func sendPromptGeneric(name: String, text: String, profile: String) -> SendTurnResponse {
-    let (app, maybeWin) = resolveWindow(name, activate: true)
+func sendPromptGeneric(name: String, text: String, profile: String, activate: Bool = true) -> SendTurnResponse {
+    let (app, maybeWin) = resolveWindow(name, activate: activate)
     guard app != nil else {
         return SendTurnResponse(ok: false, status: "APP_NOT_RUNNING", requestId: nil, error: "\(name) is not running")
     }
@@ -988,8 +989,8 @@ func observeResponseGeneric(name: String, requestId: String?, profile: String, t
     return ObserveTurnResponse(ok: false, status: "CHATGPT_RESPONSE_CORRELATION_FAILED", requestId: requestId, response: nil, latencyMs: nil, error: "Correlation marker was not found in the live accessibility tree")
 }
 
-func sendAndObserveGeneric(name: String, text: String, requestId: String?, profile: String, timeoutMs: Int) -> ObserveTurnResponse {
-    let sent = sendPromptGeneric(name: name, text: text, profile: profile)
+func sendAndObserveGeneric(name: String, text: String, requestId: String?, profile: String, timeoutMs: Int, activate: Bool = true) -> ObserveTurnResponse {
+    let sent = sendPromptGeneric(name: name, text: text, profile: profile, activate: activate)
     guard sent.ok else {
         return ObserveTurnResponse(ok: false, status: sent.status, requestId: requestId, response: nil, latencyMs: nil, error: sent.error)
     }
@@ -997,11 +998,66 @@ func sendAndObserveGeneric(name: String, text: String, requestId: String?, profi
 }
 
 
+func executeChatGPTJavaScript(_ javascript: String) -> [String: Any] {
+    guard findAppProcess(name: "ChatGPT") != nil else {
+        return ["ok": false, "error": "CHATGPT_NOT_RUNNING"]
+    }
+
+    let quote = String(Character(UnicodeScalar(34)!))
+    let backslash = String(Character(UnicodeScalar(92)!))
+    let newline = String(Character(UnicodeScalar(10)!))
+    let carriageReturn = String(Character(UnicodeScalar(13)!))
+    let escaped = javascript
+        .replacingOccurrences(of: backslash, with: backslash + backslash)
+        .replacingOccurrences(of: quote, with: backslash + quote)
+        .replacingOccurrences(of: newline, with: backslash + "n")
+        .replacingOccurrences(of: carriageReturn, with: backslash + "r")
+
+    let source = "tell application " + quote + "ChatGPT" + quote + " to execute (active tab of window 1) javascript " + quote + escaped + quote
+    guard let script = NSAppleScript(source: source) else {
+        return ["ok": false, "error": "APPLESCRIPT_COMPILE_FAILED"]
+    }
+
+    var error: NSDictionary?
+    let result = script.executeAndReturnError(&error)
+    if let error {
+        return ["ok": false, "error": "APPLESCRIPT_EXECUTION_FAILED", "details": String(describing: error)]
+    }
+
+    return [
+        "ok": true,
+        "result": result.stringValue ?? ""
+    ]
+}
+
+func readChatGPTScriptingDefinition() -> [String: Any] {
+    guard let app = findAppProcess(name: "ChatGPT"),
+          let bundleURL = app.bundleURL else {
+        return ["ok": false, "error": "CHATGPT_NOT_RUNNING"]
+    }
+    let url = bundleURL.appendingPathComponent("Contents/Resources/scripting.sdef")
+    guard let data = try? Data(contentsOf: url),
+          let content = String(data: data, encoding: .utf8) else {
+        return ["ok": false, "error": "SCRIPTING_DEFINITION_NOT_FOUND"]
+    }
+    return ["ok": true, "path": url.path, "content": content]
+}
+
 func handleRequest(_ req: RequestOp) {
     let encoder = JSONEncoder()
     switch req.op {
     case "ping":
         print("{\"ok\":true,\"status\":\"pong\"}")
+    case "chatgptExecuteJavaScript":
+        if let data = try? JSONSerialization.data(withJSONObject: executeChatGPTJavaScript(req.payloadText)),
+           let str = String(data: data, encoding: .utf8) {
+            print(str)
+        }
+    case "chatgptScriptingDefinition":
+        if let data = try? JSONSerialization.data(withJSONObject: readChatGPTScriptingDefinition()),
+           let str = String(data: data, encoding: .utf8) {
+            print(str)
+        }
     case "frontmost":
         let resp = getFrontmostApp()
         if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
@@ -1042,7 +1098,7 @@ func handleRequest(_ req: RequestOp) {
         let profile = profileFor(req.targetApp)
         let resp = profile == "claude"
             ? sendPromptToClaude(name: req.targetApp, text: req.payloadText, requestId: req.requestId)
-            : sendPromptGeneric(name: req.targetApp, text: req.payloadText, profile: profile)
+            : sendPromptGeneric(name: req.targetApp, text: req.payloadText, profile: profile, activate: req.activate ?? true)
         if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
             print(str)
         }
@@ -1060,7 +1116,7 @@ func handleRequest(_ req: RequestOp) {
         let profile = profileFor(req.targetApp)
         let resp = profile == "claude"
             ? sendAndObserveClaude(name: req.targetApp, text: req.payloadText, requestId: req.requestId, timeoutMs: timeout)
-            : sendAndObserveGeneric(name: req.targetApp, text: req.payloadText, requestId: req.requestId, profile: profile, timeoutMs: timeout)
+            : sendAndObserveGeneric(name: req.targetApp, text: req.payloadText, requestId: req.requestId, profile: profile, timeoutMs: timeout, activate: req.activate ?? true)
         if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
             print(str)
         }

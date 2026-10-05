@@ -7,7 +7,10 @@ import { fileURLToPath } from 'node:url';
 const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const HELPER_BIN = path.resolve(__dirname, '../../tools/macos-accessibility-helper/bridge-ax-helper');
+const HELPER_DIR = path.resolve(__dirname, '../../tools/macos-accessibility-helper');
+const BUILT_HELPER_BIN = path.join(HELPER_DIR, '.build/out/Products/Release/bridge-ax-helper');
+const CHECKED_IN_HELPER_BIN = path.join(HELPER_DIR, 'bridge-ax-helper');
+const HELPER_BIN = fs.existsSync(BUILT_HELPER_BIN) ? BUILT_HELPER_BIN : CHECKED_IN_HELPER_BIN;
 
 /**
  * SwiftAXBridge:
@@ -42,6 +45,19 @@ export class SwiftAXBridge {
     }
   }
 
+  async executeChatGPTJavaScript(javascript) {
+    const result = await this.executeOp({ op: 'chatgptExecuteJavaScript', text: javascript, timeoutMs: 10000 });
+    if (result?.ok && typeof result.result === 'string') {
+      try {
+        const parsed = JSON.parse(result.result);
+        return parsed && typeof parsed === 'object' ? { ...result, ...parsed } : result;
+      } catch {
+        // Plain string JavaScript results remain valid.
+      }
+    }
+    return result;
+  }
+
   async sendPrompt(appName, text, requestId) {
     return this.executeOp({ op: 'sendPrompt', app: appName, text, requestId, timeoutMs: 6000 });
   }
@@ -50,13 +66,14 @@ export class SwiftAXBridge {
     return this.executeOp({ op: 'observeResponse', app: appName, requestId, timeoutMs });
   }
 
-  async sendAndObserve(appName, text, requestId, timeoutMs = 30000) {
+  async sendAndObserve(appName, text, requestId, timeoutMs = 30000, { activate = true } = {}) {
     return this.executeOp({
       op: 'sendAndObserve',
       app: appName,
       text,
       requestId,
-      timeoutMs
+      timeoutMs,
+      activate
     });
   }
 

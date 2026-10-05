@@ -22,9 +22,22 @@ function makeFakeBridge(overrides = {}) {
     calls,
     isBinaryAvailable: () => true,
     inspectApp: async () => ({ ok: true, running: true, windowCount: 1 }),
-    async sendAndObserve(app, text, requestId, timeout) {
-      calls.push({ app, text, requestId, timeout });
+    async sendAndObserve(app, text, requestId, timeout, options = {}) {
+      calls.push({ app, text, requestId, timeout, activate: options && options.activate });
       return { ok: true, status: 'COMPLETED', response: 'REAL_MODEL_RESPONSE', latencyMs: 5, error: null };
+    },
+    async executeChatGPTJavaScript(javascript) {
+      if (javascript.includes('document.title')) return { ok: true, result: 'ChatGPT' };
+      if (javascript.includes('document.querySelectorAll')) calls.push({ background: true });
+      if (javascript.includes('document.body?.innerText')) return { ok: true, response: 'REAL_MODEL_RESPONSE' };
+      return { ok: true, result: '{"ok":true}' };
+    },
+    async submitBackgroundDom() {
+      calls.push({ background: true });
+      return { ok: true };
+    },
+    async readBackgroundDomResponse() {
+      return { ok: true, response: 'REAL_MODEL_RESPONSE' };
     },
     ...overrides
   };
@@ -90,7 +103,27 @@ test('ChatGPT Autonomous Desktop Delivery Suite', async (t) => {
   // ---------------------------------------------------------------------------
   // Correlation acceptance / rejection.
   // ---------------------------------------------------------------------------
-  await t.test('5. Correlation accepts the request marker and rejects stale output', () => {
+  await t.test('5. Background mode never asks the AX bridge to activate ChatGPT', async () => {
+    const fakeBridge = makeFakeBridge();
+    const session = new ChatGptAutonomousSession({ swiftBridge: fakeBridge, background: true });
+    const res = await session.send({ text: 'background turn', requestId: 'req_background_01' });
+    assert.equal(res.success, true);
+    assert.equal(fakeBridge.calls.length, 1);
+    assert.equal(fakeBridge.calls[0].background, true);
+    const caps = await session.capabilities();
+    assert.equal(caps.backgroundSubmission, true);
+    assert.equal(caps.backgroundModelWake, true);
+    assert.equal(caps.trueHeadlessEngine, false);
+  });
+
+  await t.test('6. Foreground/default mode preserves activation behavior', async () => {
+    const fakeBridge = makeFakeBridge();
+    const session = new ChatGptAutonomousSession({ swiftBridge: fakeBridge });
+    await session.send({ text: 'foreground turn', requestId: 'req_foreground_01' });
+    assert.equal(fakeBridge.calls[0].activate, true);
+  });
+
+  await t.test('7. Correlation accepts the request marker and rejects stale output', () => {
     const rc = new ResponseCorrelator();
     assert.equal(rc.hasMarker('[AB:req_ok]\nthe answer', 'req_ok'), true);
     assert.equal(rc.hasMarker('an older unrelated answer', 'req_ok'), false);
