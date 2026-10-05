@@ -24,11 +24,37 @@ export const CONFIG = {
     '/Users/jayanthpranaykonada'
   ],
 
-  // No Agent-Bridge-level filename denylist. OS-level protections remain authoritative.
+  // No Agent-Bridge-level filename denylist for mutation. OS-level protections remain authoritative.
   PROTECTED_FILES: [],
 
-  // No Agent-Bridge-level path denylist. OS-level permissions/TCC remain authoritative.
-  FORBIDDEN_PATH_PATTERNS: [],
+  // Credential and secret locations that no agent may read or write, even inside
+  // ALLOWED_ROOTS. Each pattern is tested against both the lexical path and the
+  // symlink-resolved path, and (see COMMAND_ARG_PATH_CHECK) against path-like
+  // command arguments. Deliberately NOT listed: app config dirs agents may need to
+  // edit (for example Claude's claude_desktop_config.json).
+  FORBIDDEN_PATH_PATTERNS: [
+    /\/\.ssh(\/|$)/,
+    /\/\.gnupg(\/|$)/,
+    /\/\.aws(\/|$)/,
+    /\/\.config\/gcloud(\/|$)/,
+    /\/\.codex\/auth\.json$/,
+    /\/\.gemini\/oauth_creds\.json$/,
+    /\/\.docker\/config\.json$/,
+    /\/\.netrc$/,
+    /\/\.npmrc$/,
+    /\/\.env(\.(local|production|development))?$/,
+    /\/id_(rsa|dsa|ecdsa|ed25519)$/,
+    /\/Library\/Keychains(\/|$)/,
+    /\/Library\/Cookies(\/|$)/,
+    /\/Library\/Application Support\/(Google\/Chrome|BraveSoftware|Arc|Dia|Comet|Firefox)(\/|$)/
+  ],
+
+  // When true, path-like arguments of whitelisted commands are checked against the
+  // same path policy as direct file operations (roots + denylist). Without this,
+  // `cat ~/.ssh/id_ed25519` bypasses the policy entirely because only the first
+  // token and the cwd were validated. Interpreters (python3, node, swift, npm) can
+  // still open files from inside their own arguments; see the recipe work.
+  COMMAND_ARG_PATH_CHECK: true,
 
   // Liveness beacon returned by `bridge ping` / the bridge_ping tool so callers can
   // confirm they reached a real bridge. Override per-deployment via env; never commit

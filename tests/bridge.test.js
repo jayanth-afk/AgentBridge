@@ -42,9 +42,10 @@ test('Agent Bridge Test Suite', async (t) => {
     // Outside allowed roots -> DENIED
     assert.strictEqual(guard.validatePathAccess('/etc/passwd', 'READ').allowed, false);
 
-    // Home-directory authorization is intentionally broad; OS/TCC permissions remain the boundary.
-    assert.strictEqual(guard.validatePathAccess(path.join(TEST_WORKSPACE, '.env'), 'READ').allowed, true);
-    assert.strictEqual(guard.validatePathAccess('/Users/jayanthpranaykonada/.ssh/id_rsa', 'READ').allowed, true);
+    // Home-directory authorization stays broad, but credential locations are denied
+    // (owner approved the credential denylist; see FORBIDDEN_PATH_PATTERNS in config.js).
+    assert.strictEqual(guard.validatePathAccess(path.join(TEST_WORKSPACE, '.env'), 'READ').allowed, false);
+    assert.strictEqual(guard.validatePathAccess('/Users/jayanthpranaykonada/.ssh/id_rsa', 'READ').allowed, false);
 
     // Protected-file denylist is intentionally empty for owner-authorized full access.
     assert.strictEqual(guard.validatePathAccess(path.join(TEST_WORKSPACE, 'DeterministicRouter.swift'), 'WRITE').allowed, true);
