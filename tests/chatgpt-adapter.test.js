@@ -49,8 +49,9 @@ function makeFakeBridge(overrides = {}) {
     async readBackgroundDomResponse() {
       return { ok: true, response: 'REAL_MODEL_RESPONSE' };
     },
-    async setChatGPTMinimized() {
-      return { ok: true };
+    async setChatGPTMinimized(minimized) {
+      calls.push({ minimized });
+      return { ok: true, status: minimized ? 'MINIMIZED_STATE_SET' : 'MINIMIZED_STATE_SET' };
     },
     ...overrides
   };
@@ -122,8 +123,9 @@ test('ChatGPT Autonomous Desktop Delivery Suite', async (t) => {
     const session = new ChatGptAutonomousSession({ swiftBridge: fakeBridge, background: true, backgroundTarget });
     const res = await session.send({ text: 'background turn', requestId: 'req_background_01' });
     assert.equal(res.success, true);
-    assert.equal(fakeBridge.calls.length, 1);
-    assert.equal(fakeBridge.calls[0].background, true);
+    assert.equal(fakeBridge.calls.some(call => call.background === true), true);
+    assert.equal(fakeBridge.calls.some(call => call.activate === true), false);
+    assert.equal(fakeBridge.calls.some(call => call.minimized === true), true);
     const caps = await session.capabilities();
     assert.equal(caps.backgroundSubmission, true);
     assert.equal(caps.backgroundModelWake, true);
@@ -137,45 +139,33 @@ test('ChatGPT Autonomous Desktop Delivery Suite', async (t) => {
     assert.equal(fakeBridge.calls[0].activate, true);
   });
 
-  await t.test('6a. Background mode restores the user app if ChatGPT steals focus', async () => {
+  await t.test('6a. Background mode repeatedly enforces the minimized ChatGPT invariant', async () => {
     const fakeBridge = makeFakeBridge();
-    let frontmostReads = 0;
-    fakeBridge.getFrontmostApp = async () => {
-      frontmostReads += 1;
-      if (frontmostReads === 1) {
-        return { ok: true, name: 'Visual Studio Code', pid: 12345, bundleId: 'com.microsoft.VSCode' };
-      }
-      if (frontmostReads === 2) {
-        return { ok: true, name: 'ChatGPT', pid: 44815, bundleId: 'com.openai.codex' };
-      }
-      return { ok: true, name: 'Visual Studio Code', pid: 12345, bundleId: 'com.microsoft.VSCode' };
-    };
-
     const backgroundTarget = { resolvePersisted: async () => ({ ok: true, status: 'BACKGROUND_TARGET_READY' }) };
     const session = new ChatGptAutonomousSession({ swiftBridge: fakeBridge, background: true, backgroundTarget });
-    const res = await session.send({ text: 'focus guard', requestId: 'req_focus_guard_01' });
+    const res = await session.send({ text: 'minimized invariant', requestId: 'req_minimized_01' });
 
     assert.equal(res.success, true);
-    assert.deepEqual(fakeBridge.calls.find(call => call.restoreFocus)?.restoreFocus, 12345);
+    assert.equal(fakeBridge.calls.some(call => call.minimized === true), true);
+    assert.equal(fakeBridge.calls.some(call => call.restoreFocus), false);
   });
 
-  await t.test('6aa. Background mode does not steal focus back after the user switches apps', async () => {
+  await t.test('6aa. Background mode does not use frontmost-app restoration', async () => {
     const fakeBridge = makeFakeBridge();
-    let frontmostReads = 0;
     fakeBridge.getFrontmostApp = async () => {
-      frontmostReads += 1;
-      if (frontmostReads === 1) {
-        return { ok: true, name: 'Visual Studio Code', pid: 12345, bundleId: 'com.microsoft.VSCode' };
-      }
-      return { ok: true, name: 'Safari', pid: 54321, bundleId: 'com.apple.Safari' };
+      throw new Error('frontmost inspection must not be required by minimized Background GPT');
+    };
+    fakeBridge.restoreFocus = async () => {
+      throw new Error('restoreFocus must never be used by minimized Background GPT');
     };
 
     const backgroundTarget = { resolvePersisted: async () => ({ ok: true, status: 'BACKGROUND_TARGET_READY' }) };
     const session = new ChatGptAutonomousSession({ swiftBridge: fakeBridge, background: true, backgroundTarget });
-    const res = await session.send({ text: 'respect app switch', requestId: 'req_focus_guard_02' });
+    const res = await session.send({ text: 'stay minimized', requestId: 'req_minimized_02' });
 
     assert.equal(res.success, true);
     assert.equal(fakeBridge.calls.some(call => call.restoreFocus), false);
+    assert.ok(fakeBridge.calls.filter(call => call.minimized === true).length >= 2);
   });
 
   await t.test('6b. ZiA Background GPT falls back to non-activating AX when JS is unavailable', async () => {
@@ -194,7 +184,8 @@ test('ChatGPT Autonomous Desktop Delivery Suite', async (t) => {
     assert.equal(res.modelTurnConfirmed, true);
     assert.equal(res.response, 'AX_BACKGROUND_RESPONSE');
     assert.equal(res.transport, 'chatgpt-desktop-background-ax');
-    assert.equal(fakeBridge.calls.at(-1).activate, false);
+    assert.equal(fakeBridge.calls.some(call => call.activate === false), true);
+    assert.equal(fakeBridge.calls.some(call => call.minimized === true), true);
     assert.equal(session.backgroundWorkerName, 'ZiA Background GPT');
   });
 
@@ -213,7 +204,8 @@ test('ChatGPT Autonomous Desktop Delivery Suite', async (t) => {
     assert.equal(res.success, false);
     assert.equal(res.status, 'BACKGROUND_TARGET_NOT_FOUND');
     assert.equal(res.modelTurnConfirmed, false);
-    assert.equal(fakeBridge.calls.length, 0);
+    assert.equal(fakeBridge.calls.some(call => call.background === true), false);
+    assert.equal(fakeBridge.calls.some(call => call.minimized === true), true);
   });
 
   await t.test('7. Correlation accepts the request marker and rejects stale output', () => {

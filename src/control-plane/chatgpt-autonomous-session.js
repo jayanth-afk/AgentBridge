@@ -57,52 +57,14 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
     return Boolean(probe?.ok);
   }
 
-  async captureForegroundApp() {
-    if (!this.background || typeof this.swiftBridge.getFrontmostApp !== 'function') return null;
-    const front = await this.swiftBridge.getFrontmostApp().catch(() => null);
-    if (!front?.ok || !front.pid) return null;
-    return {
-      pid: front.pid,
-      name: front.name || 'Unknown',
-      bundleId: front.bundleId || null
-    };
-  }
-
-  async restoreForegroundIfChatGPTStoleFocus(snapshot) {
-    if (!this.background || !snapshot?.pid || typeof this.swiftBridge.getFrontmostApp !== 'function') {
-      return { attempted: false, restored: false };
+  async enforceChatGPTMinimized() {
+    if (!this.background || typeof this.swiftBridge.setChatGPTMinimized !== 'function') {
+      return { ok: false, status: 'MINIMIZE_UNAVAILABLE' };
     }
-
-    const current = await this.swiftBridge.getFrontmostApp().catch(() => null);
-    if (!current?.ok || !current.pid) {
-      return { attempted: false, restored: false, reason: 'FRONTMOST_UNAVAILABLE' };
-    }
-
-    // Only take focus back when ChatGPT is the app that stole it. If the user
-    // intentionally switched to some other app while GPT was working, do not
-    // interrupt that choice.
-    const chatgptCurrent = String(current.bundleId || '').toLowerCase() === 'com.openai.codex'
-      || String(current.name || '').toLowerCase() === this.appName.toLowerCase();
-
-    if (!chatgptCurrent || current.pid === snapshot.pid) {
-      return { attempted: false, restored: false, current };
-    }
-
-    if (typeof this.swiftBridge.restoreFocus !== 'function') {
-      return { attempted: false, restored: false, reason: 'RESTORE_FOCUS_UNAVAILABLE', current };
-    }
-
-    const restored = await this.swiftBridge.restoreFocus(snapshot.pid).catch(() => null);
-    const verified = await this.swiftBridge.getFrontmostApp().catch(() => null);
-    const ok = Boolean(restored?.ok && verified?.pid === snapshot.pid);
-
-    return {
-      attempted: true,
-      restored: ok,
-      current,
-      restoredTo: snapshot,
-      verification: verified || null
-    };
+    return this.swiftBridge.setChatGPTMinimized(true).catch(() => ({
+      ok: false,
+      status: 'MINIMIZE_FAILED'
+    }));
   }
 
   async submitBackgroundDom(tagged, requestId) {
@@ -172,7 +134,7 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
       transports: this.background ? ['accessibility-background', 'apple-events-javascript'] : ['accessibility'],
       requiresUserPrompt: false,
       notes: this.background
-        ? 'ZiA Background GPT: user-authorized automation of the real ChatGPT Desktop app without activating it. Uses Apple Events JavaScript when available and otherwise native AX with activate:false.'
+        ? 'ZiA Background GPT: user-authorized automation of the real ChatGPT Desktop app while keeping its window minimized. Uses Apple Events JavaScript when available and otherwise native AX with activate:false.'
         : 'User-authorized macOS Accessibility automation of the real ChatGPT Desktop app. Requests are submitted to the app itself and the real model response is observed and correlated.'
     };
   }
@@ -231,10 +193,9 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
     const tagged = this.correlator.tagMessage(resolvedText, resolvedId);
 
     if (this.background) {
-      // Capture the user's current app before any target navigation. Some
-      // AppKit/WebKit accessibility operations can restore ChatGPT even when
-      // the request itself uses activate:false.
-      const foregroundSnapshot = await this.captureForegroundApp();
+      // Background GPT has a stricter invariant than ordinary focus
+      // preservation: ChatGPT must remain minimized while ZiA uses it.
+      await this.enforceChatGPTMinimized();
 
       try {
         // Fail closed on target identity. A background worker must never send to
@@ -268,10 +229,9 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
         };
       }
 
-      // Keep the real GUI worker out of the user's foreground while it works.
-      // The AX helper itself never activates ChatGPT, but target navigation can
-      // cause AppKit/WebKit to restore a window, so normalize it here.
-      await this.swiftBridge.setChatGPTMinimized(true).catch(() => {});
+      // Reassert minimized state after target resolution because navigation
+      // is one of the operations most likely to restore the window.
+      await this.enforceChatGPTMinimized();
 
       // Preferred path: Apple Events JavaScript can operate the web view without
       // foreground focus. If that capability is unavailable, do NOT fail the
@@ -281,13 +241,15 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
 
       if (jsReady) {
         const submitted = await this.submitBackgroundDom(tagged, resolvedId);
+        await this.enforceChatGPTMinimized();
         if (submitted?.ok) {
           const deadline = Date.now() + (timeoutMs || this.defaultTimeoutMs);
           let last = '';
           let stable = 0;
           while (Date.now() < deadline) {
             await new Promise(resolve => setTimeout(resolve, 500));
-            const observed = await this.readBackgroundDomResponse(resolvedId);
+            await this.enforceChatGPTMinimized();
+             const observed = await this.readBackgroundDomResponse(resolvedId);
             if (!observed?.ok || !observed.response) continue;
             const response = observed.response.trim();
             if (response === last) stable += 1;
@@ -365,7 +327,7 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
         // Never leave ChatGPT in the foreground merely because ZiA used it.
         // If the user deliberately switched to another app during the turn,
         // preserve that newer choice instead of stealing focus back.
-        await this.restoreForegroundIfChatGPTStoleFocus(foregroundSnapshot).catch(() => {});
+        await this.enforceChatGPTMinimized();
       }
     }
 

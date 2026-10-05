@@ -17,7 +17,7 @@ const result = await worker.send({
 
 const after = await bridge.getFrontmostApp();
 const app = await bridge.inspectApp('ChatGPT');
-await bridge.setChatGPTMinimized(false);
+const finalMinimized = await bridge.setChatGPTMinimized(true);
 
 console.log(JSON.stringify({
   before,
