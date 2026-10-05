@@ -234,11 +234,13 @@ test('Complete 15-Point Connected Agent Integration Suite', async (t) => {
     fs.unlinkSync(ziaTargetPath);
   });
 
-  await t.test('TEST 15: Home-directory access is owner-authorized', async () => {
-    // Agent Bridge does not impose a secret-path denylist; macOS/TCC and Unix permissions remain authoritative.
-    assert.strictEqual(guard.validatePathAccess(path.join(TEST_WORKSPACE, '.env'), 'READ').allowed, true);
-    assert.strictEqual(guard.validatePathAccess('/Users/jayanthpranaykonada/.ssh/id_rsa', 'READ').allowed, true);
-    assert.strictEqual(guard.validatePathAccess('/Users/jayanthpranaykonada/Library/Keychains/login.keychain-db', 'READ').allowed, true);
+  await t.test('TEST 15: Home-directory access is owner-authorized, minus credential locations', async () => {
+    // Ordinary home-directory paths remain authorized...
+    assert.strictEqual(guard.validatePathAccess(path.join(TEST_WORKSPACE, 'sample.txt'), 'READ').allowed, true);
+    // ...but credential locations are denied by the owner-approved denylist.
+    assert.strictEqual(guard.validatePathAccess(path.join(TEST_WORKSPACE, '.env'), 'READ').allowed, false);
+    assert.strictEqual(guard.validatePathAccess('/Users/jayanthpranaykonada/.ssh/id_rsa', 'READ').allowed, false);
+    assert.strictEqual(guard.validatePathAccess('/Users/jayanthpranaykonada/Library/Keychains/login.keychain-db', 'READ').allowed, false);
   });
 
   await t.test('GUI Automation Adapter Graceful Inspection', async () => {

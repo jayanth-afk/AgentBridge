@@ -1,5 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs';
+import os from 'node:os';
 import { CONFIG } from './config.js';
 
 export class PermissionGuard {
@@ -304,6 +305,106 @@ export class PermissionGuard {
       }
     }
 
+    // 5. Path-like arguments must satisfy the same path policy as direct file
+    //    operations; otherwise `cat ~/.ssh/id_ed25519` or `ls /anywhere` would
+    //    bypass FORBIDDEN_PATH_PATTERNS and ALLOWED_ROOTS completely.
+    if (this.config.COMMAND_ARG_PATH_CHECK !== false) {
+      const argCheck = this.validateCommandPathArguments(trimmed, cwd);
+      if (!argCheck.allowed) return argCheck;
+    }
+
     return { allowed: true, command: trimmed };
+  }
+
+  /** Splits a command line into words, honouring single and double quotes. */
+  tokenizeCommand(commandLine) {
+    const tokens = [];
+    let cur = '';
+    let inSingle = false;
+    let inDouble = false;
+    let started = false;
+
+    for (let i = 0; i < commandLine.length; i++) {
+      const ch = commandLine[i];
+      if (inSingle) {
+        if (ch === "'") inSingle = false;
+        else cur += ch;
+        continue;
+      }
+      if (inDouble) {
+        if (ch === '\\' && i + 1 < commandLine.length) { cur += commandLine[++i]; continue; }
+        if (ch === '"') inDouble = false;
+        else cur += ch;
+        continue;
+      }
+      if (ch === "'") { inSingle = true; started = true; continue; }
+      if (ch === '"') { inDouble = true; started = true; continue; }
+      if (/\s/.test(ch)) {
+        if (started || cur) { tokens.push(cur); cur = ''; started = false; }
+        continue;
+      }
+      cur += ch;
+    }
+    if (started || cur) tokens.push(cur);
+    return tokens;
+  }
+
+  /**
+   * Applies path policy to command arguments.
+   *  - Absolute, ~-prefixed and ../ arguments get the full policy
+   *    (symlink resolution, allowed roots, forbidden patterns).
+   *  - Other (relative) arguments are resolved against cwd and checked against the
+   *    forbidden patterns only, so ordinary words and flags are not penalised.
+   *  - Glob metacharacters in absolute/~ arguments are rejected, because the shell
+   *    would expand them after this check and could land on a forbidden path.
+   * Known limit: interpreters (python3, node, swift, npm) and `find` traversal can
+   * still reach files from inside their own arguments. Recipes address that.
+   */
+  validateCommandPathArguments(commandLine, cwd) {
+    const tokens = this.tokenizeCommand(commandLine).slice(1);
+    const base = cwd ? path.resolve(cwd) : process.cwd();
+    const patterns = this.config.FORBIDDEN_PATH_PATTERNS || [];
+
+    for (const raw of tokens) {
+      let candidate = raw;
+      if (candidate.startsWith('-')) {
+        const eq = candidate.indexOf('=');
+        if (eq === -1) continue;
+        candidate = candidate.slice(eq + 1);
+      }
+      if (!candidate) continue;
+
+      const homeRelative = candidate === '~' || candidate.startsWith('~/');
+      const absolute = candidate.startsWith('/') || homeRelative;
+      const parentRelative = candidate.startsWith('../') || candidate === '..';
+
+      if (absolute || parentRelative) {
+        if (absolute && /[*?[\]{}]/.test(candidate)) {
+          return {
+            allowed: false,
+            reason: `Command blocked: glob characters are not permitted in absolute path argument '${raw}'.`
+          };
+        }
+        const expanded = homeRelative
+          ? path.join(os.homedir(), candidate.slice(1))
+          : path.resolve(base, candidate);
+        const check = this.validatePathAccess(expanded, 'READ');
+        if (!check.allowed) {
+          return { allowed: false, reason: `Command argument '${raw}' disallowed: ${check.reason}` };
+        }
+        continue;
+      }
+
+      const lexical = path.resolve(base, candidate);
+      for (const pattern of patterns) {
+        if (pattern.test(lexical)) {
+          return {
+            allowed: false,
+            reason: `Command argument '${raw}' resolves to protected path '${lexical}' (matches ${pattern}).`
+          };
+        }
+      }
+    }
+    return { allowed: true };
   }
 }
