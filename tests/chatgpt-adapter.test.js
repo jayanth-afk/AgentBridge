@@ -40,6 +40,9 @@ function makeFakeBridge(overrides = {}) {
     async readBackgroundDomResponse() {
       return { ok: true, response: 'REAL_MODEL_RESPONSE' };
     },
+    async setChatGPTMinimized() {
+      return { ok: true };
+    },
     ...overrides
   };
 }
@@ -106,7 +109,8 @@ test('ChatGPT Autonomous Desktop Delivery Suite', async (t) => {
   // ---------------------------------------------------------------------------
   await t.test('5. Background mode never asks the AX bridge to activate ChatGPT', async () => {
     const fakeBridge = makeFakeBridge();
-    const session = new ChatGptAutonomousSession({ swiftBridge: fakeBridge, background: true });
+    const backgroundTarget = { resolvePersisted: async () => ({ ok: true, status: 'BACKGROUND_TARGET_READY' }) };
+    const session = new ChatGptAutonomousSession({ swiftBridge: fakeBridge, background: true, backgroundTarget });
     const res = await session.send({ text: 'background turn', requestId: 'req_background_01' });
     assert.equal(res.success, true);
     assert.equal(fakeBridge.calls.length, 1);
@@ -132,7 +136,8 @@ test('ChatGPT Autonomous Desktop Delivery Suite', async (t) => {
         return { ok: true, status: 'COMPLETED', response: 'AX_BACKGROUND_RESPONSE', latencyMs: 7, error: null };
       }
     });
-    const session = new ZiABackgroundGPT({ swiftBridge: fakeBridge });
+    const backgroundTarget = { resolvePersisted: async () => ({ ok: true, status: 'BACKGROUND_TARGET_READY' }) };
+    const session = new ZiABackgroundGPT({ swiftBridge: fakeBridge, backgroundTarget });
     const res = await session.send({ text: 'background AX fallback', requestId: 'req_background_ax_01' });
 
     assert.equal(res.success, true);
@@ -141,6 +146,24 @@ test('ChatGPT Autonomous Desktop Delivery Suite', async (t) => {
     assert.equal(res.transport, 'chatgpt-desktop-background-ax');
     assert.equal(fakeBridge.calls.at(-1).activate, false);
     assert.equal(session.backgroundWorkerName, 'ZiA Background GPT');
+  });
+
+  await t.test('6c. Background mode fails closed when the dedicated target is unavailable', async () => {
+    const fakeBridge = makeFakeBridge();
+    const backgroundTarget = {
+      resolvePersisted: async () => ({
+        ok: false,
+        status: 'BACKGROUND_TARGET_NOT_FOUND',
+        error: 'Dedicated conversation missing'
+      })
+    };
+    const session = new ZiABackgroundGPT({ swiftBridge: fakeBridge, backgroundTarget });
+    const res = await session.send({ text: 'must not be sent elsewhere', requestId: 'req_target_missing_01' });
+
+    assert.equal(res.success, false);
+    assert.equal(res.status, 'BACKGROUND_TARGET_NOT_FOUND');
+    assert.equal(res.modelTurnConfirmed, false);
+    assert.equal(fakeBridge.calls.length, 0);
   });
 
   await t.test('7. Correlation accepts the request marker and rejects stale output', () => {

@@ -1,6 +1,7 @@
 import { ModelExecutionAdapter } from './model-execution-adapter.js';
 import { SwiftAXBridge } from './swift-ax-bridge.js';
 import { ResponseCorrelator } from './response-correlator.js';
+import { ZiABackgroundGPTTarget } from './zia-background-gpt-target.js';
 
 /**
  * ChatGptAutonomousSession:
@@ -34,6 +35,9 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
     // native AX path with activate:false. Explicit transports remain supported.
     this.backgroundTransport = options.backgroundTransport || 'auto';
     this.backgroundWorkerName = options.backgroundWorkerName || 'ZiA Background GPT';
+    this.backgroundTarget = this.background
+      ? (options.backgroundTarget || new ZiABackgroundGPTTarget({ swiftBridge: this.swiftBridge, projectTitle: options.backgroundProjectTitle || 'ZiA Response' }))
+      : null;
     this.activeTurns = new Map(); // requestId -> turnResult
   }
 
@@ -179,6 +183,42 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
     const tagged = this.correlator.tagMessage(resolvedText, resolvedId);
 
     if (this.background) {
+      // Fail closed on target identity. A background worker must never send to
+      // whatever chat happens to be open.
+      if (!this.backgroundTarget) {
+        return {
+          success: false,
+          status: 'BACKGROUND_TARGET_UNAVAILABLE',
+          error: 'ZiA Background GPT target resolver is not configured',
+          response: null,
+          modelTurnConfirmed: false,
+          requestId: resolvedId,
+          transport: 'chatgpt-desktop-background-ax',
+          uiSubmitted: false,
+          latencyMs: Date.now() - startMs
+        };
+      }
+      const target = await this.backgroundTarget.resolvePersisted();
+      if (!target.ok) {
+        return {
+          success: false,
+          status: target.status,
+          error: target.error,
+          response: null,
+          modelTurnConfirmed: false,
+          requestId: resolvedId,
+          transport: 'chatgpt-desktop-background-ax',
+          uiSubmitted: false,
+          target,
+          latencyMs: Date.now() - startMs
+        };
+      }
+
+      // Keep the real GUI worker out of the user's foreground while it works.
+      // The AX helper itself never activates ChatGPT, but target navigation can
+      // cause AppKit/WebKit to restore a window, so normalize it here.
+      await this.swiftBridge.setChatGPTMinimized(true).catch(() => {});
+
       // Preferred path: Apple Events JavaScript can operate the web view without
       // foreground focus. If that capability is unavailable, do NOT fail the
       // background worker: the native AX transport can also submit/observe with
@@ -210,6 +250,7 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
                 uiSubmitted: true,
                 latencyMs: Date.now() - startMs
               };
+              await this.swiftBridge.setChatGPTMinimized(true).catch(() => {});
               this.activeTurns.set(resolvedId, result);
               this.emit('turn_completed', result);
               return result;
@@ -262,6 +303,7 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
         uiSubmitted: !['APP_NOT_RUNNING', 'NO_WINDOW', 'CHATGPT_COMPOSER_NOT_FOUND'].includes(turn.status),
         latencyMs: Date.now() - startMs
       };
+      await this.swiftBridge.setChatGPTMinimized(true).catch(() => {});
       this.activeTurns.set(resolvedId, result);
       if (result.modelTurnConfirmed) this.emit('turn_completed', result);
       return result;
@@ -303,6 +345,11 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
 
   async recover() {
     this.activeTurns.clear();
+    if (this.background && this.backgroundTarget) {
+      const target = await this.backgroundTarget.resolvePersisted();
+      if (!target.ok) return { recovered: false, target };
+      return { recovered: true, target };
+    }
     return { recovered: true };
   }
 }
