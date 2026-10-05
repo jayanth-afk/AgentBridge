@@ -1,6 +1,7 @@
 import { AgentSessionAdapter } from './base-adapter.js';
 import { sendDesktopNotification, activateDesktopApp } from './desktop-notifier.js';
 import { ChatGptAutonomousSession } from '../control-plane/chatgpt-autonomous-session.js';
+import { ZiABackgroundGPT } from '../control-plane/zia-background-gpt.js';
 
 export class ChatGPTSessionAdapter extends AgentSessionAdapter {
   constructor(options = {}) {
@@ -12,7 +13,10 @@ export class ChatGPTSessionAdapter extends AgentSessionAdapter {
     this.activateAppOnWake = Boolean(options.activateAppOnWake);
     // Opt-in autonomous delivery through the REAL ChatGPT Desktop app.
     // Disabled by default so existing notification/buffer semantics are preserved.
-    this.autonomousSession = options.chatgptSession || (options.autonomous ? new ChatGptAutonomousSession(options.chatgptDesktop || options) : null);
+    const sessionOptions = options.chatgptDesktop || options;
+    this.autonomousSession = options.chatgptSession
+      || (options.background || options.headless ? new ZiABackgroundGPT(sessionOptions) : null)
+      || (options.autonomous ? new ChatGptAutonomousSession(sessionOptions) : null);
   }
 
   async connect() {

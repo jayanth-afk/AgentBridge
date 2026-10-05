@@ -11,6 +11,7 @@ import { TaskManager } from '../src/task-manager.js';
 import { PresenceManager } from '../src/presence-manager.js';
 import { ResponseCorrelator } from '../src/control-plane/response-correlator.js';
 import { ChatGptAutonomousSession } from '../src/control-plane/chatgpt-autonomous-session.js';
+import { ZiABackgroundGPT } from '../src/control-plane/zia-background-gpt.js';
 import { ChatGptDesktopWorker } from '../src/control-plane/chatgpt-desktop-worker.js';
 import { ChatGPTSessionAdapter } from '../src/session-adapters/chatgpt-adapter.js';
 
@@ -121,6 +122,25 @@ test('ChatGPT Autonomous Desktop Delivery Suite', async (t) => {
     const session = new ChatGptAutonomousSession({ swiftBridge: fakeBridge });
     await session.send({ text: 'foreground turn', requestId: 'req_foreground_01' });
     assert.equal(fakeBridge.calls[0].activate, true);
+  });
+
+  await t.test('6b. ZiA Background GPT falls back to non-activating AX when JS is unavailable', async () => {
+    const fakeBridge = makeFakeBridge({
+      async executeChatGPTJavaScript() { return { ok: false, error: 'APPLE_EVENTS_JS_UNAVAILABLE' }; },
+      async sendAndObserve(app, text, requestId, timeout, options = {}) {
+        this.calls.push({ app, text, requestId, timeout, activate: options.activate, background: true });
+        return { ok: true, status: 'COMPLETED', response: 'AX_BACKGROUND_RESPONSE', latencyMs: 7, error: null };
+      }
+    });
+    const session = new ZiABackgroundGPT({ swiftBridge: fakeBridge });
+    const res = await session.send({ text: 'background AX fallback', requestId: 'req_background_ax_01' });
+
+    assert.equal(res.success, true);
+    assert.equal(res.modelTurnConfirmed, true);
+    assert.equal(res.response, 'AX_BACKGROUND_RESPONSE');
+    assert.equal(res.transport, 'chatgpt-desktop-background-ax');
+    assert.equal(fakeBridge.calls.at(-1).activate, false);
+    assert.equal(session.backgroundWorkerName, 'ZiA Background GPT');
   });
 
   await t.test('7. Correlation accepts the request marker and rejects stale output', () => {

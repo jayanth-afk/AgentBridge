@@ -16,6 +16,7 @@ struct RequestOp: Codable {
     let role: String?
     let timeoutMs: Int?
     let activate: Bool?
+    let minimized: Bool?
 
     var targetApp: String {
         return app ?? appName ?? "Claude"
@@ -274,6 +275,22 @@ func activateApp(name: String) -> SimpleResponse {
     app.unhide()
     let success = app.activate(options: [])
     return SimpleResponse(ok: success, status: success ? "ACTIVATED" : "FAILED", details: nil)
+}
+
+func setAppMinimized(name: String, minimized: Bool) -> SimpleResponse {
+    let (app, maybeWin) = resolveWindow(name, activate: false)
+    guard app != nil else {
+        return SimpleResponse(ok: false, status: "APP_NOT_RUNNING", details: nil)
+    }
+    guard let win = maybeWin else {
+        return SimpleResponse(ok: false, status: "NO_WINDOW", details: nil)
+    }
+    let result = AXUIElementSetAttributeValue(
+        win,
+        kAXMinimizedAttribute as CFString,
+        minimized ? kCFBooleanTrue : kCFBooleanFalse
+    )
+    return SimpleResponse(ok: result == .success, status: result == .success ? "MINIMIZED_STATE_SET" : "MINIMIZE_FAILED", details: nil)
 }
 
 func restoreFocusToPid(pid: pid_t) -> SimpleResponse {
@@ -804,6 +821,43 @@ func findSendButton(_ win: AXUIElement) -> AXUIElement? {
     return walk(win, 0)
 }
 
+// Exact AX button activation used for explicit project/chat routing.
+// It never activates or unhides the application.
+func pressButtonByExactTitle(_ name: String, title expectedTitle: String) -> SimpleResponse {
+    let (app, maybeWin) = resolveWindow(name, activate: false)
+    guard app != nil else {
+        return SimpleResponse(ok: false, status: "APP_NOT_RUNNING", details: nil)
+    }
+    guard let win = maybeWin else {
+        return SimpleResponse(ok: false, status: "NO_WINDOW", details: nil)
+    }
+
+    func walk(_ el: AXUIElement, _ depth: Int) -> AXUIElement? {
+        if depth > 90 { return nil }
+        if axString(el, kAXRoleAttribute) == "AXButton" {
+            let title = axString(el, kAXTitleAttribute)
+            let desc = axString(el, kAXDescriptionAttribute)
+            if (title == expectedTitle || desc == expectedTitle) && axBool(el, kAXEnabledAttribute) {
+                return el
+            }
+        }
+        var cv: AnyObject?
+        if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &cv) == .success,
+           let kids = cv as? [AXUIElement] {
+            for k in kids {
+                if let found = walk(k, depth + 1) { return found }
+            }
+        }
+        return nil
+    }
+
+    guard let button = walk(win, 0) else {
+        return SimpleResponse(ok: false, status: "BUTTON_NOT_FOUND", details: nil)
+    }
+    let result = AXUIElementPerformAction(button, kAXPressAction as CFString)
+    return SimpleResponse(ok: result == .success, status: result == .success ? "PRESSED" : "PRESS_FAILED", details: nil)
+}
+
 // Detect an in-progress generation (Stop control, or "is responding" label).
 func isGenerating(_ win: AXUIElement, profile: String) -> Bool {
     func walk(_ el: AXUIElement, _ depth: Int) -> Bool {
@@ -1058,6 +1112,11 @@ func handleRequest(_ req: RequestOp) {
            let str = String(data: data, encoding: .utf8) {
             print(str)
         }
+    case "chatgptPressButton":
+        let resp = pressButtonByExactTitle(req.targetApp, title: req.payloadText)
+        if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
+            print(str)
+        }
     case "frontmost":
         let resp = getFrontmostApp()
         if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
@@ -1075,6 +1134,11 @@ func handleRequest(_ req: RequestOp) {
         }
     case "activate":
         let resp = activateApp(name: req.targetApp)
+        if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
+            print(str)
+        }
+    case "setMinimized":
+        let resp = setAppMinimized(name: req.targetApp, minimized: req.minimized ?? true)
         if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
             print(str)
         }

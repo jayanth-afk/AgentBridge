@@ -24,13 +24,16 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
     this.correlator = options.correlator || new ResponseCorrelator(options);
     this.appName = options.appName || 'ChatGPT';
     this.defaultTimeoutMs = options.timeoutMs || 180000;
-    // Background mode never activates or unhides the app. It is intentionally
-    // opt-in because some desktop clients require foreground focus to accept AX
-    // input. A failed background submission must be reported, never retried by
-    // silently stealing focus.
+    // Product name: this is ZiA's background GPT worker. It drives the real
+    // user-authorized ChatGPT Desktop app without taking foreground focus.
+    // "background" means unfocused/minimized-capable GUI automation; it is not
+    // a fabricated response and it is not the bundled Codex engine.
     this.background = Boolean(options.background || options.headless);
     this.restoreFocus = options.restoreFocus !== false;
-    this.backgroundTransport = options.backgroundTransport || 'apple-events-javascript';
+    // auto = prefer Apple Events JavaScript when available, otherwise use the
+    // native AX path with activate:false. Explicit transports remain supported.
+    this.backgroundTransport = options.backgroundTransport || 'auto';
+    this.backgroundWorkerName = options.backgroundWorkerName || 'ZiA Background GPT';
     this.activeTurns = new Map(); // requestId -> turnResult
   }
 
@@ -43,9 +46,9 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
     return Boolean(inspect.ok && inspect.running);
   }
 
-  async backgroundTransportAvailable() {
+  async backgroundJavaScriptAvailable() {
     if (!this.background) return false;
-    if (this.backgroundTransport !== 'apple-events-javascript') return false;
+    if (!['auto', 'apple-events-javascript'].includes(this.backgroundTransport)) return false;
     const probe = await this.swiftBridge.executeChatGPTJavaScript('document.title').catch(() => null);
     return Boolean(probe?.ok);
   }
@@ -98,9 +101,10 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
     const available = await this.isAvailable();
     return {
       name: this.name,
+      workerName: this.background ? this.backgroundWorkerName : null,
       agent: 'chatgpt-desktop',
       engine: 'chatgpt-desktop-native-ax',
-      transport: 'chatgpt-desktop-accessibility',
+      transport: this.background ? 'chatgpt-desktop-background-ax' : 'chatgpt-desktop-accessibility',
       trueHeadlessEngine: false, // The real GUI app still performs the turn.
       backgroundModelWake: this.background,
       backgroundSubmission: this.background,
@@ -113,9 +117,11 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
       streaming: false,
       cancellation: false,
       concurrency: false,
-      transports: ['accessibility'],
+      transports: this.background ? ['accessibility-background', 'apple-events-javascript'] : ['accessibility'],
       requiresUserPrompt: false,
-      notes: 'User-authorized macOS Accessibility automation of the real ChatGPT Desktop app. Requests are submitted to the app itself and the real model response is observed and correlated.'
+      notes: this.background
+        ? 'ZiA Background GPT: user-authorized automation of the real ChatGPT Desktop app without activating it. Uses Apple Events JavaScript when available and otherwise native AX with activate:false.'
+        : 'User-authorized macOS Accessibility automation of the real ChatGPT Desktop app. Requests are submitted to the app itself and the real model response is observed and correlated.'
     };
   }
 
@@ -173,75 +179,92 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
     const tagged = this.correlator.tagMessage(resolvedText, resolvedId);
 
     if (this.background) {
-      const jsReady = await this.backgroundTransportAvailable();
-      if (!jsReady) {
-        return {
-          success: false,
-          status: 'BACKGROUND_MODEL_UNAVAILABLE',
-          error: 'ChatGPT Apple Events JavaScript transport is unavailable. Enable ChatGPT Developer > Allow JavaScript from Apple Events.',
-          response: null,
-          modelTurnConfirmed: false,
-          requestId: resolvedId,
-          transport: 'chatgpt-desktop-background-javascript',
-          uiSubmitted: false,
-          latencyMs: Date.now() - startMs
-        };
-      }
+      // Preferred path: Apple Events JavaScript can operate the web view without
+      // foreground focus. If that capability is unavailable, do NOT fail the
+      // background worker: the native AX transport can also submit/observe with
+      // activate:false and therefore remains genuinely background/unfocused.
+      const jsReady = await this.backgroundJavaScriptAvailable();
 
-      const submitted = await this.submitBackgroundDom(tagged, resolvedId);
-      if (!submitted?.ok) {
-        return {
-          success: false,
-          status: 'BACKGROUND_SUBMISSION_FAILED',
-          error: submitted?.error || 'Background DOM submission failed',
-          response: null,
-          modelTurnConfirmed: false,
-          requestId: resolvedId,
-          transport: 'chatgpt-desktop-background-javascript',
-          uiSubmitted: false,
-          latencyMs: Date.now() - startMs
-        };
-      }
-
-      const deadline = Date.now() + (timeoutMs || this.defaultTimeoutMs);
-      let last = '';
-      let stable = 0;
-      while (Date.now() < deadline) {
-        await new Promise(resolve => setTimeout(resolve, 500));
-        const observed = await this.readBackgroundDomResponse(resolvedId);
-        if (!observed?.ok || !observed.response) continue;
-        const response = observed.response.trim();
-        if (response === last) stable += 1;
-        else { last = response; stable = 0; }
-        if (stable >= 2) {
-          const result = {
-            success: true,
-            status: 'COMPLETED',
-            response,
-            error: null,
-            modelTurnConfirmed: true,
+      if (jsReady) {
+        const submitted = await this.submitBackgroundDom(tagged, resolvedId);
+        if (submitted?.ok) {
+          const deadline = Date.now() + (timeoutMs || this.defaultTimeoutMs);
+          let last = '';
+          let stable = 0;
+          while (Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+            const observed = await this.readBackgroundDomResponse(resolvedId);
+            if (!observed?.ok || !observed.response) continue;
+            const response = observed.response.trim();
+            if (response === last) stable += 1;
+            else { last = response; stable = 0; }
+            if (stable >= 2) {
+              const result = {
+                success: true,
+                status: 'COMPLETED',
+                response,
+                error: null,
+                modelTurnConfirmed: true,
+                requestId: resolvedId,
+                transport: 'chatgpt-desktop-background-javascript',
+                uiSubmitted: true,
+                latencyMs: Date.now() - startMs
+              };
+              this.activeTurns.set(resolvedId, result);
+              this.emit('turn_completed', result);
+              return result;
+            }
+          }
+          return {
+            success: false,
+            status: 'BACKGROUND_RESPONSE_TIMEOUT',
+            error: 'ChatGPT accepted the background request but no stable correlated response was observed before timeout',
+            response: last || null,
+            modelTurnConfirmed: false,
             requestId: resolvedId,
             transport: 'chatgpt-desktop-background-javascript',
             uiSubmitted: true,
             latencyMs: Date.now() - startMs
           };
-          this.activeTurns.set(resolvedId, result);
-          this.emit('turn_completed', result);
-          return result;
         }
       }
 
-      return {
-        success: false,
-        status: 'BACKGROUND_RESPONSE_TIMEOUT',
-        error: 'ChatGPT accepted the background request but no stable correlated response was observed before timeout',
-        response: last || null,
-        modelTurnConfirmed: false,
+      if (this.backgroundTransport === 'apple-events-javascript') {
+        return {
+          success: false,
+          status: 'BACKGROUND_MODEL_UNAVAILABLE',
+          error: 'ChatGPT Apple Events JavaScript transport is unavailable',
+          response: null,
+          modelTurnConfirmed: false,
+          requestId: resolvedId,
+          transport: 'chatgpt-desktop-background-javascript',
+          uiSubmitted: false,
+          latencyMs: Date.now() - startMs
+        };
+      }
+
+      // Native fallback: no app activation, no focus stealing.
+      const turn = await this.swiftBridge.sendAndObserve(
+        this.appName,
+        tagged,
+        resolvedId,
+        timeoutMs || this.defaultTimeoutMs,
+        { activate: false }
+      );
+      const result = {
+        success: Boolean(turn.ok && turn.response),
+        status: turn.status || (turn.ok ? 'COMPLETED' : 'UNKNOWN'),
+        response: turn.response || null,
+        error: turn.error || null,
+        modelTurnConfirmed: Boolean(turn.ok && turn.response),
         requestId: resolvedId,
-        transport: 'chatgpt-desktop-background-javascript',
-        uiSubmitted: true,
+        transport: 'chatgpt-desktop-background-ax',
+        uiSubmitted: !['APP_NOT_RUNNING', 'NO_WINDOW', 'CHATGPT_COMPOSER_NOT_FOUND'].includes(turn.status),
         latencyMs: Date.now() - startMs
       };
+      this.activeTurns.set(resolvedId, result);
+      if (result.modelTurnConfirmed) this.emit('turn_completed', result);
+      return result;
     }
 
     const turn = await this.swiftBridge.sendAndObserve(

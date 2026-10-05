@@ -45,6 +45,14 @@ export class SwiftAXBridge {
     }
   }
 
+  async pressChatGPTButton(title) {
+    return this.executeOp({ op: 'chatgptPressButton', app: 'ChatGPT', text: title, timeoutMs: 5000 });
+  }
+
+  async setChatGPTMinimized(minimized) {
+    return this.executeOp({ op: 'setMinimized', app: 'ChatGPT', minimized: Boolean(minimized), timeoutMs: 5000 });
+  }
+
   async executeChatGPTJavaScript(javascript) {
     const result = await this.executeOp({ op: 'chatgptExecuteJavaScript', text: javascript, timeoutMs: 10000 });
     if (result?.ok && typeof result.result === 'string') {

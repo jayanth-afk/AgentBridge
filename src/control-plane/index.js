@@ -8,6 +8,7 @@ export { CdpDesktopAdapter } from './cdp-adapter.js';
 export { BrowserSessionAdapter } from './browser-session-adapter.js';
 export { ChatGptLocalEngineAdapter } from './chatgpt-local-engine.js';
 export { ChatGptAutonomousSession } from './chatgpt-autonomous-session.js';
+export { ZiABackgroundGPT } from './zia-background-gpt.js';
 export { ChatGptDesktopWorker, ChatGptWorkerStatus } from './chatgpt-desktop-worker.js';
 export { DesktopAgentWorker, DesktopAgentWorkerStatus } from './desktop-agent-worker.js';
 export { ClaudeDesktopSession } from './claude-desktop-session.js';
