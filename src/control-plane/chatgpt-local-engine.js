@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { DesktopControlAdapter, AdapterHealth } from './desktop-control-adapter.js';
@@ -138,17 +139,22 @@ export class ChatGptLocalEngineAdapter extends DesktopControlAdapter {
 
     job.cancelled = true;
     if (job.timer) clearTimeout(job.timer);
+    if (job.firstTokenTimer) clearTimeout(job.firstTokenTimer);
 
     try {
-      if (job.child && !job.child.killed) {
+      // Kill the WHOLE process group so grandchildren never survive a cancel.
+      if (job.killGroup) {
+        job.killGroup('SIGTERM');
+      } else if (job.child && !job.child.killed) {
         job.child.kill('SIGTERM');
-        // Fallback kill after 500ms if not exited
-        setTimeout(() => {
-          try {
-            if (job.child && !job.child.killed) job.child.kill('SIGKILL');
-          } catch {}
-        }, 500).unref();
       }
+      // Escalate after 500ms if the group has not exited.
+      setTimeout(() => {
+        try {
+          if (job.killGroup) job.killGroup('SIGKILL');
+          else if (job.child && !job.child.killed) job.child.kill('SIGKILL');
+        } catch {}
+      }, 500).unref();
     } catch (err) {
       return { cancelled: false, error: err.message, requestId };
     }
@@ -213,10 +219,11 @@ export class ChatGptLocalEngineAdapter extends DesktopControlAdapter {
   }
 
   async recover() {
-    // Terminate any zombie child jobs
-    for (const [reqId, job] of this.activeJobs.entries()) {
+    // Terminate any zombie child jobs (whole groups when detached).
+    for (const job of this.activeJobs.values()) {
       try {
-        if (job.child && !job.child.killed) job.child.kill('SIGTERM');
+        if (job.killGroup) job.killGroup('SIGTERM');
+        else if (job.child && !job.child.killed) job.child.kill('SIGTERM');
       } catch {}
     }
     this.activeJobs.clear();
@@ -224,7 +231,15 @@ export class ChatGptLocalEngineAdapter extends DesktopControlAdapter {
   }
 
   /**
-   * Core execution turn
+   * Core execution turn.
+   *
+   * Hardening options (used by `answer`, the Zia brain endpoint's transport):
+   *  - `useTempCwd`: run in a fresh EMPTY temp dir (never the repo or $HOME)
+   *  - `cwd`: explicit working root instead
+   *  - `sandboxMode`: 'read-only' | 'workspace-write' | 'danger-full-access'
+   *  - `ephemeral`: run without persisting session files (stateless)
+   *  - `firstTokenTimeoutMs`: abort if no output arrives within this window
+   *  - `detached`: spawn in its own process group so cancel kills the WHOLE group
    */
   async executeTurn({
     prompt,
@@ -233,42 +248,71 @@ export class ChatGptLocalEngineAdapter extends DesktopControlAdapter {
     threadId = null,
     model = null,
     timeoutMs = null,
+    firstTokenTimeoutMs = null,
     onEvent = null,
-    ephemeral = false
-  }) {
+    onTextDelta = null,
+    ephemeral = false,
+    cwd = null,
+    useTempCwd = false,
+    sandboxMode = null,
+    detached = false
+  } = {}) {
     if (!this.isInstalled()) {
-      return { ok: false, error: 'CODEX_CLI_NOT_FOUND' };
+      return { ok: false, success: false, transport: 'chatgpt-local-engine', error: 'CODEX_CLI_NOT_FOUND' };
+    }
+    if (!prompt || !String(prompt).trim()) {
+      return { ok: false, success: false, transport: 'chatgpt-local-engine', error: 'EMPTY_PROMPT' };
     }
 
     const resolvedReqId = requestId || `req_cg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const resolvedTimeout = timeoutMs || this.defaultTimeoutMs;
     const existingThread = threadId || (conversationId ? this.conversationThreads.get(conversationId) : null);
 
-    let args = [];
-    const isEphemeral = ephemeral === true;
-
-    if (existingThread) {
-      // Resume existing thread
-      args = ['exec', 'resume', existingThread, prompt, '--skip-git-repo-check', '--json'];
-    } else {
-      // Start fresh thread
-      args = ['exec', prompt, '--skip-git-repo-check', '--json'];
-      if (isEphemeral) {
-        args.push('--ephemeral');
+    // A hardened Q&A turn runs in a throwaway, EMPTY directory and cleans it up.
+    let workDir = cwd;
+    let tempDir = null;
+    if (!workDir && useTempCwd) {
+      try {
+        tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zia-codex-'));
+        workDir = tempDir;
+      } catch {
+        workDir = null;
       }
     }
+    const cleanupTemp = () => {
+      if (tempDir) {
+        try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+        tempDir = null;
+      }
+    };
 
+    // Build args using ONLY flags this CLI supports. The prompt stays a positional
+    // argument (matching the previously-shipped invocation).
+    const args = ['exec'];
+    if (existingThread) args.push('resume', existingThread);
+    args.push(prompt);
+    if (sandboxMode) args.push('--sandbox', sandboxMode);
+    if (workDir) args.push('--cd', workDir);
+    args.push('--skip-git-repo-check', '--json');
+    if (ephemeral === true) args.push('--ephemeral');
     const targetModel = model || this.defaultModel;
-    if (targetModel) {
-      args.push('-m', targetModel);
-    }
+    if (targetModel) args.push('-m', targetModel);
 
     return new Promise((resolve) => {
       const startMs = Date.now();
-      const child = spawn(this.cliPath, args, {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: process.env
-      });
+      const spawnOptions = { stdio: ['ignore', 'pipe', 'pipe'], env: process.env };
+      if (workDir) spawnOptions.cwd = workDir;
+      if (detached) spawnOptions.detached = true;
+
+      let child;
+      try {
+        child = spawn(this.cliPath, args, spawnOptions);
+      } catch (err) {
+        cleanupTemp();
+        resolve({ ok: false, success: false, transport: 'chatgpt-local-engine',
+                  requestId: resolvedReqId, error: `SPAWN_FAILED: ${err.message}` });
+        return;
+      }
 
       const jobRecord = {
         requestId: resolvedReqId,
@@ -276,41 +320,100 @@ export class ChatGptLocalEngineAdapter extends DesktopControlAdapter {
         child,
         startMs,
         cancelled: false,
+        settled: false,
         finalResult: null,
-        timer: null
+        timer: null,
+        firstTokenTimer: null
       };
-
       this.activeJobs.set(resolvedReqId, jobRecord);
 
+      // Kill the whole process group when detached; otherwise the direct child.
+      const killGroup = (signal) => {
+        try {
+          if (detached && child.pid) process.kill(-child.pid, signal);
+          else child.kill(signal);
+        } catch {
+          try { child.kill(signal); } catch {}
+        }
+      };
+      jobRecord.killGroup = killGroup;
+
+      // Exactly one terminal result per turn.
+      const settle = (result) => {
+        if (jobRecord.settled) return;
+        jobRecord.settled = true;
+        if (jobRecord.timer) clearTimeout(jobRecord.timer);
+        if (jobRecord.firstTokenTimer) clearTimeout(jobRecord.firstTokenTimer);
+        cleanupTemp();
+        this.activeJobs.delete(resolvedReqId);
+        jobRecord.finalResult = result;
+        resolve(result);
+      };
+
+      let stdoutBuffer = '';
       let responseText = '';
+      let lastEmitted = '';
       let activeThreadId = existingThread;
       let usage = null;
       let errorOutput = '';
+      let sawOutput = false;
 
+      const clearFirstToken = () => {
+        if (jobRecord.firstTokenTimer) {
+          clearTimeout(jobRecord.firstTokenTimer);
+          jobRecord.firstTokenTimer = null;
+        }
+      };
+
+      // Stream best-effort text deltas: emit only when the assembled text grows.
+      const flushText = () => {
+        if (typeof onTextDelta !== 'function') return;
+        if (responseText.length > lastEmitted.length && responseText.startsWith(lastEmitted)) {
+          const delta = responseText.slice(lastEmitted.length);
+          lastEmitted = responseText;
+          try { onTextDelta(delta); } catch {}
+        }
+      };
+
+      const handleEvent = (event) => {
+        if (typeof onEvent === 'function') {
+          try { onEvent(event); } catch {}
+        }
+        if (event.type === 'thread.started') {
+          activeThreadId = event.thread_id || activeThreadId;
+          if (conversationId && activeThreadId) {
+            this.conversationThreads.set(conversationId, activeThreadId);
+          }
+        } else if (event.type === 'item.completed' && event.item && event.item.type === 'agent_message') {
+          const text = typeof event.item.text === 'string' ? event.item.text : '';
+          if (text) responseText = responseText ? `${responseText}\n${text}` : text;
+          flushText();
+        } else if (event.type === 'item.updated' && event.item && event.item.type === 'agent_message'
+                   && typeof event.item.text === 'string') {
+          responseText = event.item.text;
+          flushText();
+        } else if (event.type === 'turn.completed') {
+          if (event.usage) usage = event.usage;
+        }
+      };
+
+      // Line-buffered stdout so a JSONL line split across chunks still parses.
       child.stdout.on('data', (chunk) => {
-        const lines = chunk.toString().split('\n');
-        for (const line of lines) {
+        stdoutBuffer += chunk.toString();
+        let newlineIndex;
+        while ((newlineIndex = stdoutBuffer.indexOf('\n')) >= 0) {
+          const line = stdoutBuffer.slice(0, newlineIndex);
+          stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
           const trimmed = line.trim();
           if (!trimmed) continue;
+          if (!sawOutput) { sawOutput = true; clearFirstToken(); }
+          let event;
           try {
-            const event = JSON.parse(trimmed);
-            if (typeof onEvent === 'function') {
-              try { onEvent(event); } catch {}
-            }
-
-            if (event.type === 'thread.started') {
-              activeThreadId = event.thread_id;
-              if (conversationId && activeThreadId) {
-                this.conversationThreads.set(conversationId, activeThreadId);
-              }
-            } else if (event.type === 'item.completed' && event.item?.type === 'agent_message') {
-              responseText = event.item.text || '';
-            } else if (event.type === 'turn.completed') {
-              usage = event.usage;
-            }
+            event = JSON.parse(trimmed);
           } catch {
-            // Tolerate non-JSON diagnostic lines
+            continue; // tolerate malformed / non-JSON diagnostic lines
           }
+          handleEvent(event);
         }
       });
 
@@ -318,45 +421,67 @@ export class ChatGptLocalEngineAdapter extends DesktopControlAdapter {
         errorOutput += chunk.toString();
       });
 
-      const timer = setTimeout(() => {
+      // First-token timeout: an engine that never emits anything is stuck.
+      if (firstTokenTimeoutMs && firstTokenTimeoutMs > 0) {
+        jobRecord.firstTokenTimer = setTimeout(() => {
+          jobRecord.cancelled = true;
+          killGroup('SIGTERM');
+          settle({
+            ok: false,
+            success: false,
+            transport: 'chatgpt-local-engine',
+            requestId: resolvedReqId,
+            error: 'FIRST_TOKEN_TIMEOUT',
+            latencyMs: Date.now() - startMs,
+            details: `no output within ${firstTokenTimeoutMs}ms`
+          });
+        }, firstTokenTimeoutMs);
+      }
+
+      // Total timeout.
+      jobRecord.timer = setTimeout(() => {
         jobRecord.cancelled = true;
-        try { child.kill('SIGTERM'); } catch {}
-        const latencyMs = Date.now() - startMs;
-        const result = {
+        killGroup('SIGTERM');
+        settle({
           ok: false,
           success: false,
-          error: 'TIMEOUT',
+          transport: 'chatgpt-local-engine',
           requestId: resolvedReqId,
-          latencyMs,
+          error: 'TIMEOUT',
+          latencyMs: Date.now() - startMs,
           details: `ChatGPT local engine timed out after ${resolvedTimeout}ms`
-        };
-        jobRecord.finalResult = result;
-        this.activeJobs.delete(resolvedReqId);
-        resolve(result);
+        });
       }, resolvedTimeout);
 
-      jobRecord.timer = timer;
+      child.on('error', (err) => {
+        settle({
+          ok: false,
+          success: false,
+          transport: 'chatgpt-local-engine',
+          requestId: resolvedReqId,
+          error: `PROCESS_ERROR: ${err.message}`,
+          latencyMs: Date.now() - startMs
+        });
+      });
 
       child.on('close', (code) => {
-        clearTimeout(timer);
-        this.activeJobs.delete(resolvedReqId);
+        // Flush a trailing JSONL line that had no final newline.
+        const tail = stdoutBuffer.trim();
+        if (tail) {
+          try { handleEvent(JSON.parse(tail)); } catch { /* tolerate */ }
+        }
+        stdoutBuffer = '';
+
         const latencyMs = Date.now() - startMs;
 
         if (jobRecord.cancelled) {
-          const result = {
-            ok: false,
-            success: false,
-            error: 'CANCELLED',
-            requestId: resolvedReqId,
-            latencyMs
-          };
-          jobRecord.finalResult = result;
-          resolve(result);
+          settle({ ok: false, success: false, transport: 'chatgpt-local-engine',
+                   requestId: resolvedReqId, error: 'CANCELLED', latencyMs });
           return;
         }
 
         if (code === 0 && responseText) {
-          const result = {
+          settle({
             ok: true,
             success: true,
             transport: 'chatgpt-local-engine',
@@ -366,11 +491,9 @@ export class ChatGptLocalEngineAdapter extends DesktopControlAdapter {
             response: responseText,
             usage,
             latencyMs
-          };
-          jobRecord.finalResult = result;
-          resolve(result);
+          });
         } else {
-          const result = {
+          settle({
             ok: false,
             success: false,
             transport: 'chatgpt-local-engine',
@@ -378,11 +501,40 @@ export class ChatGptLocalEngineAdapter extends DesktopControlAdapter {
             requestId: resolvedReqId,
             error: errorOutput.trim() || 'NO_RESPONSE_PRODUCED',
             latencyMs
-          };
-          jobRecord.finalResult = result;
-          resolve(result);
+          });
         }
       });
+    });
+  }
+
+  /**
+   * Stateless, hardened one-shot Q&A turn used by the Zia brain endpoint.
+   *
+   * Guarantees:
+   *  - cwd is a fresh EMPTY temp dir (never the Zia repo or the user's home)
+   *  - read-only sandbox, no approvals, ephemeral session (no persisted files)
+   *  - first-token and total timeouts; timeout/cancel kills the whole group
+   *  - malformed JSONL tolerated; final text assembled from events
+   */
+  async answer({
+    prompt,
+    requestId = null,
+    timeoutMs = 60000,
+    firstTokenTimeoutMs = 15000,
+    onTextDelta = null,
+    onEvent = null
+  } = {}) {
+    return this.executeTurn({
+      prompt,
+      requestId,
+      timeoutMs,
+      firstTokenTimeoutMs,
+      onTextDelta,
+      onEvent,
+      ephemeral: true,
+      useTempCwd: true,
+      sandboxMode: 'read-only',
+      detached: true
     });
   }
 }

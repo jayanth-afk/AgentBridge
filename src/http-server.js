@@ -9,6 +9,8 @@ import { PresenceManager } from './presence-manager.js';
 import { AgentIdentityManager } from './agent-identity.js';
 import { GitController } from './git-controller.js';
 import { ZiABackgroundGPT } from './control-plane/zia-background-gpt.js';
+import { ChatGptLocalEngineAdapter } from './control-plane/chatgpt-local-engine.js';
+import { AdapterHealth } from './control-plane/desktop-control-adapter.js';
 
 export class BridgeHttpServer {
   constructor(options = {}) {
@@ -45,6 +47,33 @@ export class BridgeHttpServer {
     this.server = null;
     this.backgroundGPT = null;
     this.backgroundGPTPromise = null;
+    this.localEngine = null;
+  }
+
+  /** Lazily-created headless engine (bundled Codex CLI inside ChatGPT.app). */
+  getLocalEngine() {
+    if (!this.localEngine) {
+      this.localEngine = new ChatGptLocalEngineAdapter({ defaultTimeoutMs: 60000 });
+    }
+    return this.localEngine;
+  }
+
+  /**
+   * Decide which transport answers a ChatGPT request.
+   *   - 'ui'     -> the Accessibility-driven ChatGPT Desktop app
+   *   - 'engine' -> the bundled headless Codex engine (fails loudly if absent)
+   *   - 'auto'   -> engine when installed AND healthy, otherwise the UI route
+   * The chosen transport is always reported back to the caller.
+   */
+  async resolveChatGPTTransport(requested) {
+    if (requested === 'ui') return 'ui';
+    const engine = this.getLocalEngine();
+    if (requested === 'engine') return 'engine';
+    if (engine.isInstalled()) {
+      const health = await engine.health();
+      if (health.status === AdapterHealth.AVAILABLE) return 'engine';
+    }
+    return 'ui';
   }
 
   async getBackgroundGPT() {
@@ -309,6 +338,11 @@ export class BridgeHttpServer {
               : 'zia_brain_' + Date.now() + '_' + Math.random().toString(16).slice(2);
 
             const wantStream = Boolean(brainBody?.stream || parsedUrl.searchParams.get('stream') === 'true');
+            const requestedTransport = ['auto', 'engine', 'ui'].includes(brainBody?.transport)
+              ? brainBody.transport
+              : 'auto';
+            const activeTransport = await this.resolveChatGPTTransport(requestedTransport);
+
             const prompt = [
               "You are ZiA's primary intelligence engine.",
               "Answer the request directly, accurately, and efficiently.",
@@ -317,6 +351,49 @@ export class BridgeHttpServer {
               ...text.map(message => message.role.toUpperCase() + ":\n" + message.content)
             ].join('\n');
 
+            // ---- Engine transport: stateless, hardened headless Q&A ----
+            if (activeTransport === 'engine') {
+              const engine = this.getLocalEngine();
+              if (wantStream) {
+                res.writeHead(200, {
+                  'Content-Type': 'text/event-stream',
+                  'Cache-Control': 'no-cache',
+                  'Connection': 'keep-alive'
+                });
+                const onTextDelta = (delta) => {
+                  res.write(`data: ${JSON.stringify({ chunk: delta })}\n\n`);
+                };
+                const result = await engine.answer({ prompt, requestId, onTextDelta });
+                res.write(`data: ${JSON.stringify({
+                  done: true,
+                  ok: Boolean(result.success && result.response),
+                  provider: 'chatgpt-desktop',
+                  transport: 'engine',
+                  response: result.response || null,
+                  requestId,
+                  modelTurnConfirmed: Boolean(result.success && result.response),
+                  usage: result.usage || null,
+                  error: result.error || null
+                })}\n\n`);
+                return res.end();
+              }
+              const result = await engine.answer({ prompt, requestId });
+              res.writeHead(result.success ? 200 : 502, { 'Content-Type': 'application/json' });
+              return res.end(JSON.stringify({
+                ok: Boolean(result.success && result.response),
+                provider: 'chatgpt-desktop',
+                transport: 'engine',
+                response: result.response || null,
+                requestId,
+                modelTurnConfirmed: Boolean(result.success && result.response),
+                usage: result.usage || null,
+                latencyMs: result.latencyMs,
+                error: result.error || null,
+                status: result.success ? 'completed' : (result.error || 'failed')
+              }));
+            }
+
+            // ---- UI transport (fallback): behavior unchanged ----
             if (wantStream) {
               res.writeHead(200, {
                 'Content-Type': 'text/event-stream',
@@ -333,6 +410,7 @@ export class BridgeHttpServer {
                   done: true,
                   ok: Boolean(result.success && result.modelTurnConfirmed),
                   provider: 'chatgpt-desktop',
+                  transport: 'ui',
                   response: result.response || null,
                   requestId,
                   modelTurnConfirmed: Boolean(result.modelTurnConfirmed),
@@ -345,6 +423,7 @@ export class BridgeHttpServer {
                   done: true,
                   ok: false,
                   provider: 'chatgpt-desktop',
+                  transport: 'ui',
                   requestId,
                   error: error instanceof Error ? error.message : String(error)
                 })}\n\n`);
@@ -360,11 +439,11 @@ export class BridgeHttpServer {
               return res.end(JSON.stringify({
                 ok: Boolean(result.success && result.modelTurnConfirmed),
                 provider: 'chatgpt-desktop',
+                transport: 'ui',
                 response: result.response || null,
                 requestId,
                 modelTurnConfirmed: Boolean(result.modelTurnConfirmed),
                 uiSubmitted: Boolean(result.uiSubmitted),
-                transport: result.transport || 'chatgpt-desktop-background-ax',
                 error: result.error || null,
                 status: result.status || null
               }));
@@ -373,6 +452,7 @@ export class BridgeHttpServer {
               return res.end(JSON.stringify({
                 ok: false,
                 provider: 'chatgpt-desktop',
+                transport: 'ui',
                 requestId,
                 error: error instanceof Error ? error.message : String(error)
               }));
