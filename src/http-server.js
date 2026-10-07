@@ -364,32 +364,96 @@ export class BridgeHttpServer {
                   res.write(`data: ${JSON.stringify({ chunk: delta })}\n\n`);
                 };
                 const result = await engine.answer({ prompt, requestId, onTextDelta });
+                if (result.success && result.response) {
+                  res.write(`data: ${JSON.stringify({
+                    done: true,
+                    ok: true,
+                    provider: 'chatgpt-desktop',
+                    transport: 'engine',
+                    response: result.response,
+                    requestId,
+                    modelTurnConfirmed: true,
+                    usage: result.usage || null
+                  })}\n\n`);
+                  return res.end();
+                }
+                if (requestedTransport === 'auto') {
+                  try {
+                    const brain = await this.getBackgroundGPT();
+                    const uiResult = await brain.send({ requestId, text: prompt, onChunk: onTextDelta });
+                    if (uiResult.success && uiResult.modelTurnConfirmed && uiResult.response) {
+                      res.write(`data: ${JSON.stringify({
+                        done: true,
+                        ok: true,
+                        provider: 'chatgpt-desktop',
+                        transport: 'ui',
+                        response: uiResult.response,
+                        requestId,
+                        modelTurnConfirmed: true
+                      })}\n\n`);
+                      return res.end();
+                    }
+                  } catch {}
+                }
                 res.write(`data: ${JSON.stringify({
                   done: true,
-                  ok: Boolean(result.success && result.response),
+                  ok: false,
                   provider: 'chatgpt-desktop',
                   transport: 'engine',
-                  response: result.response || null,
+                  response: null,
                   requestId,
-                  modelTurnConfirmed: Boolean(result.success && result.response),
+                  modelTurnConfirmed: false,
                   usage: result.usage || null,
-                  error: result.error || null
+                  error: result.error || 'Engine failed'
                 })}\n\n`);
                 return res.end();
               }
               const result = await engine.answer({ prompt, requestId });
-              res.writeHead(result.success ? 200 : 502, { 'Content-Type': 'application/json' });
+              if (result.success && result.response) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({
+                  ok: true,
+                  provider: 'chatgpt-desktop',
+                  transport: 'engine',
+                  response: result.response,
+                  requestId,
+                  modelTurnConfirmed: true,
+                  usage: result.usage || null,
+                  latencyMs: result.latencyMs,
+                  status: 'completed'
+                }));
+              }
+              if (requestedTransport === 'auto') {
+                try {
+                  const brain = await this.getBackgroundGPT();
+                  const uiResult = await brain.send({ requestId, text: prompt });
+                  if (uiResult.success && uiResult.modelTurnConfirmed && uiResult.response) {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    return res.end(JSON.stringify({
+                      ok: true,
+                      provider: 'chatgpt-desktop',
+                      transport: 'ui',
+                      response: uiResult.response,
+                      requestId,
+                      modelTurnConfirmed: true,
+                      latencyMs: uiResult.latencyMs,
+                      status: 'completed'
+                    }));
+                  }
+                } catch {}
+              }
+              res.writeHead(502, { 'Content-Type': 'application/json' });
               return res.end(JSON.stringify({
-                ok: Boolean(result.success && result.response),
+                ok: false,
                 provider: 'chatgpt-desktop',
                 transport: 'engine',
-                response: result.response || null,
+                response: null,
                 requestId,
-                modelTurnConfirmed: Boolean(result.success && result.response),
+                modelTurnConfirmed: false,
                 usage: result.usage || null,
                 latencyMs: result.latencyMs,
                 error: result.error || null,
-                status: result.success ? 'completed' : (result.error || 'failed')
+                status: result.error || 'failed'
               }));
             }
 

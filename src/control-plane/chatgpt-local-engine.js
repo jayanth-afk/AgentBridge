@@ -392,6 +392,10 @@ export class ChatGptLocalEngineAdapter extends DesktopControlAdapter {
                    && typeof event.item.text === 'string') {
           responseText = event.item.text;
           flushText();
+        } else if (event.type === 'error' && typeof event.message === 'string') {
+          jobRecord.errorEventMessage = event.message;
+        } else if (event.type === 'turn.failed' && event.error && typeof event.error.message === 'string') {
+          jobRecord.errorEventMessage = event.error.message;
         } else if (event.type === 'turn.completed') {
           if (event.usage) usage = event.usage;
         }
@@ -499,7 +503,9 @@ export class ChatGptLocalEngineAdapter extends DesktopControlAdapter {
             transport: 'chatgpt-local-engine',
             code,
             requestId: resolvedReqId,
-            error: errorOutput.trim() || 'NO_RESPONSE_PRODUCED',
+            error: jobRecord.errorEventMessage ||
+              (errorOutput && !errorOutput.includes('Reading additional input') ? errorOutput.trim() : null) ||
+              'NO_RESPONSE_PRODUCED',
             latencyMs
           });
         }

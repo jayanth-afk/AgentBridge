@@ -50,6 +50,7 @@ export class ZiABackgroundGPTTarget {
   }
 
   async resolvePersisted() {
+    this.state = this.load() || this.state;
     if (!this.state) {
       return { ok: false, status: 'BACKGROUND_TARGET_UNINITIALIZED', error: 'No persisted ZiA Background GPT conversation target exists' };
     }
