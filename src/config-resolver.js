@@ -14,8 +14,28 @@
  */
 
 import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 
 const ENV_PREFIX = 'env:';
+
+/**
+ * Retrieve a secret from macOS Keychain if running on darwin.
+ * Returns the secret string, or null if unavailable or error.
+ */
+export function loadKeychainSecret(service = 'agent-bridge', account = 'control_plane_api_key') {
+  if (process.platform !== 'darwin') return null;
+  try {
+    const out = execFileSync('security', [
+      'find-generic-password',
+      '-s', service,
+      '-a', account,
+      '-w'
+    ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000 });
+    return out ? out.trim() : null;
+  } catch {
+    return null;
+  }
+}
 
 export function isEnvReference(raw) {
   return typeof raw === 'string' && raw.startsWith(ENV_PREFIX);

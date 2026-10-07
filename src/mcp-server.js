@@ -187,7 +187,12 @@ export class BridgeMcpServer {
 }
 
 if (process.argv[1] && process.argv[1].endsWith('mcp-server.js')) {
-  const bridge = new BridgeMcpServer();
+  let cliAgentId;
+  const agentIdx = process.argv.indexOf('--agent');
+  if (agentIdx >= 0 && process.argv[agentIdx + 1]) {
+    cliAgentId = process.argv[agentIdx + 1];
+  }
+  const bridge = new BridgeMcpServer({ agentId: cliAgentId });
   bridge.startStdio().catch(err => {
     console.error('Bridge MCP server error:', err);
     process.exit(1);

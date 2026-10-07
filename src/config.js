@@ -1,7 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveSecret } from './config-resolver.js';
+import { resolveSecret, loadKeychainSecret } from './config-resolver.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -76,7 +76,13 @@ export const CONFIG = {
   CONTROL_PLANE: (() => {
     // `control_plane.api_key` accepts a literal value or an `env:NAME`
     // indirection. A present but unresolvable reference throws here at startup.
-    const rawKey = process.env.CONTROL_PLANE_API_KEY_CONFIG ?? process.env.CONTROL_PLANE_API_KEY;
+    const isPlaceholder = (k) => typeof k === 'string' && (/^YOUR_API_KEY/i.test(k.trim()) || k.trim() === '<api-key>');
+    let rawKey = process.env.CONTROL_PLANE_API_KEY_CONFIG ?? process.env.CONTROL_PLANE_API_KEY;
+    if (isPlaceholder(rawKey)) rawKey = null;
+    if (!rawKey && process.platform === 'darwin') {
+      const keychainSecret = loadKeychainSecret('agent-bridge', 'control_plane_api_key');
+      if (keychainSecret) rawKey = keychainSecret;
+    }
     const requireFlag = process.env.CONTROL_PLANE_REQUIRE_API_KEY;
     return {
       API_KEY: resolveSecret(rawKey, { name: 'control_plane.api_key' }),

@@ -4,6 +4,10 @@ node_modules/
 # Runtime data: sqlite databases, browser profiles, session state.
 # Ignored wholesale because browser profiles contain cookies/session tokens.
 data/
+test-workspace/*-git/
+test-workspace/*-remote.git/
+test-workspace/*_delete_me.txt
+test-workspace/test-stage-repo/
 
 # Compiled native helper binary
 tools/macos-accessibility-helper/bridge-ax-helper

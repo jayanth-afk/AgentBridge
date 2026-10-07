@@ -3,7 +3,9 @@
     "agent-bridge": {
       "command": "/Users/jayanthpranaykonada/.nvm/versions/node/v24.12.0/bin/node",
       "args": [
-        "/Users/jayanthpranaykonada/agent-bridge/src/mcp-server.js"
+        "/Users/jayanthpranaykonada/agent-bridge/src/mcp-server.js",
+        "--agent",
+        "chatgpt-desktop"
       ],
       "cwd": "/Users/jayanthpranaykonada/agent-bridge",
       "enabled": true,
