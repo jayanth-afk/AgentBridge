@@ -1,5 +1,6 @@
 import { ModelExecutionAdapter } from './model-execution-adapter.js';
 import { SwiftAXBridge } from './swift-ax-bridge.js';
+import { PersistentSwiftAXBridge } from './persistent-swift-ax-bridge.js';
 import { ResponseCorrelator } from './response-correlator.js';
 import { ZiABackgroundGPTTarget } from './zia-background-gpt-target.js';
 
@@ -21,15 +22,19 @@ import { ZiABackgroundGPTTarget } from './zia-background-gpt-target.js';
 export class ChatGptAutonomousSession extends ModelExecutionAdapter {
   constructor(options = {}) {
     super('chatgpt-autonomous-session', options);
-    this.swiftBridge = options.swiftBridge || new SwiftAXBridge(options);
-    this.correlator = options.correlator || new ResponseCorrelator(options);
-    this.appName = options.appName || 'ChatGPT';
-    this.defaultTimeoutMs = options.timeoutMs || 180000;
     // Product name: this is ZiA's background GPT worker. It drives the real
     // user-authorized ChatGPT Desktop app without taking foreground focus.
     // "background" means unfocused/minimized-capable GUI automation; it is not
     // a fabricated response and it is not the bundled Codex engine.
     this.background = Boolean(options.background || options.headless);
+    this.swiftBridge = options.swiftBridge || (
+      this.background
+        ? new PersistentSwiftAXBridge(options)
+        : new SwiftAXBridge(options)
+    );
+    this.correlator = options.correlator || new ResponseCorrelator(options);
+    this.appName = options.appName || 'ChatGPT';
+    this.defaultTimeoutMs = options.timeoutMs || 180000;
     this.restoreFocus = options.restoreFocus !== false;
     // auto = prefer Apple Events JavaScript when available, otherwise use the
     // native AX path with activate:false. Explicit transports remain supported.
@@ -57,21 +62,63 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
     return Boolean(probe?.ok);
   }
 
-  async enforceChatGPTMinimized() {
-    if (!this.background || typeof this.swiftBridge.setChatGPTMinimized !== 'function') {
-      return { ok: false, status: 'MINIMIZE_UNAVAILABLE' };
+  async primeBackgroundWindow() {
+    if (!this.background || typeof this.swiftBridge.inspectElements !== 'function') {
+      return { ok: false, status: 'BACKGROUND_WINDOW_PRIME_UNAVAILABLE' };
     }
-    return this.swiftBridge.setChatGPTMinimized(true).catch(() => ({
-      ok: false,
-      status: 'MINIMIZE_FAILED'
-    }));
+    const result = await this.swiftBridge.inspectElements(this.appName);
+    return result?.ok
+      ? { ok: true, status: 'BACKGROUND_WINDOW_PRIMED' }
+      : { ok: false, status: 'BACKGROUND_WINDOW_PRIME_FAILED', error: result?.error || 'NO_ACCESSIBLE_WINDOW' };
+  }
+
+  async verifyBackgroundNonFrontmost() {
+    if (!this.background || typeof this.swiftBridge.getFrontmostApp !== 'function') {
+      return { ok: false, status: 'BACKGROUND_FRONTMOST_CHECK_UNAVAILABLE' };
+    }
+    const frontmost = await this.swiftBridge.getFrontmostApp();
+    const isChatGPTFrontmost = Boolean(
+      frontmost?.ok && (
+        frontmost.bundleId === 'com.openai.codex' ||
+        String(frontmost.name || '').toLowerCase() === 'chatgpt'
+      )
+    );
+    return {
+      ok: !isChatGPTFrontmost,
+      status: isChatGPTFrontmost ? 'CHATGPT_FRONTMOST' : 'BACKGROUND_NON_FRONTMOST',
+      frontmost: frontmost?.name || null,
+      frontmostPid: frontmost?.pid || null
+    };
+  }
+
+  async enforceChatGPTMinimized() {
+    // Compatibility no-op for callers from the minimized-era API. The new
+    // invariant is enforced by never activating ChatGPT; this method must not
+    // inspect or restore frontmost focus.
+    return { ok: true, status: 'BACKGROUND_NON_FRONTMOST_INVARIANT' };
   }
 
   async submitBackgroundDom(tagged, requestId) {
     const marker = `[AB:${requestId}]`;
+    const targetState = this.backgroundTarget?.state || {};
+    const projectTitle = targetState.projectTitle || 'ZiA Response';
+    const conversationTitle = targetState.conversationTitle || '';
+    const anchorText = targetState.anchorText || '';
     const script = `(() => {
       const marker = ${JSON.stringify(marker)};
       const text = ${JSON.stringify(tagged)};
+      const body = document.body?.innerText || '';
+      // Hot-path target verification: do not navigate or inspect the full AX tree.
+      // If the dedicated ZiA conversation is not visibly selected, fail closed.
+      if (!${JSON.stringify(conversationTitle)} || !body.includes(${JSON.stringify(conversationTitle)})) {
+        return JSON.stringify({ok:false,error:'BACKGROUND_TARGET_NOT_SELECTED'});
+      }
+      if (!body.includes(${JSON.stringify(projectTitle)})) {
+        return JSON.stringify({ok:false,error:'BACKGROUND_PROJECT_NOT_VISIBLE'});
+      }
+      if (${JSON.stringify(Boolean(anchorText))} && !body.includes(${JSON.stringify(anchorText)})) {
+        return JSON.stringify({ok:false,error:'BACKGROUND_TARGET_ANCHOR_NOT_VISIBLE'});
+      }
       const candidates = [...document.querySelectorAll('textarea, [contenteditable="true"]')]
         .filter(el => !el.disabled && el.getAttribute('aria-hidden') !== 'true');
       const input = candidates[candidates.length - 1];
@@ -143,14 +190,22 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
     if (!this.swiftBridge.isBinaryAvailable()) {
       return { healthy: false, status: 'helper_unavailable', name: this.name, activeTurns: this.activeTurns.size };
     }
+    const now = Date.now();
+    if (this._cachedHealth && (now - this._cachedHealthAt < 2500)) {
+      return this._cachedHealth;
+    }
     const inspect = await this.swiftBridge.inspectApp(this.appName);
-    return {
-      healthy: Boolean(inspect.ok && inspect.running),
+    const healthy = Boolean(inspect.ok && inspect.running && (inspect.windowCount > 0));
+    const result = {
+      healthy,
       running: Boolean(inspect.running),
       windowCount: inspect.windowCount || 0,
       activeTurns: this.activeTurns.size,
       name: this.name
     };
+    this._cachedHealth = result;
+    this._cachedHealthAt = now;
+    return result;
   }
 
   /**
@@ -158,7 +213,7 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
    * real model response.
    * @returns {Promise<{success:boolean,status:string,response:string|null,error:string|null,modelTurnConfirmed:boolean,requestId:string,transport:string,latencyMs:number}>}
    */
-  async send({ text, prompt, requestId, timeoutMs = null } = {}) {
+  async send({ text, prompt, requestId, timeoutMs = null, onChunk = null } = {}) {
     const resolvedId = requestId || `req_cg_ui_${Date.now()}`;
     const resolvedText = text || prompt || '';
     const startMs = Date.now();
@@ -246,12 +301,20 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
           const deadline = Date.now() + (timeoutMs || this.defaultTimeoutMs);
           let last = '';
           let stable = 0;
+          let streamedLen = 0;
           while (Date.now() < deadline) {
-            await new Promise(resolve => setTimeout(resolve, 500));
-            await this.enforceChatGPTMinimized();
-             const observed = await this.readBackgroundDomResponse(resolvedId);
+            const sleepMs = last ? 80 : 50;
+            await new Promise(resolve => setTimeout(resolve, sleepMs));
+            const observed = await this.readBackgroundDomResponse(resolvedId);
             if (!observed?.ok || !observed.response) continue;
             const response = observed.response.trim();
+            if (response.length > streamedLen) {
+              const delta = response.slice(streamedLen);
+              streamedLen = response.length;
+              if (typeof onChunk === 'function') {
+                try { onChunk(delta); } catch {}
+              }
+            }
             if (response === last) stable += 1;
             else { last = response; stable = 0; }
             if (stable >= 2) {
@@ -266,7 +329,7 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
                 uiSubmitted: true,
                 latencyMs: Date.now() - startMs
               };
-              await this.swiftBridge.setChatGPTMinimized(true).catch(() => {});
+              // Dedicated-Space mode intentionally leaves ChatGPT open and non-frontmost.
               this.activeTurns.set(resolvedId, result);
               this.emit('turn_completed', result);
               return result;
@@ -308,6 +371,9 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
         timeoutMs || this.defaultTimeoutMs,
         { activate: false }
       );
+      if (typeof onChunk === 'function' && turn.ok && turn.response) {
+        try { onChunk(turn.response); } catch {}
+      }
       const result = {
         success: Boolean(turn.ok && turn.response),
         status: turn.status || (turn.ok ? 'COMPLETED' : 'UNKNOWN'),
@@ -319,7 +385,7 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
         uiSubmitted: !['APP_NOT_RUNNING', 'NO_WINDOW', 'CHATGPT_COMPOSER_NOT_FOUND'].includes(turn.status),
         latencyMs: Date.now() - startMs
       };
-      await this.swiftBridge.setChatGPTMinimized(true).catch(() => {});
+      // Dedicated-Space mode intentionally leaves ChatGPT open and non-frontmost.
       this.activeTurns.set(resolvedId, result);
       if (result.modelTurnConfirmed) this.emit('turn_completed', result);
       return result;

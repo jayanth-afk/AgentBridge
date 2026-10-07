@@ -22,6 +22,7 @@ import { GitController } from './git-controller.js';
 import { ToolRegistry } from './tool-registry.js';
 import { EventBus } from './event-bus.js';
 import { createSessionAdapter } from './session-adapters/index.js';
+import { BridgeHttpServer } from './http-server.js';
 
 export class BridgeMcpServer {
   constructor(options = {}) {
@@ -60,6 +61,24 @@ export class BridgeMcpServer {
 
     // Single unified source of truth for tools
     this.registry = options.toolRegistry || new ToolRegistry();
+
+    // Start HTTP control plane server for Zia brain and local HTTP clients
+    this.httpServer = new BridgeHttpServer({
+      port: Number(process.env.AGENT_BRIDGE_HTTP_PORT || 8765),
+      host: '127.0.0.1',
+      auditLogger: this.logger,
+      permissionGuard: this.guard,
+      mailboxHub: this.mailbox,
+      projectController: this.controller,
+      collaborationManager: this.collaboration,
+      fileActivityManager: this.fileActivity,
+      cacheManager: this.cache,
+      diagnosticsManager: this.diagnostics,
+      presenceManager: this.presence,
+      identityManager: this.identity,
+      gitController: this.git,
+      toolRegistry: this.registry
+    });
 
     // Start presence heartbeat loop for bound identity
     if (this.agentId && this.agentId !== 'system') {
@@ -138,10 +157,23 @@ export class BridgeMcpServer {
   }
 
   async startStdio() {
+    if (this.httpServer) {
+      try {
+        await this.httpServer.start();
+      } catch (err) {
+        if (err.code !== 'EADDRINUSE') {
+          // If port is in use, another bridge instance is already providing HTTP
+          console.error('Bridge HTTP server notice:', err.message);
+        }
+      }
+    }
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
 
     const cleanup = () => {
+      if (this.httpServer) {
+        this.httpServer.stop().catch(() => {});
+      }
       if (this.presenceSession) {
         this.presenceSession.cleanup();
       }

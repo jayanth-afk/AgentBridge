@@ -122,6 +122,97 @@ func getFrontmostApp() -> FrontmostResponse {
     return FrontmostResponse(ok: false, name: "None", pid: 0, bundleId: nil)
 }
 
+func inspectAXApplicationState(name: String) -> [String: Any] {
+    guard let app = findAppProcess(name: name) else {
+        return ["ok": false, "error": "APP_NOT_RUNNING"]
+    }
+
+    let axApp = AXUIElementCreateApplication(app.processIdentifier)
+    func boolAttribute(_ attribute: String) -> Bool? {
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(axApp, attribute as CFString, &value) == .success else { return nil }
+        return value as? Bool
+    }
+
+    func elementSummary(_ element: AXUIElement) -> [String: Any] {
+        func stringAttribute(_ attribute: String) -> String? {
+            var value: AnyObject?
+            guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }
+            return value as? String
+        }
+        var minimized: AnyObject?
+        let minResult = AXUIElementCopyAttributeValue(element, kAXMinimizedAttribute as CFString, &minimized)
+        return [
+            "title": stringAttribute(kAXTitleAttribute) ?? "",
+            "role": stringAttribute(kAXRoleAttribute) ?? "",
+            "subrole": stringAttribute(kAXSubroleAttribute) ?? "",
+            "minimized": minResult == .success ? (minimized as? Bool ?? false) : false
+        ]
+    }
+
+    var windowsValue: AnyObject?
+    let windowsResult = AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsValue)
+    let windowCount = (windowsValue as? [AXUIElement])?.count ?? 0
+
+    var mainWindowValue: AnyObject?
+    let mainWindowResult = AXUIElementCopyAttributeValue(
+        axApp, kAXMainWindowAttribute as CFString, &mainWindowValue
+    )
+
+    var focusedWindowValue: AnyObject?
+    let focusedWindowResult = AXUIElementCopyAttributeValue(
+        axApp, kAXFocusedWindowAttribute as CFString, &focusedWindowValue
+    )
+
+    var focusedUIValue: AnyObject?
+    let focusedUIResult = AXUIElementCopyAttributeValue(
+        axApp, kAXFocusedUIElementAttribute as CFString, &focusedUIValue
+    )
+
+    let primaryWindow = resolvePrimaryAXWindow(app)
+    var result: [String: Any] = [
+        "ok": true,
+        "pid": app.processIdentifier,
+        "hidden": app.isHidden,
+        "windowsAttributeStatus": Int(windowsResult.rawValue),
+        "windowCount": windowCount,
+        "primaryWindowAvailable": primaryWindow != nil,
+        "focusedWindowAttributeStatus": Int(focusedWindowResult.rawValue),
+        "mainWindowAttributeStatus": Int(mainWindowResult.rawValue),
+        "focusedUIElementAttributeStatus": Int(focusedUIResult.rawValue)
+    ]
+
+    if mainWindowResult == .success, let mainWindowValue {
+        let mainWindow = mainWindowValue as! AXUIElement
+        result["mainWindow"] = elementSummary(mainWindow)
+    } else {
+        result["mainWindow"] = NSNull()
+    }
+
+    if focusedWindowResult == .success, let focusedWindowValue {
+        let focusedWindow = focusedWindowValue as! AXUIElement
+        result["focusedWindow"] = elementSummary(focusedWindow)
+    } else {
+        result["focusedWindow"] = NSNull()
+    }
+
+    if focusedUIResult == .success, let focusedUIValue {
+        let focusedUI = focusedUIValue as! AXUIElement
+        result["focusedUIElement"] = elementSummary(focusedUI)
+    } else {
+        result["focusedUIElement"] = NSNull()
+    }
+
+    if let frontmost = boolAttribute(kAXFrontmostAttribute) {
+        result["frontmost"] = frontmost
+    }
+    if let hidden = boolAttribute(kAXHiddenAttribute) {
+        result["axHidden"] = hidden
+    }
+
+    return result
+}
+
 func inspectApp(name: String) -> InspectResponse {
     guard let app = findAppProcess(name: name) else {
         return InspectResponse(ok: false, app: name, running: false, pid: nil, windowCount: 0, windows: [], windowDetails: [], hidden: false, error: "APP_NOT_RUNNING")
@@ -194,9 +285,8 @@ func inspectElements(name: String) -> ElementsResponse {
     _ = AXUIElementSetAttributeValue(axApp, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
     _ = AXUIElementSetAttributeValue(axApp, "AXManualAccessibility" as CFString, kCFBooleanTrue)
 
-    var windowsValue: AnyObject?
-    guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsValue) == .success,
-          let windows = windowsValue as? [AXUIElement], let mainWin = windows.first else {
+    let (_, resolvedWindow) = resolveWindow(name, activate: false)
+    guard let mainWin = resolvedWindow else {
         return ElementsResponse(ok: false, app: name, pid: pid, elements: [], error: "NO_ACCESSIBLE_WINDOW")
     }
 
@@ -312,6 +402,7 @@ func unhideApp(name: String) -> SimpleResponse {
 // AXObserver state
 nonisolated(unsafe) var activeObserver: AXObserver? = nil
 nonisolated(unsafe) var activeRunLoopSource: CFRunLoopSource? = nil
+nonisolated(unsafe) var cachedChatGPTWindow: AXUIElement? = nil
 
 func setupObserver(name: String) -> SimpleResponse {
     guard let app = findAppProcess(name: name) else {
@@ -754,6 +845,16 @@ func profileFor(_ name: String) -> String {
 
 // Resolve the target application and its first accessible window, activating
 // and unhiding the app when requested. Returns (app, window?) without throwing.
+func resolvePrimaryAXWindow(_ app: NSRunningApplication) -> AXUIElement? {
+    let axApp = AXUIElementCreateApplication(app.processIdentifier)
+    var value: AnyObject?
+    guard AXUIElementCopyAttributeValue(axApp, kAXMainWindowAttribute as CFString, &value) == .success,
+          let value else {
+        return nil
+    }
+    return (value as! AXUIElement)
+}
+
 func resolveWindow(_ name: String, activate: Bool) -> (NSRunningApplication?, AXUIElement?) {
     guard let app = findAppProcess(name: name) else { return (nil, nil) }
     if activate {
@@ -762,12 +863,31 @@ func resolveWindow(_ name: String, activate: Bool) -> (NSRunningApplication?, AX
     }
     for _ in 1...12 {
         let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        if !activate, let primary = resolvePrimaryAXWindow(app) {
+            return (app, primary)
+        }
         _ = AXUIElementSetAttributeValue(axApp, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
         _ = AXUIElementSetAttributeValue(axApp, "AXManualAccessibility" as CFString, kCFBooleanTrue)
         var winVal: AnyObject?
         if AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &winVal) == .success,
            let wins = winVal as? [AXUIElement], let w = wins.first {
-            return (app, w)
+            if name.caseInsensitiveCompare("ChatGPT") == .orderedSame { cachedChatGPTWindow = w }
+             return (app, w)
+        }
+        if !activate && name.caseInsensitiveCompare("ChatGPT") == .orderedSame, let cached = cachedChatGPTWindow {
+            return (app, cached)
+        }
+        if !activate {
+            var mainValue: AnyObject?
+            if AXUIElementCopyAttributeValue(axApp, ("AX" + "MainWindow") as CFString, &mainValue) == .success {
+                let mainWindow = mainValue as! AXUIElement
+                return (app, mainWindow)
+            }
+            var focusedValue: AnyObject?
+            if AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &focusedValue) == .success {
+                let focusedWindow = focusedValue as! AXUIElement
+                return (app, focusedWindow)
+            }
         }
         usleep(250_000)
     }
@@ -892,25 +1012,45 @@ func extractChatGptResponse(_ texts: [String], requestId: String?) -> String? {
     for (i, t) in texts.enumerated() where t.contains(marker) { markerIdx = i }
     guard markerIdx >= 0 else { return nil }
 
-    let skipExact: Set<String> = ["chatgpt said:", "chatgpt is responding"]
+    // The AX tree represents each turn as:
+    //   You said: -> submitted text -> ChatGPT said: -> assistant text
+    // Start extraction only after the assistant heading. This prevents the
+    // submitted prompt itself from ever being mistaken for the answer.
+    var assistantHeadingIndex: Int?
+    var i = markerIdx + 1
+    while i < texts.count {
+        let t = texts[i].trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.lowercased() == "chatgpt said:" {
+            assistantHeadingIndex = i
+            break
+        }
+        i += 1
+    }
+    guard let heading = assistantHeadingIndex else { return nil }
+
     let terminators: Set<String> = [
         "ask chatgpt",
         "response complete",
         "chatgpt can make mistakes. check important info.",
-        "latest response"
+        "latest response",
+        "you said:",
+        "chatgpt said:"
     ]
 
     var parts: [String] = []
-    var i = markerIdx + 1
+    i = heading + 1
     while i < texts.count {
         let t = texts[i].trimmingCharacters(in: .whitespacesAndNewlines)
         i += 1
         if t.isEmpty { continue }
         let low = t.lowercased()
         if terminators.contains(low) { break }
-        if skipExact.contains(low) { continue }
-        // Drop ChatGPT's per-turn chrome labels (e.g. "Worked for 7s", "Thought for 3s").
-        if low.hasPrefix("worked for ") || low.hasPrefix("thought for ") || low.hasPrefix("thinking for ") || low.hasPrefix("reasoned for ") { continue }
+        if low == "copy" || low == "share" || low == "copy message" || low == "share prompt" || low == "edit message" || low == "rate response" {
+            continue
+        }
+        if low.hasPrefix("worked for ") || low.hasPrefix("thought for ") || low.hasPrefix("thinking for ") || low.hasPrefix("reasoned for ") {
+            continue
+        }
         parts.append(t)
     }
 
@@ -927,9 +1067,11 @@ func extractCorrelatedResponse(_ texts: [String], requestId: String?, profile: S
 
 func collectTextValues(_ win: AXUIElement) -> [String] {
     var texts: [String] = []
+    let skipRoles: Set<String> = ["AXScrollBar", "AXSplitter", "AXColorWell", "AXRuler", "AXProgressIndicator"]
     func walk(_ el: AXUIElement, _ depth: Int) {
         if depth > 90 { return }
         let role = axString(el, kAXRoleAttribute)
+        if skipRoles.contains(role) { return }
         if role == "AXStaticText" || role == "AXHeading" || role == "AXTextArea" || role == "AXTextField" {
             let v = axString(el, kAXValueAttribute)
             if !v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { texts.append(v) }
@@ -944,7 +1086,7 @@ func collectTextValues(_ win: AXUIElement) -> [String] {
     return texts
 }
 
-func sendPromptGeneric(name: String, text: String, profile: String, activate: Bool = true) -> SendTurnResponse {
+func sendPromptGeneric(name: String, text: String, requestId: String?, profile: String, activate: Bool = true) -> SendTurnResponse {
     let (app, maybeWin) = resolveWindow(name, activate: activate)
     guard app != nil else {
         return SendTurnResponse(ok: false, status: "APP_NOT_RUNNING", requestId: nil, error: "\(name) is not running")
@@ -952,6 +1094,15 @@ func sendPromptGeneric(name: String, text: String, profile: String, activate: Bo
     guard let win = maybeWin else {
         return SendTurnResponse(ok: false, status: "NO_WINDOW", requestId: nil, error: "No accessible window for \(name)")
     }
+
+    // AXRaise does not activate the application. For a fullscreen ChatGPT
+    // worker on another Space, this can refresh the window's accessibility
+    // surface without switching the user's Space or stealing foreground focus.
+    if profile == "chatgpt" {
+        _ = AXUIElementPerformAction(win, kAXRaiseAction as CFString)
+        usleep(150_000)
+    }
+
     guard let composer = findComposerElement(win, profile: profile) else {
         return SendTurnResponse(ok: false, status: "CHATGPT_COMPOSER_NOT_FOUND", requestId: nil, error: "No unambiguous composer element found")
     }
@@ -987,7 +1138,33 @@ func sendPromptGeneric(name: String, text: String, profile: String, activate: Bo
     guard sendOk else {
         return SendTurnResponse(ok: false, status: "CHATGPT_SUBMISSION_FAILED", requestId: nil, error: "Send control could not be activated")
     }
-    return SendTurnResponse(ok: true, status: "SUBMITTED", requestId: nil, error: nil)
+
+    // Do not call a turn "submitted" merely because AXPress succeeded. In
+    // background/fullscreen mode ChatGPT can expose the composer while the
+    // action is still being processed. Require the composer to clear and the
+    // correlation marker to appear in the conversation tree.
+    let marker = requestId.map { "[AB:\($0)]" } ?? String(text.prefix(24))
+    for attempt in 1...25 {
+        if attempt > 1 {
+            let sleepTime: useconds_t = attempt < 6 ? 50_000 : 100_000
+            usleep(sleepTime)
+        }
+        guard let verifyWindow = resolveWindow(name, activate: false).1 ?? maybeWin else { continue }
+        let composerValue = findComposerElement(verifyWindow, profile: profile).map { axString($0, kAXValueAttribute) } ?? ""
+        let values = collectTextValues(verifyWindow)
+        let markerInConversation = values.contains { $0.contains(marker) }
+        let composerStillContainsRequest = composerValue.contains(marker) || composerValue.contains(String(text.prefix(24)))
+        if markerInConversation && !composerStillContainsRequest {
+            return SendTurnResponse(ok: true, status: "SUBMITTED", requestId: requestId, error: nil)
+        }
+    }
+
+    return SendTurnResponse(
+        ok: false,
+        status: "SUBMISSION_NOT_REGISTERED",
+        requestId: requestId,
+        error: "Send action completed but ChatGPT did not register the request in the conversation"
+    )
 }
 
 func observeResponseGeneric(name: String, requestId: String?, profile: String, timeoutMs: Int) -> ObserveTurnResponse {
@@ -1006,8 +1183,6 @@ func observeResponseGeneric(name: String, requestId: String?, profile: String, t
     var sawMarker = false
 
     while Date().timeIntervalSince(start) < maxDuration {
-        usleep(300_000)
-
         // Recover window if it momentarily disappears (e.g. during re-render).
         if let w = resolveWindow(name, activate: false).1 { win = w }
 
@@ -1024,11 +1199,21 @@ func observeResponseGeneric(name: String, requestId: String?, profile: String, t
                 lastResponse = extracted
                 stableRounds = 0
             }
-            if !generating && stableRounds >= 2 {
-                let latency = Date().timeIntervalSince(start) * 1000.0
-                return ObserveTurnResponse(ok: true, status: "COMPLETED", requestId: requestId, response: extracted, latencyMs: latency, error: nil)
+            if !generating && stableRounds >= 1 {
+                // Short adaptive confirmation check to avoid waiting an extra full 300ms cycle
+                usleep(80_000)
+                let recheckWin = resolveWindow(name, activate: false).1 ?? win
+                let recheckGen = isGenerating(recheckWin, profile: profile)
+                let recheckTexts = collectTextValues(recheckWin)
+                if !recheckGen, let recheckExtracted = extractCorrelatedResponse(recheckTexts, requestId: requestId, profile: profile), recheckExtracted == extracted {
+                    let latency = Date().timeIntervalSince(start) * 1000.0
+                    return ObserveTurnResponse(ok: true, status: "COMPLETED", requestId: requestId, response: extracted, latencyMs: latency, error: nil)
+                }
             }
         }
+
+        let loopSleep: useconds_t = generating ? 80_000 : (sawMarker ? 100_000 : 60_000)
+        usleep(loopSleep)
     }
 
     let finalTexts = collectTextValues(win)
@@ -1044,7 +1229,7 @@ func observeResponseGeneric(name: String, requestId: String?, profile: String, t
 }
 
 func sendAndObserveGeneric(name: String, text: String, requestId: String?, profile: String, timeoutMs: Int, activate: Bool = true) -> ObserveTurnResponse {
-    let sent = sendPromptGeneric(name: name, text: text, profile: profile, activate: activate)
+    let sent = sendPromptGeneric(name: name, text: text, requestId: requestId, profile: profile, activate: activate)
     guard sent.ok else {
         return ObserveTurnResponse(ok: false, status: sent.status, requestId: requestId, response: nil, latencyMs: nil, error: sent.error)
     }
@@ -1127,6 +1312,12 @@ func handleRequest(_ req: RequestOp) {
         if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
             print(str)
         }
+    case "diagnostic":
+        let resp = inspectAXApplicationState(name: req.targetApp)
+        if let encoded = try? JSONSerialization.data(withJSONObject: resp),
+           let str = String(data: encoded, encoding: .utf8) {
+            print(str)
+        }
     case "elements":
         let resp = inspectElements(name: req.targetApp)
         if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
@@ -1162,7 +1353,7 @@ func handleRequest(_ req: RequestOp) {
         let profile = profileFor(req.targetApp)
         let resp = profile == "claude"
             ? sendPromptToClaude(name: req.targetApp, text: req.payloadText, requestId: req.requestId)
-            : sendPromptGeneric(name: req.targetApp, text: req.payloadText, profile: profile, activate: req.activate ?? true)
+            : sendPromptGeneric(name: req.targetApp, text: req.payloadText, requestId: req.requestId, profile: profile, activate: req.activate ?? true)
         if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
             print(str)
         }

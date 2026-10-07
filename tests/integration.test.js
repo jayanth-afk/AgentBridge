@@ -243,6 +243,41 @@ test('Complete 15-Point Connected Agent Integration Suite', async (t) => {
     assert.strictEqual(guard.validatePathAccess('/Users/jayanthpranaykonada/Library/Keychains/login.keychain-db', 'READ').allowed, false);
   });
 
+  await t.test('LIVE ZiA primary ChatGPT brain endpoint', async (tLive) => {
+    if (process.env.AGENT_BRIDGE_LIVE_CHATGPT !== '1') {
+      tLive.skip('set AGENT_BRIDGE_LIVE_CHATGPT=1 to run');
+      return;
+    }
+    // The ChatGPT brain endpoint always requires a control-plane API key.
+    const liveKey = process.env.CONTROL_PLANE_API_KEY;
+    if (!liveKey) {
+      tLive.skip('set CONTROL_PLANE_API_KEY to run (the ChatGPT brain endpoint requires a key)');
+      return;
+    }
+
+    const before = await fetch('http://127.0.0.1:8999/health');
+    assert.strictEqual(before.status, 200);
+
+    const res = await fetch('http://127.0.0.1:8999/api/chatgpt/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': liveKey },
+      body: JSON.stringify({
+        requestId: 'zia_primary_brain_integration_' + Date.now(),
+        messages: [
+          { role: 'user', content: 'Reply with exactly ZIA_PRIMARY_BRAIN_OK' }
+        ]
+      })
+    });
+
+    const data = await res.json();
+    assert.strictEqual(res.status, 200, JSON.stringify(data));
+    assert.strictEqual(data.ok, true);
+    assert.strictEqual(data.provider, 'chatgpt-desktop');
+    assert.strictEqual(data.modelTurnConfirmed, true);
+    assert.strictEqual(data.uiSubmitted, true);
+    assert.strictEqual(data.response, 'ZIA_PRIMARY_BRAIN_OK');
+  });
+
   await t.test('GUI Automation Adapter Graceful Inspection', async () => {
     const perm = await guiAdapter.checkAccessibilityPermission();
     // Verify it returns structured outcome without crashing or unhandled rejections

@@ -95,6 +95,7 @@ export const CONFIG = {
   AGENT_IDENTITIES: [
     'chatgpt-desktop',
     'claude-desktop',
+    'zia',
     'antigravity-ide',
     'freebuff',
     'system'

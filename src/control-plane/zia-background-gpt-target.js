@@ -54,24 +54,39 @@ export class ZiABackgroundGPTTarget {
       return { ok: false, status: 'BACKGROUND_TARGET_UNINITIALIZED', error: 'No persisted ZiA Background GPT conversation target exists' };
     }
 
+    const now = Date.now();
+    if (this._verifiedAt && (now - this._verifiedAt < 3000) && this._verifiedResult) {
+      return this._verifiedResult;
+    }
+
     const inspected = await this.inspect();
-    if (!inspected.ok) return { ok: false, status: 'BACKGROUND_TARGET_INSPECTION_FAILED', error: inspected.error };
+    if (!inspected.ok) {
+      this._verifiedAt = 0;
+      this._verifiedResult = null;
+      return { ok: false, status: 'BACKGROUND_TARGET_INSPECTION_FAILED', error: inspected.error };
+    }
 
     const elements = inspected.elements || [];
     const project = elements.find(e => e.role === 'AXButton' && e.title === this.projectTitle);
     if (!project) {
+      this._verifiedAt = 0;
+      this._verifiedResult = null;
       return { ok: false, status: 'BACKGROUND_PROJECT_NOT_FOUND', error: `Project ${this.projectTitle} was not found in ChatGPT` };
     }
 
-    // ChatGPT exposes the active conversation in more than one AX location.
-    // The sidebar entry is the depth-23 button; do not accept a shallow header
-    // button as the persisted navigation target.
+    // ChatGPT exposes the same conversation title in multiple AX locations.
+    // The actual project sidebar conversation entry is nested immediately
+    // beneath the project group (depth 26 in the current AX tree). A shallower
+    // duplicate is a separate navigation/header representation, not a safe
+    // navigation target. Keep this exact structural identity fail-closed.
     const matches = elements.filter(e =>
       e.role === 'AXButton' &&
       e.title === this.state.conversationTitle &&
-      Number(e.depth) >= 20
+      Number(e.depth) === 26
     );
     if (matches.length !== 1) {
+      this._verifiedAt = 0;
+      this._verifiedResult = null;
       return {
         ok: false,
         status: matches.length === 0 ? 'BACKGROUND_TARGET_NOT_FOUND' : 'BACKGROUND_TARGET_AMBIGUOUS',
@@ -85,18 +100,26 @@ export class ZiABackgroundGPTTarget {
     const currentWebArea = elements.find(e => e.role === 'AXWebArea');
     const alreadySelected = currentWebArea?.title === this.state.conversationTitle;
 
+    let selectedElements;
     if (!alreadySelected) {
       const pressed = await this.swiftBridge.pressChatGPTButton(this.state.conversationTitle);
       if (!pressed?.ok) {
+        this._verifiedAt = 0;
+        this._verifiedResult = null;
         return { ok: false, status: 'BACKGROUND_TARGET_SELECT_FAILED', error: pressed?.error || pressed?.status };
       }
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await new Promise(resolve => setTimeout(resolve, 300));
+      const selected = await this.inspect();
+      if (!selected.ok) {
+        this._verifiedAt = 0;
+        this._verifiedResult = null;
+        return { ok: false, status: 'BACKGROUND_TARGET_VERIFY_FAILED', error: selected.error };
+      }
+      selectedElements = selected.elements || [];
+    } else {
+      selectedElements = elements;
     }
 
-    const selected = await this.inspect();
-    if (!selected.ok) return { ok: false, status: 'BACKGROUND_TARGET_VERIFY_FAILED', error: selected.error };
-
-    const selectedElements = selected.elements || [];
     const webArea = selectedElements.find(e => e.role === 'AXWebArea');
     const projectVisible = selectedElements.some(e => e.role === 'AXHeading' && e.title === this.projectTitle)
       || selectedElements.some(e => e.role === 'AXStaticText' && e.value === this.projectTitle);
@@ -105,19 +128,26 @@ export class ZiABackgroundGPTTarget {
       : true;
 
     if (!projectVisible || !webArea) {
+      this._verifiedAt = 0;
+      this._verifiedResult = null;
       return { ok: false, status: 'BACKGROUND_TARGET_PROJECT_VERIFY_FAILED', error: 'Selected conversation is not visibly inside the ZiA Response project' };
     }
     if (!anchorPresent) {
+      this._verifiedAt = 0;
+      this._verifiedResult = null;
       return { ok: false, status: 'BACKGROUND_TARGET_ANCHOR_VERIFY_FAILED', error: 'Dedicated conversation anchor was not observed after selection' };
     }
 
-    return {
+    const result = {
       ok: true,
       status: 'BACKGROUND_TARGET_READY',
       projectTitle: this.projectTitle,
       conversationTitle: this.state.conversationTitle,
       anchorText: this.state.anchorText || null
     };
+    this._verifiedAt = Date.now();
+    this._verifiedResult = result;
+    return result;
   }
 
   async adoptVerifiedCurrentConversation({ conversationTitle, anchorText }) {
@@ -131,7 +161,7 @@ export class ZiABackgroundGPTTarget {
     const projectVisible = elements.some(e => e.role === 'AXButton' && e.title === this.projectTitle)
       && elements.some(e => e.role === 'AXStaticText' && e.value === this.projectTitle);
     const conversationButton = elements.filter(e =>
-      e.role === 'AXButton' && e.title === conversationTitle && Number(e.depth) >= 20
+      e.role === 'AXButton' && e.title === conversationTitle && Number(e.depth) === 26
     );
     const anchorPresent = elements.some(e => typeof e.value === 'string' && e.value.includes(anchorText));
 

@@ -11,8 +11,10 @@ function makeElements() {
     { role: 'AXWebArea', title: 'ZiA worker readiness', depth: 8 },
     { role: 'AXButton', title: 'ZiA Response', depth: 23 },
     { role: 'AXStaticText', value: 'ZiA Response', depth: 25 },
+    // ChatGPT currently exposes a second same-title representation at depth 23;
+    // only the depth-26 project-sidebar entry is the navigation target.
+    { role: 'AXButton', title: 'ZiA worker readiness', depth: 26 },
     { role: 'AXButton', title: 'ZiA worker readiness', depth: 23 },
-    { role: 'AXButton', title: 'ZiA worker readiness', depth: 17 },
     { role: 'AXStaticText', value: '[AB:boot]\nThis is the dedicated ZiA Background GPT worker conversation. Reply...' }
   ];
 }
@@ -63,8 +65,8 @@ test('ZiA Background GPT target rejects ambiguous sidebar identity', async () =>
       elements: [
         { role: 'AXButton', title: 'ZiA Response', depth: 23 },
         { role: 'AXStaticText', value: 'ZiA Response', depth: 25 },
-        { role: 'AXButton', title: 'ZiA worker readiness', depth: 23 },
-        { role: 'AXButton', title: 'ZiA worker readiness', depth: 23 },
+        { role: 'AXButton', title: 'ZiA worker readiness', depth: 26 },
+        { role: 'AXButton', title: 'ZiA worker readiness', depth: 26 },
         { role: 'AXWebArea', title: 'ZiA worker readiness', depth: 8 }
       ]
     }),
