@@ -54,8 +54,25 @@ export class TransactionalOutbox {
    * and dispatched ONLY after commit succeeds.
    */
   runInTransaction(workFn) {
-    this.db.exec('BEGIN IMMEDIATE;');
+    if (this._inTx) {
+      return workFn(this._currentTxContext);
+    }
 
+    let started = false;
+    try {
+      this.db.exec('BEGIN IMMEDIATE;');
+      started = true;
+    } catch (err) {
+      if (err.message && err.message.includes('cannot start a transaction')) {
+        return workFn(this._currentTxContext || {
+          db: this.db,
+          stageEvent: (eventParams) => this._stageEventInTransaction(eventParams)
+        });
+      }
+      throw err;
+    }
+
+    this._inTx = true;
     const stagedEvents = [];
     let committed = false;
 
@@ -69,23 +86,31 @@ export class TransactionalOutbox {
         return staged;
       }
     };
+    this._currentTxContext = txContext;
 
     try {
       const result = workFn(txContext);
-      this.db.exec('COMMIT;');
-      committed = true;
+      if (started) {
+        this.db.exec('COMMIT;');
+        committed = true;
+      }
 
       // Dispatched ONLY after commit succeeds
       this._flushStagedEvents(stagedEvents);
 
       return result;
     } catch (err) {
-      if (!committed) {
+      if (started && !committed) {
         try {
           this.db.exec('ROLLBACK;');
         } catch {}
       }
       throw err;
+    } finally {
+      if (started) {
+        this._inTx = false;
+        this._currentTxContext = null;
+      }
     }
   }
 

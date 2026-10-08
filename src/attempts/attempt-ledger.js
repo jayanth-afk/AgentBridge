@@ -1,5 +1,28 @@
 import crypto from 'node:crypto';
 
+function runInImmediateTx(db, fn) {
+  let started = false;
+  try {
+    db.exec('BEGIN IMMEDIATE;');
+    started = true;
+  } catch (err) {
+    if (err.message && err.message.includes('cannot start a transaction')) {
+      return fn();
+    }
+    throw err;
+  }
+  try {
+    const res = fn();
+    if (started) db.exec('COMMIT;');
+    return res;
+  } catch (err) {
+    if (started) {
+      try { db.exec('ROLLBACK;'); } catch {}
+    }
+    throw err;
+  }
+}
+
 /**
  * Attempt Lifecycle States
  */
@@ -101,8 +124,9 @@ export class AttemptLedger {
     const attemptId = `att_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const nonce = `ABN-${crypto.randomBytes(8).toString('hex')}`;
 
-    this.db.exec('BEGIN IMMEDIATE;');
-    try {
+    let attempt = null;
+
+    runInImmediateTx(this.db, () => {
       // Retrieve or initialize task_epochs
       const epochRow = this.db.prepare(`
         SELECT current_epoch, active_attempt_id FROM task_epochs WHERE task_id = ?
@@ -172,8 +196,6 @@ export class AttemptLedger {
           updated_at = excluded.updated_at
       `).run(taskId, nextEpoch, attemptId, now);
 
-      this.db.exec('COMMIT;');
-
       this.logger?.log({
         agentId,
         action: 'create_attempt',
@@ -181,61 +203,72 @@ export class AttemptLedger {
         details: { attemptId, taskId, requestId: resolvedReqId, epoch: nextEpoch, attemptNumber }
       });
 
-      return this.getAttempt(attemptId);
-    } catch (err) {
-      try { this.db.exec('ROLLBACK;'); } catch {}
-      throw err;
-    }
+      attempt = this.getAttempt(attemptId);
+    });
+
+    return attempt;
   }
 
   /**
    * Activate / acquire the attempt when execution starts
    */
   acquireAttempt(attemptId, agentId) {
-    const attempt = this.getAttempt(attemptId);
-    if (!attempt) throw new Error(`Attempt '${attemptId}' not found.`);
+    let attempt = null;
 
-    if (TERMINAL_ATTEMPT_STATES.has(attempt.state)) {
-      throw new Error(`Cannot acquire attempt '${attemptId}': already in terminal state '${attempt.state}'.`);
-    }
+    runInImmediateTx(this.db, () => {
+      attempt = this.getAttempt(attemptId);
+      if (!attempt) throw new Error(`Attempt '${attemptId}' not found.`);
 
-    this.validateFencing({ taskId: attempt.taskId, attemptId, epoch: attempt.epoch, agentId });
+      if (TERMINAL_ATTEMPT_STATES.has(attempt.state)) {
+        throw new Error(`Cannot acquire attempt '${attemptId}': already in terminal state '${attempt.state}'.`);
+      }
 
-    const now = new Date().toISOString();
-    const expiresAt = new Date(Date.now() + attempt.leaseTimeoutMs).toISOString();
+      this.validateFencing({ taskId: attempt.taskId, attemptId, epoch: attempt.epoch, agentId });
 
-    this.db.prepare(`
-      UPDATE bridge_attempts
-      SET state = 'active', started_at = COALESCE(started_at, ?), heartbeat_at = ?, lease_expires_at = ?
-      WHERE attempt_id = ?
-    `).run(now, now, expiresAt, attemptId);
+      const now = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + attempt.leaseTimeoutMs).toISOString();
 
-    return this.getAttempt(attemptId);
+      this.db.prepare(`
+        UPDATE bridge_attempts
+        SET state = 'active', started_at = COALESCE(started_at, ?), heartbeat_at = ?, lease_expires_at = ?
+        WHERE attempt_id = ?
+      `).run(now, now, expiresAt, attemptId);
+
+      attempt = this.getAttempt(attemptId);
+    });
+
+    return attempt;
   }
 
   /**
    * Heartbeat renewal of attempt lease
    */
   touchAttempt(attemptId, epoch, agentId) {
-    const attempt = this.getAttempt(attemptId);
-    if (!attempt) throw new Error(`Attempt '${attemptId}' not found.`);
+    let result = null;
 
-    this.validateFencing({ taskId: attempt.taskId, attemptId, epoch, agentId });
+    runInImmediateTx(this.db, () => {
+      const attempt = this.getAttempt(attemptId);
+      if (!attempt) throw new Error(`Attempt '${attemptId}' not found.`);
 
-    if (TERMINAL_ATTEMPT_STATES.has(attempt.state)) {
-      throw new Error(`Cannot heartbeat attempt '${attemptId}': already in terminal state '${attempt.state}'.`);
-    }
+      this.validateFencing({ taskId: attempt.taskId, attemptId, epoch, agentId });
 
-    const now = new Date().toISOString();
-    const expiresAt = new Date(Date.now() + attempt.leaseTimeoutMs).toISOString();
+      if (TERMINAL_ATTEMPT_STATES.has(attempt.state)) {
+        throw new Error(`Cannot heartbeat attempt '${attemptId}': already in terminal state '${attempt.state}'.`);
+      }
 
-    this.db.prepare(`
-      UPDATE bridge_attempts
-      SET heartbeat_at = ?, lease_expires_at = ?
-      WHERE attempt_id = ?
-    `).run(now, expiresAt, attemptId);
+      const now = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + attempt.leaseTimeoutMs).toISOString();
 
-    return { attemptId, epoch, renewed: true, expiresAt };
+      this.db.prepare(`
+        UPDATE bridge_attempts
+        SET heartbeat_at = ?, lease_expires_at = ?
+        WHERE attempt_id = ?
+      `).run(now, expiresAt, attemptId);
+
+      result = { attemptId, epoch, renewed: true, expiresAt };
+    });
+
+    return result;
   }
 
   /**
@@ -303,90 +336,104 @@ export class AttemptLedger {
    * Complete an attempt successfully
    */
   completeAttempt({ attemptId, epoch, result = null, correlationInfo = null }) {
-    const attempt = this.getAttempt(attemptId);
-    if (!attempt) throw new Error(`Attempt '${attemptId}' not found.`);
+    let outcome = null;
 
-    // If attempt has already been fenced or timed out, quarantine the late result!
-    try {
-      this.validateFencing({ taskId: attempt.taskId, attemptId, epoch, agentId: attempt.agentId });
-    } catch (fencingErr) {
-      this.quarantineLateResponse({
-        attemptId,
-        requestId: attempt.requestId,
-        epoch,
-        payload: result,
-        reason: fencingErr.message
+    runInImmediateTx(this.db, () => {
+      const attempt = this.getAttempt(attemptId);
+      if (!attempt) throw new Error(`Attempt '${attemptId}' not found.`);
+
+      // If attempt has already been fenced or timed out, quarantine the late result!
+      try {
+        this.validateFencing({ taskId: attempt.taskId, attemptId, epoch, agentId: attempt.agentId });
+      } catch (fencingErr) {
+        this.quarantineLateResponse({
+          attemptId,
+          requestId: attempt.requestId,
+          epoch,
+          payload: result,
+          reason: fencingErr.message
+        });
+        outcome = {
+          attemptId,
+          status: AttemptState.QUARANTINED,
+          quarantined: true,
+          reason: fencingErr.message
+        };
+        return;
+      }
+
+      if (TERMINAL_ATTEMPT_STATES.has(attempt.state)) {
+        this.quarantineLateResponse({
+          attemptId,
+          requestId: attempt.requestId,
+          epoch,
+          payload: result,
+          reason: `Late completion on terminal state ${attempt.state}`
+        });
+        outcome = {
+          attemptId,
+          status: AttemptState.QUARANTINED,
+          quarantined: true,
+          reason: `Late completion on terminal state ${attempt.state}`
+        };
+        return;
+      }
+
+      const now = new Date().toISOString();
+      const serializedResult = typeof result === 'object' && result !== null ? JSON.stringify(result) : result;
+      const serializedCorr = typeof correlationInfo === 'object' && correlationInfo !== null ? JSON.stringify(correlationInfo) : correlationInfo;
+
+      this.db.prepare(`
+        UPDATE bridge_attempts
+        SET state = 'completed', completed_at = ?, result = ?, correlation_info = ?
+        WHERE attempt_id = ?
+      `).run(now, serializedResult, serializedCorr, attemptId);
+
+      this.logger?.log({
+        agentId: attempt.agentId,
+        action: 'complete_attempt',
+        status: 'completed',
+        details: { attemptId, taskId: attempt.taskId, epoch }
       });
-      return {
-        attemptId,
-        status: AttemptState.QUARANTINED,
-        quarantined: true,
-        reason: fencingErr.message
-      };
-    }
 
-    if (TERMINAL_ATTEMPT_STATES.has(attempt.state)) {
-      this.quarantineLateResponse({
-        attemptId,
-        requestId: attempt.requestId,
-        epoch,
-        payload: result,
-        reason: `Late completion on terminal state ${attempt.state}`
-      });
-      return {
-        attemptId,
-        status: AttemptState.QUARANTINED,
-        quarantined: true,
-        reason: `Late completion on terminal state ${attempt.state}`
-      };
-    }
-
-    const now = new Date().toISOString();
-    const serializedResult = typeof result === 'object' && result !== null ? JSON.stringify(result) : result;
-    const serializedCorr = typeof correlationInfo === 'object' && correlationInfo !== null ? JSON.stringify(correlationInfo) : correlationInfo;
-
-    this.db.prepare(`
-      UPDATE bridge_attempts
-      SET state = 'completed', completed_at = ?, result = ?, correlation_info = ?
-      WHERE attempt_id = ?
-    `).run(now, serializedResult, serializedCorr, attemptId);
-
-    this.logger?.log({
-      agentId: attempt.agentId,
-      action: 'complete_attempt',
-      status: 'completed',
-      details: { attemptId, taskId: attempt.taskId, epoch }
+      outcome = this.getAttempt(attemptId);
     });
 
-    return this.getAttempt(attemptId);
+    return outcome;
   }
 
   /**
    * Fail an attempt
    */
   failAttempt({ attemptId, epoch, error }) {
-    const attempt = this.getAttempt(attemptId);
-    if (!attempt) throw new Error(`Attempt '${attemptId}' not found.`);
+    let outcome = null;
 
-    try {
-      this.validateFencing({ taskId: attempt.taskId, attemptId, epoch, agentId: attempt.agentId });
-    } catch {}
+    runInImmediateTx(this.db, () => {
+      const attempt = this.getAttempt(attemptId);
+      if (!attempt) throw new Error(`Attempt '${attemptId}' not found.`);
 
-    const now = new Date().toISOString();
-    this.db.prepare(`
-      UPDATE bridge_attempts
-      SET state = 'failed', completed_at = ?, error = ?
-      WHERE attempt_id = ?
-    `).run(now, error, attemptId);
+      try {
+        this.validateFencing({ taskId: attempt.taskId, attemptId, epoch, agentId: attempt.agentId });
+      } catch {}
 
-    this.logger?.log({
-      agentId: attempt.agentId,
-      action: 'fail_attempt',
-      status: 'failed',
-      details: { attemptId, taskId: attempt.taskId, epoch, error }
+      const now = new Date().toISOString();
+      this.db.prepare(`
+        UPDATE bridge_attempts
+        SET state = 'failed', completed_at = ?, error = ?
+        WHERE attempt_id = ?
+      `).run(now, error, attemptId);
+
+      this.logger?.log({
+        agentId: attempt.agentId,
+        action: 'fail_attempt',
+        status: 'failed',
+        details: { attemptId, taskId: attempt.taskId, epoch, error }
+      });
+
+      outcome = this.getAttempt(attemptId);
     });
 
-    return this.getAttempt(attemptId);
+    return outcome;
   }
 
   /**
@@ -424,21 +471,25 @@ export class AttemptLedger {
    */
   recoverExpiredAttempts() {
     const now = new Date().toISOString();
-    const expired = this.db.prepare(`
-      SELECT * FROM bridge_attempts
-      WHERE state IN ('created', 'acquired', 'active') AND lease_expires_at < ?
-    `).all(now);
-
     const recovered = [];
-    for (const att of expired) {
-      this.db.prepare(`
-        UPDATE bridge_attempts
-        SET state = 'timed_out', completed_at = ?, error = 'Attempt lease expired'
-        WHERE attempt_id = ?
-      `).run(now, att.attempt_id);
 
-      recovered.push({ attemptId: att.attempt_id, taskId: att.task_id, epoch: att.epoch });
-    }
+    runInImmediateTx(this.db, () => {
+      const expired = this.db.prepare(`
+        SELECT * FROM bridge_attempts
+        WHERE state IN ('created', 'acquired', 'active') AND lease_expires_at < ?
+      `).all(now);
+
+      for (const att of expired) {
+        this.db.prepare(`
+          UPDATE bridge_attempts
+          SET state = 'timed_out', completed_at = ?, error = 'Attempt lease expired'
+          WHERE attempt_id = ?
+        `).run(now, att.attempt_id);
+
+        recovered.push({ attemptId: att.attempt_id, taskId: att.task_id, epoch: att.epoch });
+      }
+    });
+
     return recovered;
   }
 

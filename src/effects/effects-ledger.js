@@ -1,5 +1,28 @@
 import crypto from 'node:crypto';
 
+function runInImmediateTx(db, fn) {
+  let started = false;
+  try {
+    db.exec('BEGIN IMMEDIATE;');
+    started = true;
+  } catch (err) {
+    if (err.message && err.message.includes('cannot start a transaction')) {
+      return fn();
+    }
+    throw err;
+  }
+  try {
+    const res = fn();
+    if (started) db.exec('COMMIT;');
+    return res;
+  } catch (err) {
+    if (started) {
+      try { db.exec('ROLLBACK;'); } catch {}
+    }
+    throw err;
+  }
+}
+
 /**
  * Operation Side-Effect Classifications
  */
@@ -107,66 +130,72 @@ export class EffectsLedger {
     }
 
     const resolvedKey = idempotencyKey || `idem_${operation}_${attemptId}_${epoch}_${crypto.randomBytes(6).toString('hex')}`;
+    let result = null;
 
-    // 2. Idempotency Check: Return committed cached result if already completed
-    const existing = this.db.prepare(`
-      SELECT * FROM bridge_effects_ledger WHERE idempotency_key = ?
-    `).get(resolvedKey);
+    runInImmediateTx(this.db, () => {
+      // 2. Idempotency Check: Return committed cached result if already completed
+      const existing = this.db.prepare(`
+        SELECT * FROM bridge_effects_ledger WHERE idempotency_key = ?
+      `).get(resolvedKey);
 
-    if (existing) {
-      if (existing.state === EffectState.COMMITTED) {
-        return {
-          effectId: existing.effect_id,
-          idempotencyKey: resolvedKey,
-          alreadyCommitted: true,
-          result: existing.result ? (() => { try { return JSON.parse(existing.result); } catch { return existing.result; } })() : null
-        };
+      if (existing) {
+        if (existing.state === EffectState.COMMITTED) {
+          result = {
+            effectId: existing.effect_id,
+            idempotencyKey: resolvedKey,
+            alreadyCommitted: true,
+            result: existing.result ? (() => { try { return JSON.parse(existing.result); } catch { return existing.result; } })() : null
+          };
+          return;
+        }
+        if (existing.state === EffectState.EXECUTING || existing.state === EffectState.UNKNOWN) {
+          const err = new Error(
+            `EFFECT_IN_FLIGHT_OR_UNKNOWN: Operation '${operation}' with key '${resolvedKey}' is in state '${existing.state}'. Automated repeat refused.`
+          );
+          err.code = 'EFFECT_UNRECONCILED';
+          err.state = existing.state;
+          throw err;
+        }
       }
-      if (existing.state === EffectState.EXECUTING || existing.state === EffectState.UNKNOWN) {
-        const err = new Error(
-          `EFFECT_IN_FLIGHT_OR_UNKNOWN: Operation '${operation}' with key '${resolvedKey}' is in state '${existing.state}'. Automated repeat refused.`
-        );
-        err.code = 'EFFECT_UNRECONCILED';
-        err.state = existing.state;
-        throw err;
-      }
-    }
 
-    const effectId = `eff_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-    const now = new Date().toISOString();
-    const paramsStr = typeof params === 'object' ? JSON.stringify(params) : String(params);
+      const effectId = `eff_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      const now = new Date().toISOString();
+      const paramsStr = typeof params === 'object' ? JSON.stringify(params) : String(params);
 
-    this.db.prepare(`
-      INSERT INTO bridge_effects_ledger (
-        effect_id, idempotency_key, attempt_id, task_id, epoch, agent_id,
-        operation, classification, state, params, result, error, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'INTENT_RECORDED', ?, NULL, NULL, ?)
-    `).run(
-      effectId,
-      resolvedKey,
-      attemptId,
-      taskId || null,
-      epoch,
-      agentId,
-      operation,
-      classification,
-      paramsStr,
-      now
-    );
+      this.db.prepare(`
+        INSERT INTO bridge_effects_ledger (
+          effect_id, idempotency_key, attempt_id, task_id, epoch, agent_id,
+          operation, classification, state, params, result, error, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'INTENT_RECORDED', ?, NULL, NULL, ?)
+      `).run(
+        effectId,
+        resolvedKey,
+        attemptId,
+        taskId || null,
+        epoch,
+        agentId,
+        operation,
+        classification,
+        paramsStr,
+        now
+      );
 
-    this.logger?.log({
-      agentId,
-      action: 'record_effect_intent',
-      status: 'intent_recorded',
-      details: { effectId, idempotencyKey: resolvedKey, operation, classification, epoch }
+      this.logger?.log({
+        agentId,
+        action: 'record_effect_intent',
+        status: 'intent_recorded',
+        details: { effectId, idempotencyKey: resolvedKey, operation, classification, epoch }
+      });
+
+      result = {
+        effectId,
+        idempotencyKey: resolvedKey,
+        alreadyCommitted: false,
+        state: EffectState.INTENT_RECORDED
+      };
     });
 
-    return {
-      effectId,
-      idempotencyKey: resolvedKey,
-      alreadyCommitted: false,
-      state: EffectState.INTENT_RECORDED
-    };
+    return result;
   }
 
   markExecuting(effectId) {
@@ -183,11 +212,13 @@ export class EffectsLedger {
     const result = (typeof effectIdOrObj === 'object' && effectIdOrObj !== null) ? (effectIdOrObj.result ?? resultArg) : resultArg;
     const now = new Date().toISOString();
     const resStr = typeof result === 'object' && result !== null ? JSON.stringify(result) : result;
-    this.db.prepare(`
-      UPDATE bridge_effects_ledger
-      SET state = 'COMMITTED', completed_at = ?, result = ?
-      WHERE effect_id = ?
-    `).run(now, resStr, effectId);
+    runInImmediateTx(this.db, () => {
+      this.db.prepare(`
+        UPDATE bridge_effects_ledger
+        SET state = 'COMMITTED', completed_at = ?, result = ?
+        WHERE effect_id = ?
+      `).run(now, resStr, effectId);
+    });
 
     return { effectId, state: EffectState.COMMITTED, result };
   }
@@ -197,11 +228,13 @@ export class EffectsLedger {
     const error = (typeof effectIdOrObj === 'object' && effectIdOrObj !== null) ? (effectIdOrObj.error ?? errorArg) : errorArg;
     const now = new Date().toISOString();
     const errStr = error instanceof Error ? error.message : String(error || 'Failed');
-    this.db.prepare(`
-      UPDATE bridge_effects_ledger
-      SET state = 'FAILED', completed_at = ?, error = ?
-      WHERE effect_id = ?
-    `).run(now, errStr, effectId);
+    runInImmediateTx(this.db, () => {
+      this.db.prepare(`
+        UPDATE bridge_effects_ledger
+        SET state = 'FAILED', completed_at = ?, error = ?
+        WHERE effect_id = ?
+      `).run(now, errStr, effectId);
+    });
 
     return { effectId, state: EffectState.FAILED, error: errStr };
   }

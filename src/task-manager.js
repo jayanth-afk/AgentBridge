@@ -1,6 +1,30 @@
 import crypto from 'node:crypto';
 import EventEmitter from 'node:events';
 import { AttemptLedger } from './attempts/attempt-ledger.js';
+import { TransactionalOutbox } from './events/transactional-outbox.js';
+
+export function runInImmediateTx(db, fn) {
+  let started = false;
+  try {
+    db.exec('BEGIN IMMEDIATE;');
+    started = true;
+  } catch (err) {
+    if (err.message && err.message.includes('cannot start a transaction')) {
+      return fn();
+    }
+    throw err;
+  }
+  try {
+    const res = fn();
+    if (started) db.exec('COMMIT;');
+    return res;
+  } catch (err) {
+    if (started) {
+      try { db.exec('ROLLBACK;'); } catch {}
+    }
+    throw err;
+  }
+}
 
 export const TASK_STATUSES = [
   'pending',
@@ -14,11 +38,13 @@ export const TASK_STATUSES = [
 ];
 
 export class TaskManager extends EventEmitter {
-  constructor(auditLogger, attemptLedger = null) {
+  constructor(auditLogger, attemptLedger = null, eventBus = null) {
     super();
     this.logger = auditLogger;
-    this.db = auditLogger.db;
+    this.db = auditLogger?.db;
     this.attempts = attemptLedger || (auditLogger ? new AttemptLedger(auditLogger) : null);
+    this.eventBus = eventBus || null;
+    this.outbox = this.eventBus?.outbox || (auditLogger ? new TransactionalOutbox(auditLogger, this.eventBus) : null);
     this.initTables();
   }
 
@@ -81,44 +107,17 @@ export class TaskManager extends EventEmitter {
     priority = 'normal',
     timeoutMs = 60000,
     maxRetries = 3,
-    dependencies = []
+    dependencies = [],
+    conversationId = null,
+    requestId = null,
+    emitEvent = true,
+    dedupKey = null
   }) {
     const id = `task_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const timestamp = new Date().toISOString();
     const depsJson = Array.isArray(dependencies) ? JSON.stringify(dependencies) : null;
     const initialStatus = (dependencies && dependencies.length > 0) ? 'blocked' : 'pending';
-
-    const stmt = this.db.prepare(`
-      INSERT INTO tasks (
-        id, created_at, updated_at, from_agent, to_agent, title, instructions,
-        context, status, result, parent_task_id, priority, timeout_ms, max_retries, dependencies
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
-    `);
-
-    stmt.run(
-      id,
-      timestamp,
-      timestamp,
-      fromAgent,
-      toAgent,
-      title,
-      instructions,
-      typeof context === 'object' && context !== null ? JSON.stringify(context) : context,
-      initialStatus,
-      parentTaskId,
-      priority,
-      timeoutMs,
-      maxRetries,
-      depsJson
-    );
-
-    this.logger.log({
-      agentId: fromAgent,
-      action: 'delegate_task',
-      status: 'success',
-      details: { taskId: id, toAgent, title, priority, parentTaskId }
-    });
+    const resolvedContext = typeof context === 'object' && context !== null ? JSON.stringify(context) : context;
 
     const task = {
       id,
@@ -134,6 +133,68 @@ export class TaskManager extends EventEmitter {
       dependencies
     };
 
+    const insertWork = (targetDb, stageEventFn = null) => {
+      const stmt = targetDb.prepare(`
+        INSERT INTO tasks (
+          id, created_at, updated_at, from_agent, to_agent, title, instructions,
+          context, status, result, parent_task_id, priority, timeout_ms, max_retries, dependencies
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+      `);
+
+      stmt.run(
+        id,
+        timestamp,
+        timestamp,
+        fromAgent,
+        toAgent,
+        title,
+        instructions,
+        resolvedContext,
+        initialStatus,
+        parentTaskId,
+        priority,
+        timeoutMs,
+        maxRetries,
+        depsJson
+      );
+
+      this.logger?.log({
+        agentId: fromAgent,
+        action: 'delegate_task',
+        status: 'success',
+        details: { taskId: id, toAgent, title, priority, parentTaskId }
+      });
+
+      if (emitEvent && stageEventFn) {
+        stageEventFn({
+          type: 'task_created',
+          agentId: toAgent,
+          fromAgent,
+          conversationId: conversationId || `conv_task_${id}`,
+          requestId,
+          taskId: id,
+          status: initialStatus,
+          payload: {
+            title: title ? (title.length > 80 ? title.slice(0, 80) + '...' : title) : '',
+            priority
+          },
+          dedupKey: dedupKey || `task_created_${id}`
+        });
+      }
+    };
+
+    const outboxToUse = this.eventBus?.outbox || this.outbox;
+    if (outboxToUse) {
+      outboxToUse.runInTransaction((tx) => {
+        insertWork(tx.db, tx.stageEvent);
+      });
+    } else {
+      runInImmediateTx(this.db, () => {
+        insertWork(this.db, null);
+      });
+    }
+
     this.emit('taskCreated', task);
     return task;
   }
@@ -146,33 +207,40 @@ export class TaskManager extends EventEmitter {
     this.refreshBlockedTasks(agentId);
 
     const now = new Date().toISOString();
-    // Claim oldest pending task ordered by priority (urgent > high > normal > low)
-    const row = this.db.prepare(`
-      SELECT id, title, instructions, from_agent, to_agent, priority, context
-      FROM tasks
-      WHERE to_agent = ? AND status = 'pending'
-      ORDER BY 
-        CASE priority 
-          WHEN 'urgent' THEN 1 
-          WHEN 'high' THEN 2 
-          WHEN 'normal' THEN 3 
-          ELSE 4 
-        END,
-        created_at ASC
-      LIMIT 1
-    `).get(agentId);
+    let row = null;
+
+    runInImmediateTx(this.db, () => {
+      row = this.db.prepare(`
+        SELECT id, title, instructions, from_agent, to_agent, priority, context
+        FROM tasks
+        WHERE to_agent = ? AND status = 'pending'
+        ORDER BY 
+          CASE priority 
+            WHEN 'urgent' THEN 1 
+            WHEN 'high' THEN 2 
+            WHEN 'normal' THEN 3 
+            ELSE 4 
+          END,
+          created_at ASC
+        LIMIT 1
+      `).get(agentId);
+
+      if (!row) return;
+
+      const update = this.db.prepare(`
+        UPDATE tasks
+        SET status = 'claimed', started_at = ?, updated_at = ?
+        WHERE id = ? AND status = 'pending'
+      `).run(now, now, row.id);
+
+      if (update.changes === 0) {
+        row = null;
+      }
+    });
 
     if (!row) return null;
 
-    const update = this.db.prepare(`
-      UPDATE tasks
-      SET status = 'claimed', started_at = ?, updated_at = ?
-      WHERE id = ? AND status = 'pending'
-    `).run(now, now, row.id);
-
-    if (update.changes === 0) return null;
-
-    this.logger.log({
+    this.logger?.log({
       agentId,
       action: 'claim_task',
       status: 'success',
@@ -205,47 +273,46 @@ export class TaskManager extends EventEmitter {
       params.push(agentId);
     }
 
-    const rows = this.db.prepare(query).all(...params);
     const nowMs = Date.now();
     const recovered = [];
 
-    for (const task of rows) {
-      const startedMs = Date.parse(task.updated_at || task.started_at);
-      const timeoutMs = Number(task.timeout_ms) || 60000;
-      if (!Number.isFinite(startedMs) || nowMs - startedMs < timeoutMs) continue;
+    runInImmediateTx(this.db, () => {
+      const rows = this.db.prepare(query).all(...params);
+      for (const task of rows) {
+        const startedMs = Date.parse(task.updated_at || task.started_at);
+        const timeoutMs = Number(task.timeout_ms) || 60000;
+        if (!Number.isFinite(startedMs) || nowMs - startedMs < timeoutMs) continue;
 
-      const retryCount = (task.retry_count || 0) + 1;
-      const maxRetries = task.max_retries || 3;
-      const now = new Date().toISOString();
-      const error = `Task lease expired after ${timeoutMs}ms`;
+        const retryCount = (task.retry_count || 0) + 1;
+        const maxRetries = task.max_retries || 3;
+        const now = new Date().toISOString();
+        const error = `Task lease expired after ${timeoutMs}ms`;
 
-      if (retryCount <= maxRetries) {
-        this.db.prepare(`
-          UPDATE tasks
-          SET status = 'pending', retry_count = ?, error = ?, updated_at = ?, started_at = NULL
-          WHERE id = ? AND status IN ('claimed', 'in_progress')
-        `).run(retryCount, error, now, task.id);
-        recovered.push({ taskId: task.id, status: 'pending', retryCount });
-        this.logger.log({
-          agentId: agentId || task.to_agent,
-          action: 'recover_expired_task',
-          status: 'retry',
-          details: { taskId: task.id, retryCount, maxRetries, timeoutMs }
-        });
-      } else {
-        this.db.prepare(`
-          UPDATE tasks
-          SET status = 'failed', retry_count = ?, error = ?, updated_at = ?, completed_at = ?
-          WHERE id = ? AND status IN ('claimed', 'in_progress')
-        `).run(retryCount, `Failed after ${retryCount} attempts: ${error}`, now, now, task.id);
-        recovered.push({ taskId: task.id, status: 'failed', retryCount });
-        this.logger.log({
-          agentId: agentId || task.to_agent,
-          action: 'recover_expired_task',
-          status: 'failed',
-          details: { taskId: task.id, retryCount, maxRetries, timeoutMs }
-        });
+        if (retryCount <= maxRetries) {
+          this.db.prepare(`
+            UPDATE tasks
+            SET status = 'pending', retry_count = ?, error = ?, updated_at = ?, started_at = NULL
+            WHERE id = ? AND status IN ('claimed', 'in_progress')
+          `).run(retryCount, error, now, task.id);
+          recovered.push({ taskId: task.id, status: 'pending', retryCount });
+        } else {
+          this.db.prepare(`
+            UPDATE tasks
+            SET status = 'failed', retry_count = ?, error = ?, updated_at = ?, completed_at = ?
+            WHERE id = ? AND status IN ('claimed', 'in_progress')
+          `).run(retryCount, `Failed after ${retryCount} attempts: ${error}`, now, now, task.id);
+          recovered.push({ taskId: task.id, status: 'failed', retryCount });
+        }
       }
+    });
+
+    for (const rec of recovered) {
+      this.logger?.log({
+        agentId: agentId || 'system',
+        action: 'recover_expired_task',
+        status: rec.status,
+        details: rec
+      });
     }
 
     return recovered;
@@ -257,13 +324,16 @@ export class TaskManager extends EventEmitter {
     }
 
     const now = new Date().toISOString();
-    const result = this.db.prepare(`
-      UPDATE tasks
-      SET status = CASE WHEN status = 'claimed' THEN 'in_progress' ELSE status END,
-          started_at = COALESCE(started_at, ?),
-          updated_at = ?
-      WHERE id = ? AND to_agent = ? AND status IN ('claimed', 'in_progress')
-    `).run(now, now, taskId, agentId);
+    let result = null;
+    runInImmediateTx(this.db, () => {
+      result = this.db.prepare(`
+        UPDATE tasks
+        SET status = CASE WHEN status = 'claimed' THEN 'in_progress' ELSE status END,
+            started_at = COALESCE(started_at, ?),
+            updated_at = ?
+        WHERE id = ? AND to_agent = ? AND status IN ('claimed', 'in_progress')
+      `).run(now, now, taskId, agentId);
+    });
 
     if (result.changes === 0) {
       throw new Error(`Task '${taskId}' is not actively owned by '${agentId}'.`);
@@ -307,77 +377,81 @@ export class TaskManager extends EventEmitter {
     }
 
     const now = new Date().toISOString();
-    const task = this.db.prepare(`SELECT * FROM tasks WHERE id = ?`).get(taskId);
-    if (!task) {
-      throw new Error(`Task '${taskId}' not found.`);
-    }
+    let task = null;
 
-    // Fencing invariant: validate attempt if attemptId or epoch provided
-    if (attemptId && (epoch === null || epoch === undefined)) {
-      throw new Error(`Fencing Error: epoch token is required when attemptId is provided for task '${taskId}'.`);
-    }
-    if (attemptId && epoch && this.attempts) {
-      this.attempts.validateFencing({ taskId, attemptId, epoch, agentId });
-    }
-
-    // Authorization: only the assignee (owner) or the creator may move a task
-    // into a terminal state. Prevents an unrelated agent from completing or
-    // failing someone else's task by guessing its id.
-    if (['completed', 'failed', 'cancelled'].includes(status)) {
-      const actor = agentId ? String(agentId).trim().toLowerCase() : null;
-      const owner = task.to_agent ? String(task.to_agent).trim().toLowerCase() : null;
-      const creator = task.from_agent ? String(task.from_agent).trim().toLowerCase() : null;
-      if (actor && owner && actor !== owner && actor !== creator) {
-        throw new Error(`Forbidden: task '${taskId}' is owned by '${task.to_agent}'; '${agentId}' may not mark it '${status}'.`);
+    runInImmediateTx(this.db, () => {
+      task = this.db.prepare(`SELECT * FROM tasks WHERE id = ?`).get(taskId);
+      if (!task) {
+        throw new Error(`Task '${taskId}' not found.`);
       }
-    }
 
-    let startedAt = task.started_at;
-    let completedAt = task.completed_at;
+      // Fencing invariant: validate attempt if attemptId or epoch provided
+      if (attemptId && (epoch === null || epoch === undefined)) {
+        throw new Error(`Fencing Error: epoch token is required when attemptId is provided for task '${taskId}'.`);
+      }
+      if (attemptId && epoch && this.attempts) {
+        this.attempts.validateFencing({ taskId, attemptId, epoch, agentId });
+      }
 
-    if (status === 'in_progress' && !startedAt) {
-      startedAt = now;
-    }
-    if (['completed', 'failed', 'cancelled'].includes(status)) {
-      completedAt = now;
-    }
-
-    const serializedResult = (result !== null && typeof result === 'object') ? JSON.stringify(result) : result;
-    const stmt = this.db.prepare(`
-      UPDATE tasks
-      SET status = ?, result = COALESCE(?, result), error = ?, updated_at = ?,
-          started_at = ?, completed_at = ?
-      WHERE id = ?
-    `);
-
-    stmt.run(status, serializedResult, error, now, startedAt, completedAt, taskId);
-
-    if (this.attempts) {
-      if (attemptId && epoch) {
-        if (status === 'completed') {
-          this.attempts.completeAttempt({ attemptId, epoch, result: serializedResult });
-        } else if (['failed', 'cancelled'].includes(status)) {
-          this.attempts.failAttempt({ attemptId, epoch, error: error || status });
-        }
-      } else {
-        const activeAtt = this.attempts.getActiveAttemptForTask(taskId);
-        if (activeAtt) {
-          try {
-            if (status === 'completed') {
-              this.attempts.completeAttempt({ attemptId: activeAtt.attemptId, epoch: activeAtt.epoch, result: serializedResult });
-            } else if (['failed', 'cancelled'].includes(status)) {
-              this.attempts.failAttempt({ attemptId: activeAtt.attemptId, epoch: activeAtt.epoch, error: error || status });
-            }
-          } catch {}
+      // Authorization: only the assignee (owner) or the creator may move a task
+      // into a terminal state. Prevents an unrelated agent from completing or
+      // failing someone else's task by guessing its id.
+      if (['completed', 'failed', 'cancelled'].includes(status)) {
+        const actor = agentId ? String(agentId).trim().toLowerCase() : null;
+        const owner = task.to_agent ? String(task.to_agent).trim().toLowerCase() : null;
+        const creator = task.from_agent ? String(task.from_agent).trim().toLowerCase() : null;
+        if (actor && owner && actor !== owner && actor !== creator) {
+          throw new Error(`Forbidden: task '${taskId}' is owned by '${task.to_agent}'; '${agentId}' may not mark it '${status}'.`);
         }
       }
-    }
 
-    this.logger.log({
-      agentId,
-      action: 'update_task_status',
-      status: 'success',
-      details: { taskId, newStatus: status }
+      let startedAt = task.started_at;
+      let completedAt = task.completed_at;
+
+      if (status === 'in_progress' && !startedAt) {
+        startedAt = now;
+      }
+      if (['completed', 'failed', 'cancelled'].includes(status)) {
+        completedAt = now;
+      }
+
+      const serializedResult = (result !== null && typeof result === 'object') ? JSON.stringify(result) : result;
+      const stmt = this.db.prepare(`
+        UPDATE tasks
+        SET status = ?, result = COALESCE(?, result), error = ?, updated_at = ?,
+            started_at = ?, completed_at = ?
+        WHERE id = ?
+      `);
+
+      stmt.run(status, serializedResult, error, now, startedAt, completedAt, taskId);
+
+      if (this.attempts) {
+        if (attemptId && epoch) {
+          if (status === 'completed') {
+            this.attempts.completeAttempt({ attemptId, epoch, result: serializedResult });
+          } else if (['failed', 'cancelled'].includes(status)) {
+            this.attempts.failAttempt({ attemptId, epoch, error: error || status });
+          }
+        } else {
+          const activeAtt = this.attempts.getActiveAttemptForTask(taskId);
+          if (activeAtt) {
+            try {
+              if (status === 'completed') {
+                this.attempts.completeAttempt({ attemptId: activeAtt.attemptId, epoch: activeAtt.epoch, result: serializedResult });
+              } else if (['failed', 'cancelled'].includes(status)) {
+                this.attempts.failAttempt({ attemptId: activeAtt.attemptId, epoch: activeAtt.epoch, error: error || status });
+              }
+            } catch {}
+          }
+        }
+      }
+
+      this.logger?.log({
+        agentId,
+        action: 'update_task_status',
+        status: 'success',
+        details: { taskId, newStatus: status }
+      });
     });
 
     const updated = this.getTask(taskId, false);

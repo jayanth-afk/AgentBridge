@@ -5,9 +5,15 @@ import { EventBus } from './event-bus.js';
 export class MailboxHub {
   constructor(auditLogger, taskManager = null, eventBus = null) {
     this.logger = auditLogger;
-    this.db = auditLogger.db;
-    this.tasks = taskManager || new TaskManager(auditLogger);
+    this.db = auditLogger?.db;
     this.eventBus = eventBus || new EventBus(auditLogger);
+    this.tasks = taskManager || new TaskManager(auditLogger, null, this.eventBus);
+    if (!this.tasks.eventBus && this.eventBus) {
+      this.tasks.eventBus = this.eventBus;
+      if (this.tasks.outbox) {
+        this.tasks.outbox.eventBus = this.eventBus;
+      }
+    }
     this.agentHandlers = new Map(); // agentId -> async (question, context) => response
   }
 
@@ -22,44 +28,76 @@ export class MailboxHub {
     content,
     replyToId = null,
     conversationId = null,
-    requestId = null
+    requestId = null,
+    emitEvent = true,
+    dedupKey = null
   }) {
     const id = `msg_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const timestamp = new Date().toISOString();
     const convId = conversationId || `conv_msg_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+    const eventDedupKey = dedupKey || `msg_event_${id}`;
 
-    const stmt = this.db.prepare(`
-      INSERT INTO messages (id, timestamp, from_agent, to_agent, subject, content, reply_to_id, read_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
-    `);
-    stmt.run(id, timestamp, fromAgent, toAgent, subject, content, replyToId);
+    let resultMsg = null;
 
-    this.logger.log({
-      agentId: fromAgent,
-      action: 'send_message',
-      targetPath: null,
-      command: null,
-      status: 'success',
-      details: { messageId: id, toAgent, subject, conversationId: convId, requestId }
-    });
+    const insertWork = (targetDb, stageEventFn = null) => {
+      const stmt = targetDb.prepare(`
+        INSERT INTO messages (id, timestamp, from_agent, to_agent, subject, content, reply_to_id, read_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+      `);
+      stmt.run(id, timestamp, fromAgent, toAgent, subject, content, replyToId);
 
-    // Cross-process event notification
-    if (this.eventBus) {
-      this.eventBus.publish({
-        type: 'message_sent',
-        agentId: toAgent,
-        fromAgent,
-        conversationId: convId,
-        requestId,
-        status: 'unread',
-        payload: {
-          messageId: id,
-          subject: subject ? (subject.length > 80 ? subject.slice(0, 80) + '...' : subject) : ''
-        }
+      this.logger?.log({
+        agentId: fromAgent,
+        action: 'send_message',
+        targetPath: null,
+        command: null,
+        status: 'success',
+        details: { messageId: id, toAgent, subject, conversationId: convId, requestId }
       });
+
+      if (emitEvent && stageEventFn) {
+        stageEventFn({
+          type: 'message_sent',
+          agentId: toAgent,
+          fromAgent,
+          conversationId: convId,
+          requestId,
+          status: 'unread',
+          payload: {
+            messageId: id,
+            subject: subject ? (subject.length > 80 ? subject.slice(0, 80) + '...' : subject) : ''
+          },
+          dedupKey: eventDedupKey
+        });
+      }
+
+      resultMsg = { id, timestamp, fromAgent, toAgent, subject, content, replyToId, conversationId: convId, requestId };
+    };
+
+    if (this.eventBus && typeof this.eventBus.runInTransaction === 'function') {
+      this.eventBus.runInTransaction((tx) => {
+        insertWork(tx.db, tx.stageEvent);
+      });
+    } else {
+      insertWork(this.db, null);
+      if (emitEvent && this.eventBus) {
+        this.eventBus.publish({
+          type: 'message_sent',
+          agentId: toAgent,
+          fromAgent,
+          conversationId: convId,
+          requestId,
+          status: 'unread',
+          payload: {
+            messageId: id,
+            subject: subject ? (subject.length > 80 ? subject.slice(0, 80) + '...' : subject) : ''
+          },
+          dedupKey: eventDedupKey
+        });
+      }
     }
 
-    return { id, timestamp, fromAgent, toAgent, subject, content, replyToId, conversationId: convId, requestId };
+    return resultMsg;
   }
 
   async broadcastMessage({ fromAgent, toAgents, subject, content, replyToId = null }) {
@@ -132,50 +170,46 @@ export class MailboxHub {
     notifyInbox = true,
     emitEvent = true
   }) {
-    const task = this.tasks.createTask({
-      fromAgent,
-      toAgent,
-      title,
-      instructions,
-      context,
-      parentTaskId,
-      priority,
-      dependencies
-    });
+    const convId = conversationId || (requestId ? `conv_${requestId}` : null);
 
-    const convId = conversationId || `conv_task_${task.id}`;
-
-    // Send an inbox message for durable mail fallback only if requested
-    if (notifyInbox) {
-      this.sendMessage({
+    const runWork = () => {
+      const task = this.tasks.createTask({
         fromAgent,
         toAgent,
-        subject: `[Task Delegation] ${title}`,
-        content: `New task assigned (${task.id}): ${instructions}`,
-        replyToId: null,
-        conversationId: convId,
-        requestId
-      });
-    }
-
-    // Cross-process event bus notification for instant wakeup
-    if (emitEvent && this.eventBus) {
-      this.eventBus.publish({
-        type: 'task_created',
-        agentId: toAgent,
-        fromAgent,
+        title,
+        instructions,
+        context,
+        parentTaskId,
+        priority,
+        dependencies,
         conversationId: convId,
         requestId,
-        taskId: task.id,
-        status: task.status,
-        payload: {
-          title: title ? (title.length > 80 ? title.slice(0, 80) + '...' : title) : '',
-          priority
-        }
+        emitEvent
       });
-    }
 
-    return task;
+      const actualConvId = convId || `conv_task_${task.id}`;
+
+      // Send an inbox message for durable mail fallback only if requested
+      if (notifyInbox) {
+        this.sendMessage({
+          fromAgent,
+          toAgent,
+          subject: `[Task Delegation] ${title}`,
+          content: `New task assigned (${task.id}): ${instructions}`,
+          replyToId: null,
+          conversationId: actualConvId,
+          requestId,
+          emitEvent: true
+        });
+      }
+
+      return task;
+    };
+
+    if (this.eventBus && typeof this.eventBus.runInTransaction === 'function') {
+      return this.eventBus.runInTransaction(() => runWork());
+    }
+    return runWork();
   }
 
   /**
@@ -234,46 +268,71 @@ export class MailboxHub {
       question
     };
 
-    this.db.prepare(`
-      INSERT INTO bridge_requests (
-        request_id, conversation_id, from_agent, to_agent, question, context,
-        task_id, status, response, error, timeout_ms, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', NULL, NULL, ?, ?, ?)
-    `).run(reqId, convId, fromAgent, toAgent, question, ctxString, timeoutMs, now, now);
+    let task = null;
 
-    // Create backing task without redundant inbox messages or duplicate task_created events
-    const task = this.delegateTask({
-      fromAgent,
-      toAgent,
-      title: `Query from ${fromAgent}`,
-      instructions: question,
-      context: taskContext,
-      priority: 'high',
-      conversationId: convId,
-      requestId: reqId,
-      notifyInbox: false,
-      emitEvent: false
-    });
+    const stageRequestWork = (targetDb, stageEventFn = null) => {
+      targetDb.prepare(`
+        INSERT INTO bridge_requests (
+          request_id, conversation_id, from_agent, to_agent, question, context,
+          task_id, status, response, error, timeout_ms, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', NULL, NULL, ?, ?, ?)
+      `).run(reqId, convId, fromAgent, toAgent, question, ctxString, timeoutMs, now, now);
 
-    // Explicit bidirectional mapping: request_id <-> task_id
-    this.db.prepare(`
-      UPDATE bridge_requests SET task_id = ? WHERE request_id = ?
-    `).run(task.id, reqId);
-
-    // Emit single authoritative request_created event
-    if (this.eventBus) {
-      this.eventBus.publish({
-        type: 'request_created',
-        agentId: toAgent,
+      task = this.delegateTask({
         fromAgent,
+        toAgent,
+        title: `Query from ${fromAgent}`,
+        instructions: question,
+        context: taskContext,
+        priority: 'high',
         conversationId: convId,
         requestId: reqId,
-        taskId: task.id,
-        status: 'pending',
-        payload: {
-          question: question ? (question.length > 100 ? question.slice(0, 100) + '...' : question) : ''
-        }
+        notifyInbox: false,
+        emitEvent: false
       });
+
+      targetDb.prepare(`
+        UPDATE bridge_requests SET task_id = ? WHERE request_id = ?
+      `).run(task.id, reqId);
+
+      if (stageEventFn) {
+        stageEventFn({
+          type: 'request_created',
+          agentId: toAgent,
+          fromAgent,
+          conversationId: convId,
+          requestId: reqId,
+          taskId: task.id,
+          status: 'pending',
+          payload: {
+            question: question ? (question.length > 100 ? question.slice(0, 100) + '...' : question) : ''
+          },
+          dedupKey: `req_created_${reqId}`
+        });
+      }
+    };
+
+    if (this.eventBus && typeof this.eventBus.runInTransaction === 'function') {
+      this.eventBus.runInTransaction((tx) => {
+        stageRequestWork(tx.db, tx.stageEvent);
+      });
+    } else {
+      stageRequestWork(this.db, null);
+      if (this.eventBus) {
+        this.eventBus.publish({
+          type: 'request_created',
+          agentId: toAgent,
+          fromAgent,
+          conversationId: convId,
+          requestId: reqId,
+          taskId: task.id,
+          status: 'pending',
+          payload: {
+            question: question ? (question.length > 100 ? question.slice(0, 100) + '...' : question) : ''
+          },
+          dedupKey: `req_created_${reqId}`
+        });
+      }
     }
 
     // If explicit asynchronous mode requested, return immediately with correlation IDs
@@ -377,105 +436,116 @@ export class MailboxHub {
    * emits live response event on event bus, and delivers durable mailbox message.
    */
   submitTaskResult({ taskId, agentId, status = 'completed', result = null, error = null, attemptId = null, epoch = null }) {
-    const updated = this.tasks.updateTaskStatus({
-      taskId,
-      agentId,
-      status,
-      result,
-      error,
-      attemptId,
-      epoch
-    });
+    let updated = null;
 
-    const task = this.tasks.getTask(taskId, false);
+    const submitWork = (targetDb, stageEventFn = null) => {
+      updated = this.tasks.updateTaskStatus({
+        taskId,
+        agentId,
+        status,
+        result,
+        error,
+        attemptId,
+        epoch
+      });
 
-    // Check if task is linked to a correlated bridge_request
-    let reqRow = null;
-    try {
-      reqRow = this.db.prepare('SELECT * FROM bridge_requests WHERE task_id = ? OR request_id = ?').get(taskId, taskId);
-    } catch {}
+      const task = this.tasks.getTask(taskId, false);
 
-    let requestId = reqRow?.request_id;
-    let conversationId = reqRow?.conversation_id;
-
-    if (!requestId && task?.context) {
+      // Check if task is linked to a correlated bridge_request
+      let reqRow = null;
       try {
-        const ctxObj = typeof task.context === 'string' ? JSON.parse(task.context) : task.context;
-        requestId = ctxObj?.requestId;
-        conversationId = ctxObj?.conversationId;
+        reqRow = targetDb.prepare('SELECT * FROM bridge_requests WHERE task_id = ? OR request_id = ?').get(taskId, taskId);
       } catch {}
-    }
 
-    const now = new Date().toISOString();
-    const resultStr = typeof result === 'string' ? result : (result ? JSON.stringify(result) : null);
+      let requestId = reqRow?.request_id;
+      let conversationId = reqRow?.conversation_id;
 
-    if (requestId) {
-      try {
-        this.db.prepare(`
-          UPDATE bridge_requests
-          SET status = ?, response = ?, error = ?, updated_at = ?, completed_at = ?
-          WHERE request_id = ?
-        `).run(status, resultStr, error, now, now, requestId);
-      } catch {}
-    }
+      if (!requestId && task?.context) {
+        try {
+          const ctxObj = typeof task.context === 'string' ? JSON.parse(task.context) : task.context;
+          requestId = ctxObj?.requestId;
+          conversationId = ctxObj?.conversationId;
+        } catch {}
+      }
 
-    // 1. Live event bus response delivery
-    if (this.eventBus) {
+      const now = new Date().toISOString();
+      const resultStr = typeof result === 'string' ? result : (result ? JSON.stringify(result) : null);
+
+      if (requestId) {
+        try {
+          targetDb.prepare(`
+            UPDATE bridge_requests
+            SET status = ?, response = ?, error = ?, updated_at = ?, completed_at = ?
+            WHERE request_id = ?
+          `).run(status, resultStr, error, now, now, requestId);
+        } catch {}
+      }
+
       const recipient = task ? task.creator : (reqRow ? reqRow.from_agent : '*');
       const snippet = resultStr ? (resultStr.length > 100 ? resultStr.slice(0, 100) + '...' : resultStr) : null;
 
-      if (requestId) {
-        // Authoritative response event for correlated request
-        this.eventBus.publish({
-          type: 'response_delivered',
-          agentId: recipient,
-          fromAgent: agentId,
-          conversationId: conversationId || `conv_task_${taskId}`,
-          requestId,
-          taskId,
-          status,
-          payload: {
-            snippet,
+      if (stageEventFn) {
+        if (requestId) {
+          stageEventFn({
+            type: 'response_delivered',
+            agentId: recipient,
+            fromAgent: agentId,
+            conversationId: conversationId || `conv_task_${taskId}`,
+            requestId,
+            taskId,
             status,
-            error: error ? (error.length > 80 ? error.slice(0, 80) + '...' : error) : null
-          }
-        });
-      } else {
-        // Standalone task outcome
-        this.eventBus.publish({
-          type: status === 'completed' ? 'task_completed' : 'task_failed',
-          agentId: recipient,
-          fromAgent: agentId,
-          conversationId: conversationId || `conv_task_${taskId}`,
-          requestId: null,
-          taskId,
-          status,
-          payload: {
-            snippet,
+            payload: {
+              snippet,
+              status,
+              error: error ? (error.length > 80 ? error.slice(0, 80) + '...' : error) : null
+            },
+            dedupKey: `resp_delivered_${requestId}_${status}`
+          });
+        } else {
+          stageEventFn({
+            type: status === 'completed' ? 'task_completed' : 'task_failed',
+            agentId: recipient,
+            fromAgent: agentId,
+            conversationId: conversationId || `conv_task_${taskId}`,
+            requestId: null,
+            taskId,
             status,
-            error: error ? (error.length > 80 ? error.slice(0, 80) + '...' : error) : null
-          }
+            payload: {
+              snippet,
+              status,
+              error: error ? (error.length > 80 ? error.slice(0, 80) + '...' : error) : null
+            },
+            dedupKey: `task_${status}_${taskId}`
+          });
+        }
+      }
+
+      // Durable mailbox notification fallback only for standalone tasks (not active correlated requests)
+      if (!requestId && task && task.creator && task.creator !== agentId) {
+        this.sendMessage({
+          fromAgent: agentId,
+          toAgent: task.creator,
+          subject: `[Task Result] Re: ${task.title}`,
+          content: JSON.stringify({
+            taskId,
+            status,
+            result: task.result,
+            error: task.error,
+            requestId: null,
+            conversationId
+          }),
+          conversationId,
+          requestId: null
         });
       }
-    }
+    };
 
-    // 2. Durable mailbox notification fallback only for standalone tasks (not active correlated requests)
-    if (!requestId && task && task.creator && task.creator !== agentId) {
-      this.sendMessage({
-        fromAgent: agentId,
-        toAgent: task.creator,
-        subject: `[Task Result] Re: ${task.title}`,
-        content: JSON.stringify({
-          taskId,
-          status,
-          result: task.result,
-          error: task.error,
-          requestId: null,
-          conversationId
-        }),
-        conversationId,
-        requestId: null
+    if (this.eventBus && typeof this.eventBus.runInTransaction === 'function') {
+      this.eventBus.runInTransaction((tx) => {
+        submitWork(tx.db, tx.stageEvent);
       });
+    } else {
+      submitWork(this.db, null);
     }
 
     return updated;
@@ -583,27 +653,55 @@ export class MailboxHub {
     const now = new Date().toISOString();
     const resultStr = typeof response === 'string' ? response : (response ? JSON.stringify(response) : null);
 
-    this.db.prepare(`
-      UPDATE bridge_requests
-      SET status = ?, response = ?, error = ?, updated_at = ?, completed_at = ?
-      WHERE request_id = ?
-    `).run(status, resultStr, error, now, now, requestId);
+    const directWork = (targetDb, stageEventFn = null) => {
+      targetDb.prepare(`
+        UPDATE bridge_requests
+        SET status = ?, response = ?, error = ?, updated_at = ?, completed_at = ?
+        WHERE request_id = ?
+      `).run(status, resultStr, error, now, now, requestId);
 
-    if (this.eventBus) {
-      this.eventBus.publish({
-        type: 'response_delivered',
-        agentId: reqRow.from_agent,
-        fromAgent: agentId,
-        conversationId: reqRow.conversation_id,
-        requestId,
-        taskId: null,
-        status,
-        payload: {
-          snippet: resultStr ? (resultStr.length > 100 ? resultStr.slice(0, 100) + '...' : resultStr) : null,
+      if (stageEventFn) {
+        stageEventFn({
+          type: 'response_delivered',
+          agentId: reqRow.from_agent,
+          fromAgent: agentId,
+          conversationId: reqRow.conversation_id,
+          requestId,
+          taskId: null,
           status,
-          error: error ? (error.length > 80 ? error.slice(0, 80) + '...' : error) : null
-        }
+          payload: {
+            snippet: resultStr ? (resultStr.length > 100 ? resultStr.slice(0, 100) + '...' : resultStr) : null,
+            status,
+            error: error ? (error.length > 80 ? error.slice(0, 80) + '...' : error) : null
+          },
+          dedupKey: `direct_resp_${requestId}_${status}`
+        });
+      }
+    };
+
+    if (this.eventBus && typeof this.eventBus.runInTransaction === 'function') {
+      this.eventBus.runInTransaction((tx) => {
+        directWork(tx.db, tx.stageEvent);
       });
+    } else {
+      directWork(this.db, null);
+      if (this.eventBus) {
+        this.eventBus.publish({
+          type: 'response_delivered',
+          agentId: reqRow.from_agent,
+          fromAgent: agentId,
+          conversationId: reqRow.conversation_id,
+          requestId,
+          taskId: null,
+          status,
+          payload: {
+            snippet: resultStr ? (resultStr.length > 100 ? resultStr.slice(0, 100) + '...' : resultStr) : null,
+            status,
+            error: error ? (error.length > 80 ? error.slice(0, 80) + '...' : error) : null
+          },
+          dedupKey: `direct_resp_${requestId}_${status}`
+        });
+      }
     }
 
     return {
