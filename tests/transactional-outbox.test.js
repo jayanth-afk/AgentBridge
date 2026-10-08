@@ -12,6 +12,11 @@ test('TransactionalOutbox: Atomic Commit, Rollback Safety & Deduplication', asyn
   const eventBus = new EventBus(mockLogger);
   const outbox = eventBus.outbox;
 
+  t.after(() => {
+    eventBus.close();
+    try { fs.unlinkSync(':memory:.notify'); } catch {}
+  });
+
   await t.test('1. Rolled back transaction produces NO visible events or wakeups', () => {
     let receivedCount = 0;
     eventBus.subscribe('chatgpt-desktop', () => {
