@@ -23,6 +23,7 @@ import { ToolRegistry } from './tool-registry.js';
 import { EventBus } from './event-bus.js';
 import { createSessionAdapter } from './session-adapters/index.js';
 import { BridgeHttpServer } from './http-server.js';
+import { CapabilityRegistry } from './capabilities/capability-registry.js';
 
 export class BridgeMcpServer {
   constructor(options = {}) {
@@ -58,6 +59,8 @@ export class BridgeMcpServer {
       mailboxHub: this.mailbox,
       eventBus: this.eventBus
     });
+
+    this.capabilityRegistry = options.capabilityRegistry || new CapabilityRegistry(this.logger);
 
     // Single unified source of truth for tools
     this.registry = options.toolRegistry || new ToolRegistry();
@@ -118,6 +121,7 @@ export class BridgeMcpServer {
       cache: this.cache,
       eventBus: this.eventBus,
       sessionAdapter: this.sessionAdapter,
+      capabilityRegistry: this.capabilityRegistry,
       boundAgentId: this.agentId
     };
 

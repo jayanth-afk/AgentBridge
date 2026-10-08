@@ -854,7 +854,15 @@ export class ToolRegistry {
       },
       handler: async (args, ctx) => {
         const adapter = createSessionAdapter(args.agentId, { mailboxHub: ctx.mailbox, eventBus: ctx.eventBus });
-        return adapter.capabilities();
+        const legacy = adapter.capabilities();
+        let v2Routes = [];
+        if (ctx.capabilityRegistry) {
+          v2Routes = ctx.capabilityRegistry.listAgentCapabilities(args.agentId);
+        }
+        return {
+          ...legacy,
+          v2Routes
+        };
       }
     });
 
