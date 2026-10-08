@@ -95,8 +95,44 @@ export class ResponseCorrelatorV2 {
       .replace(/<!--\s*\[AgentBridge Correlation:\s*ABN-[a-f0-9]{16}\]\s*-->/gi, '')
       .replace(/\[AgentBridge Correlation:\s*ABN-[a-f0-9]{16}\]/gi, '')
       .replace(/ABN-[a-f0-9]{16}/gi, '')
+      .replace(/\[AB:[a-zA-Z0-9_-]+\]\s*/g, '')
       .replace(/\n{3,}/g, '\n\n')
       .trim();
+  }
+
+  cleanResponse(text) {
+    return this.cleanResponseText(text);
+  }
+
+  tagMessage(text, requestId, nonce = null) {
+    if (nonce) {
+      return this.embedNonceInPrompt(text, nonce);
+    }
+    if (requestId) {
+      const synthNonce = `ABN-${crypto.createHash('sha256').update(String(requestId)).digest('hex').slice(0, 16)}`;
+      return this.embedNonceInPrompt(text, synthNonce);
+    }
+    return text;
+  }
+
+  correlateTurn({ rawResponse, expectedRequestId, nonce = null }) {
+    if (!rawResponse) {
+      return { correlated: false, error: 'EMPTY_RESPONSE', confidence: CorrelationConfidence.NO_RESPONSE };
+    }
+    const resolvedNonce = nonce || (expectedRequestId ? `ABN-${crypto.createHash('sha256').update(String(expectedRequestId)).digest('hex').slice(0, 16)}` : null);
+    const result = this.correlate({
+      requestId: expectedRequestId,
+      expectedNonce: resolvedNonce,
+      rawResponse
+    });
+    return {
+      correlated: result.isAcceptableForSuccess(),
+      confidence: result.confidence,
+      tier: result.tier,
+      cleanedText: result.cleanedResponse || this.cleanResponseText(rawResponse),
+      rawResponse,
+      evidence: result.evidence
+    };
   }
 
   /**
