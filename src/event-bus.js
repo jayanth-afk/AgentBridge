@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import EventEmitter from 'node:events';
+import { TransactionalOutbox } from './events/transactional-outbox.js';
 
 /**
  * CrossProcessEventBus
@@ -31,6 +32,10 @@ export class EventBus extends EventEmitter {
 
     this.ensureNotifyFile();
     this.initTables();
+    this.outbox = new TransactionalOutbox(auditLogger, this);
+    try {
+      this.outbox.recoverPendingOutbox();
+    } catch {}
   }
 
   ensureNotifyFile() {
@@ -89,6 +94,23 @@ export class EventBus extends EventEmitter {
       CREATE INDEX IF NOT EXISTS idx_bridge_events_req_id ON bridge_events(request_id);
       CREATE INDEX IF NOT EXISTS idx_bridge_requests_to_status ON bridge_requests(to_agent, status);
     `);
+
+    try {
+      const info = this.db.prepare(`PRAGMA table_info(bridge_events)`).all();
+      const hasDedup = info.some(col => col.name === 'dedup_key');
+      if (!hasDedup) {
+        this.db.exec(`ALTER TABLE bridge_events ADD COLUMN dedup_key TEXT;`);
+        this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_bridge_events_dedup ON bridge_events(dedup_key);`);
+      }
+    } catch {}
+  }
+
+  /**
+   * Run work within an atomic SQLite transaction via outbox pattern
+   */
+  runInTransaction(workFn) {
+    if (!this.outbox) throw new Error('TransactionalOutbox not initialized');
+    return this.outbox.runInTransaction(workFn);
   }
 
   /**
@@ -102,9 +124,34 @@ export class EventBus extends EventEmitter {
     requestId = null,
     taskId = null,
     status = 'pending',
-    payload = null
+    payload = null,
+    dedupKey = null
   }) {
     if (this.isClosed) throw new Error('EventBus is closed');
+
+    // Deduplication invariant: duplicate events do not create side effects
+    if (dedupKey) {
+      try {
+        const existing = this.db.prepare('SELECT * FROM bridge_events WHERE dedup_key = ?').get(dedupKey);
+        if (existing) {
+          return {
+            eventId: existing.event_id,
+            type: existing.type,
+            agentId: existing.agent_id,
+            fromAgent: existing.from_agent,
+            conversationId: existing.conversation_id,
+            requestId: existing.request_id,
+            taskId: existing.task_id,
+            status: existing.status,
+            payload: existing.payload ? (() => { try { return JSON.parse(existing.payload); } catch { return existing.payload; } })() : null,
+            timestamp: existing.timestamp,
+            dedupKey: existing.dedup_key,
+            isDuplicate: true
+          };
+        }
+      } catch {}
+    }
+
     const timestamp = new Date().toISOString();
     const convId = conversationId || (requestId ? `conv_${requestId}` : `conv_${Date.now()}`);
 
@@ -119,9 +166,9 @@ export class EventBus extends EventEmitter {
 
     const stmt = this.db.prepare(`
       INSERT INTO bridge_events (
-        timestamp, type, agent_id, from_agent, conversation_id, request_id, task_id, status, payload
+        timestamp, type, agent_id, from_agent, conversation_id, request_id, task_id, status, payload, dedup_key
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -133,7 +180,8 @@ export class EventBus extends EventEmitter {
       requestId,
       taskId,
       status,
-      payloadStr
+      payloadStr,
+      dedupKey
     );
 
     // Retrieve generated monotonically increasing event_id
