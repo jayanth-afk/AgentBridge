@@ -397,12 +397,16 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
       }
     }
 
+    const shouldActivate = typeof activate === 'boolean'
+      ? activate
+      : (typeof this.options.activate === 'boolean' ? this.options.activate : true);
+
     const turn = await this.swiftBridge.sendAndObserve(
       this.appName,
       tagged,
       resolvedId,
       timeoutMs || this.defaultTimeoutMs,
-      { activate: true }
+      { activate: shouldActivate }
     );
 
     const result = {

@@ -1,7 +1,9 @@
 import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
 import { ChatGptLocalEngineAdapter } from './chatgpt-local-engine.js';
+import { ChatGptAutonomousSession } from './chatgpt-autonomous-session.js';
 import { ClaudeAutonomousSession } from './claude-autonomous-session.js';
+import { GeminiAutonomousSession } from './gemini-autonomous-session.js';
 import { ConversationRegistry } from './conversation-registry.js';
 import { ResponseCorrelator } from './response-correlator.js';
 import { RequestEnvelope, RequestState } from '../protocol/envelope.js';
@@ -18,7 +20,9 @@ export class ModelOrchestrator extends EventEmitter {
     this.options = options;
     this.swiftBridge = options.swiftBridge || new SwiftAXBridge(options);
     this.chatgptEngine = options.chatgptEngine || new ChatGptLocalEngineAdapter(options.chatgpt || {});
-    this.claudeSession = options.claudeSession || new ClaudeAutonomousSession(options.claude || {});
+    this.chatgptSession = options.chatgptSession || new ChatGptAutonomousSession(options.chatgptSessionOptions || { timeoutMs: 120000 });
+    this.claudeSession = options.claudeSession || new ClaudeAutonomousSession(options.claude || { timeoutMs: 90000 });
+    this.geminiSession = options.geminiSession || new GeminiAutonomousSession(options.gemini || {});
     this.conversations = options.conversations || new ConversationRegistry(options);
     this.correlator = options.correlator || new ResponseCorrelator(options);
     this.mailbox = options.mailboxHub || null;
@@ -94,49 +98,92 @@ export class ModelOrchestrator extends EventEmitter {
         });
 
         if (!engineRes.ok) {
-          envelope.transition(RequestState.FAILED, { error: engineRes.error });
-          return {
-            success: false,
+          const prevFront = await this.swiftBridge.getFrontmostApp().catch(() => null);
+          let fallbackRes;
+          try {
+            fallbackRes = await this.chatgptSession.send({
+              text: taggedPrompt,
+              requestId,
+              timeoutMs: deadline ? Math.max(5000, deadline - Date.now()) : 90000
+            });
+          } finally {
+            if (prevFront?.pid) {
+              await this.swiftBridge.restoreFocus(prevFront.pid).catch(() => {});
+            }
+          }
+
+          if (fallbackRes.success && fallbackRes.response) {
+            envelope.transition(RequestState.ASSISTANT_COMPLETED);
+            const correlated = this.correlator.correlateTurn({
+              rawResponse: fallbackRes.response,
+              expectedRequestId: requestId
+            });
+
+            envelope.transition(RequestState.RESPONSE_CORRELATED);
+            envelope.transition(RequestState.DELIVERED);
+
+            this.conversations.updateActivity(resolvedConvId, {
+              request: envelope.message,
+              response: correlated.cleanedText,
+              latencyMs: fallbackRes.latencyMs
+            });
+
+            result = {
+              success: true,
+              requestId,
+              fromAgent,
+              toAgent,
+              transport: fallbackRes.transport || 'chatgpt-desktop-accessibility',
+              response: correlated.cleanedText,
+              rawResponse: fallbackRes.response,
+              latencyMs: Date.now() - startMs,
+              state: envelope.state
+            };
+          } else {
+            envelope.transition(RequestState.FAILED, { error: fallbackRes.error || engineRes.error });
+            return {
+              success: false,
+              requestId,
+              toAgent,
+              error: fallbackRes.error || engineRes.error,
+              latencyMs: Date.now() - startMs
+            };
+          }
+        } else {
+          // Attach discovered threadId for conversation continuation
+          if (engineRes.threadId) {
+            this.conversations.attach(resolvedConvId, { threadId: engineRes.threadId });
+          }
+
+          envelope.transition(RequestState.ASSISTANT_COMPLETED);
+          const correlated = this.correlator.correlateTurn({
+            rawResponse: engineRes.response,
+            expectedRequestId: requestId
+          });
+
+          envelope.transition(RequestState.RESPONSE_CORRELATED);
+          envelope.transition(RequestState.DELIVERED);
+
+          this.conversations.updateActivity(resolvedConvId, {
+            request: envelope.message,
+            response: correlated.cleanedText,
+            latencyMs: engineRes.latencyMs
+          });
+
+          result = {
+            success: true,
             requestId,
+            fromAgent,
             toAgent,
-            error: engineRes.error,
-            latencyMs: Date.now() - startMs
+            transport: 'chatgpt-local-engine',
+            response: correlated.cleanedText,
+            rawResponse: engineRes.response,
+            threadId: engineRes.threadId,
+            usage: engineRes.usage,
+            latencyMs: Date.now() - startMs,
+            state: envelope.state
           };
         }
-
-        // Attach discovered threadId for conversation continuation
-        if (engineRes.threadId) {
-          this.conversations.attach(resolvedConvId, { threadId: engineRes.threadId });
-        }
-
-        envelope.transition(RequestState.ASSISTANT_COMPLETED);
-        const correlated = this.correlator.correlateTurn({
-          rawResponse: engineRes.response,
-          expectedRequestId: requestId
-        });
-
-        envelope.transition(RequestState.RESPONSE_CORRELATED);
-        envelope.transition(RequestState.DELIVERED);
-
-        this.conversations.updateActivity(resolvedConvId, {
-          request: envelope.message,
-          response: correlated.cleanedText,
-          latencyMs: engineRes.latencyMs
-        });
-
-        result = {
-          success: true,
-          requestId,
-          fromAgent,
-          toAgent,
-          transport: 'chatgpt-local-engine',
-          response: correlated.cleanedText,
-          rawResponse: engineRes.response,
-          threadId: engineRes.threadId,
-          usage: engineRes.usage,
-          latencyMs: Date.now() - startMs,
-          state: envelope.state
-        };
       }
 
       // 2. Target: Claude Desktop
@@ -149,7 +196,8 @@ export class ModelOrchestrator extends EventEmitter {
         const claudeRes = await this.claudeSession.send({
           text: taggedPrompt,
           requestId,
-          mcpAdapter
+          mcpAdapter,
+          timeoutMs: deadline ? Math.max(10000, deadline - Date.now()) : (this.options.timeoutMs || 90000)
         });
 
         if (!claudeRes.success && claudeRes.error) {
@@ -215,7 +263,83 @@ export class ModelOrchestrator extends EventEmitter {
         };
       }
 
-      // 3. Target: Antigravity IDE (Autonomous Task Execution)
+      // 3. Target: Gemini Desktop (Gemini.app via Swift AX)
+      else if (normalizedTarget.includes('gemini')) {
+        envelope.transition(RequestState.TRANSPORT_CONNECTED, { transport: 'gemini-autonomous-session' });
+        envelope.transition(RequestState.MODEL_TURN_CONFIRMED);
+        envelope.transition(RequestState.ASSISTANT_STARTED);
+
+        let conv = this.conversations.get(resolvedConvId);
+        if (!conv) {
+          conv = this.conversations.createConversation({
+            conversationId: resolvedConvId,
+            agent: 'gemini',
+            transport: 'gemini-autonomous-session'
+          });
+        }
+
+        const taggedPrompt = this.correlator.tagMessage(envelope.message, requestId);
+        const geminiRes = await this.geminiSession.send({
+          text: taggedPrompt,
+          requestId,
+          timeoutMs: deadline ? Math.max(5000, deadline - Date.now()) : 60000
+        });
+
+        if (!geminiRes.success && geminiRes.error) {
+          envelope.transition(RequestState.FAILED, { error: geminiRes.error });
+          return {
+            success: false,
+            requestId,
+            toAgent,
+            error: geminiRes.error,
+            latencyMs: Date.now() - startMs
+          };
+        }
+
+        const responseText = geminiRes.response || null;
+        if (!responseText) {
+          const noRespError = geminiRes.status || geminiRes.error || 'GEMINI_NO_MODEL_RESPONSE';
+          envelope.transition(RequestState.FAILED, { error: noRespError });
+          return {
+            success: false,
+            requestId,
+            toAgent,
+            transport: geminiRes.transport || 'gemini-autonomous-session',
+            error: noRespError,
+            latencyMs: Date.now() - startMs,
+            state: envelope.state
+          };
+        }
+
+        envelope.transition(RequestState.ASSISTANT_COMPLETED);
+        const correlated = this.correlator.correlateTurn({
+          rawResponse: responseText,
+          expectedRequestId: requestId
+        });
+
+        envelope.transition(RequestState.RESPONSE_CORRELATED);
+        envelope.transition(RequestState.DELIVERED);
+
+        this.conversations.updateActivity(resolvedConvId, {
+          request: envelope.message,
+          response: correlated.cleanedText,
+          latencyMs: Date.now() - startMs
+        });
+
+        result = {
+          success: true,
+          requestId,
+          fromAgent,
+          toAgent,
+          transport: geminiRes.transport || 'gemini-autonomous-session',
+          response: correlated.cleanedText,
+          rawResponse: responseText,
+          latencyMs: Date.now() - startMs,
+          state: envelope.state
+        };
+      }
+
+      // 4. Target: Antigravity IDE (Autonomous Task Execution)
       else if (normalizedTarget.includes('antigravity') || normalizedTarget.includes('worker')) {
         envelope.transition(RequestState.TRANSPORT_CONNECTED, { transport: 'antigravity-worker' });
         envelope.transition(RequestState.MODEL_TURN_CONFIRMED);
@@ -293,8 +417,11 @@ export class ModelOrchestrator extends EventEmitter {
     const toAgent = entry.envelope.toAgent.toLowerCase();
     if (toAgent.includes('chatgpt')) {
       await this.chatgptEngine.cancel(requestId);
+      if (typeof this.chatgptSession.cancel === 'function') await this.chatgptSession.cancel(requestId);
     } else if (toAgent.includes('claude')) {
       await this.claudeSession.cancel(requestId);
+    } else if (toAgent.includes('gemini')) {
+      if (typeof this.geminiSession.cancel === 'function') await this.geminiSession.cancel(requestId);
     }
 
     entry.envelope.transition(RequestState.FAILED, { error: 'CANCELLED_BY_CALLER' });
@@ -310,6 +437,8 @@ export class ModelOrchestrator extends EventEmitter {
     const claudeHealth = await this.claudeSession.health();
     const claudeInspect = await this.swiftBridge.inspectApp('Claude');
     const chatgptInspect = await this.swiftBridge.inspectApp('ChatGPT');
+    const geminiInspect = await this.swiftBridge.inspectApp('Gemini');
+    const geminiCaps = await this.geminiSession.capabilities();
 
     return {
       timestamp: new Date().toISOString(),
@@ -346,6 +475,21 @@ export class ModelOrchestrator extends EventEmitter {
           modelResponseSupported: true,
           health: (claudeInspect.running && claudeInspect.windowCount > 0) ? 'HEALTHY' : (claudeInspect.running ? 'WINDOWLESS_RECOVERABLE' : 'UNAVAILABLE'),
           activeTurns: claudeHealth.activeTurns || 0
+        },
+        gemini: {
+          name: 'Gemini Desktop',
+          pid: geminiInspect.pid || null,
+          running: geminiInspect.running || false,
+          windowCount: geminiInspect.windowCount || 0,
+          engine: 'gemini-desktop-native-ax',
+          idleTurn: 'AX',
+          idleModelWake: (geminiInspect.running && geminiInspect.windowCount > 0),
+          modelTurn: 'IDLE',
+          trueHeadlessEngine: false,
+          uiSubmissionSupported: true,
+          modelInvocationSupported: true,
+          modelResponseSupported: true,
+          health: (geminiInspect.running && geminiInspect.windowCount > 0) ? 'HEALTHY' : 'UNAVAILABLE'
         },
         antigravity: {
           name: 'Antigravity IDE',

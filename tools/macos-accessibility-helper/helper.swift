@@ -95,14 +95,45 @@ struct SimpleResponse: Codable {
 
 func findAppProcess(name: String) -> NSRunningApplication? {
     let apps = NSWorkspace.shared.runningApplications
+    // Priority 1: Exact localizedName match with regular activation policy
+    if let exactRegular = apps.first(where: { app in
+        guard app.activationPolicy == .regular else { return false }
+        return app.localizedName?.caseInsensitiveCompare(name) == .orderedSame
+    }) {
+        return exactRegular
+    }
+    // Priority 2: Exact localizedName match regardless of activation policy
+    if let exact = apps.first(where: { app in
+        app.localizedName?.caseInsensitiveCompare(name) == .orderedSame
+    }) {
+        return exact
+    }
+    // Priority 3: Known bundle IDs
+    let knownBundles: [String: [String]] = [
+        "gemini": ["com.google.geminimacos"],
+        "claude": ["com.anthropic.claudedesktop"],
+        "chatgpt": ["com.openai.codex", "com.openai.chat"]
+    ]
+    if let bundles = knownBundles[name.lowercased()] {
+        if let match = apps.first(where: { app in
+            guard let b = app.bundleIdentifier?.lowercased() else { return false }
+            return bundles.contains(b)
+        }) {
+            return match
+        }
+    }
+    // Priority 4: Bundle contains name, preferring regular activation policy
+    if let bundleRegular = apps.first(where: { app in
+        guard app.activationPolicy == .regular else { return false }
+        guard let bundle = app.bundleIdentifier?.lowercased() else { return false }
+        return bundle.contains(name.lowercased()) && !bundle.contains("extension") && !bundle.contains("launcher")
+    }) {
+        return bundleRegular
+    }
+    // Priority 5: Any bundle contains name
     return apps.first { app in
-        if let appName = app.localizedName, appName.caseInsensitiveCompare(name) == .orderedSame {
-            return true
-        }
-        if let bundle = app.bundleIdentifier, bundle.lowercased().contains(name.lowercased()) {
-            return true
-        }
-        return false
+        guard let bundle = app.bundleIdentifier?.lowercased() else { return false }
+        return bundle.contains(name.lowercased())
     }
 }
 
@@ -470,18 +501,11 @@ func setupObserver(name: String) -> SimpleResponse {
 }
 
 func sendPromptToClaude(name: String, text: String, requestId: String?) -> SendTurnResponse {
-    guard let app = findAppProcess(name: name) else {
+    let (maybeApp, maybeWin) = resolveWindow(name, activate: true)
+    guard let app = maybeApp else {
         return SendTurnResponse(ok: false, status: "APP_NOT_RUNNING", requestId: requestId, error: "Application \(name) is not running")
     }
-
-    let pid = app.processIdentifier
-    let axApp = AXUIElementCreateApplication(pid)
-    _ = AXUIElementSetAttributeValue(axApp, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
-    _ = AXUIElementSetAttributeValue(axApp, "AXManualAccessibility" as CFString, kCFBooleanTrue)
-
-    var winVal: AnyObject?
-    let err = AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &winVal)
-    guard err == .success, let wins = winVal as? [AXUIElement], let win = wins.first else {
+    guard let win = maybeWin else {
         return SendTurnResponse(ok: false, status: "NO_WINDOW", requestId: requestId, error: "No open window found for \(name)")
     }
 
@@ -503,8 +527,11 @@ func sendPromptToClaude(name: String, text: String, requestId: String?) -> SendT
     func findSendBtn(_ el: AXUIElement) -> AXUIElement? {
         var descVal: AnyObject?
         AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &descVal)
-        let desc = (descVal as? String) ?? ""
-        if desc == "Send message" { return el }
+        let desc = ((descVal as? String) ?? "").lowercased()
+        var titleVal: AnyObject?
+        AXUIElementCopyAttributeValue(el, kAXTitleAttribute as CFString, &titleVal)
+        let title = ((titleVal as? String) ?? "").lowercased()
+        if desc == "send message" || desc == "send" || title == "send" || title == "send message" { return el }
         var childrenVal: AnyObject?
         if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenVal) == .success,
            let children = childrenVal as? [AXUIElement] {
@@ -546,15 +573,8 @@ func sendPromptToClaude(name: String, text: String, requestId: String?) -> SendT
 }
 
 func captureTextSnapshot(name: String) -> [String] {
-    guard let app = findAppProcess(name: name) else { return [] }
-    let pid = app.processIdentifier
-    let axApp = AXUIElementCreateApplication(pid)
-    _ = AXUIElementSetAttributeValue(axApp, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
-    _ = AXUIElementSetAttributeValue(axApp, "AXManualAccessibility" as CFString, kCFBooleanTrue)
-
-    var winVal: AnyObject?
-    guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &winVal) == .success,
-          let wins = winVal as? [AXUIElement], let win = wins.first else { return [] }
+    let (_, maybeWin) = resolveWindow(name, activate: false)
+    guard let win = maybeWin else { return [] }
 
     var texts: [String] = []
     func collect(_ el: AXUIElement, depth: Int) {
@@ -692,18 +712,11 @@ func sendAndObserveClaude(name: String, text: String, requestId: String?, timeou
 }
 
 func observeResponseFromClaude(name: String, requestId: String?, timeoutMs: Int, baselineTexts: [String]? = nil) -> ObserveTurnResponse {
-    guard let app = findAppProcess(name: name) else {
+    let (maybeApp, maybeWin) = resolveWindow(name, activate: false)
+    guard maybeApp != nil else {
         return ObserveTurnResponse(ok: false, status: "APP_NOT_RUNNING", requestId: requestId, response: nil, latencyMs: nil, error: "Application is not running")
     }
-
-    let pid = app.processIdentifier
-    let axApp = AXUIElementCreateApplication(pid)
-    _ = AXUIElementSetAttributeValue(axApp, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
-    _ = AXUIElementSetAttributeValue(axApp, "AXManualAccessibility" as CFString, kCFBooleanTrue)
-
-    var winVal: AnyObject?
-    guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &winVal) == .success,
-          let wins = winVal as? [AXUIElement], let win = wins.first else {
+    guard let win = maybeWin else {
         return ObserveTurnResponse(ok: false, status: "NO_WINDOW", requestId: requestId, response: nil, latencyMs: nil, error: "No window found")
     }
 
@@ -862,16 +875,7 @@ func observeResponseFromClaude(name: String, requestId: String?, timeoutMs: Int,
 // ============================================================
 
 func findGeminiApp() -> NSRunningApplication? {
-    let apps = NSWorkspace.shared.runningApplications
-    return apps.first { app in
-        if let bundle = app.bundleIdentifier, bundle.lowercased().contains("geminimacos") || bundle.lowercased() == "com.google.geminimacos" {
-            return true
-        }
-        if let appName = app.localizedName, appName.caseInsensitiveCompare("Gemini") == .orderedSame {
-            return true
-        }
-        return false
-    }
+    return findAppProcess(name: "Gemini")
 }
 
 func resolveGeminiWindow(_ app: NSRunningApplication) -> AXUIElement? {
@@ -1524,9 +1528,10 @@ func sendPromptGeneric(name: String, text: String, requestId: String?, profile: 
     let prefix = String(text.prefix(24))
     var setOk = false
     for attempt in 1...3 {
+        _ = AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
         let setErr = AXUIElementSetAttributeValue(composer, kAXValueAttribute as CFString, text as CFTypeRef)
-        if setErr != .success && attempt == 3 {
-            return SendTurnResponse(ok: false, status: "VALUE_SET_FAILED", requestId: nil, error: "AXError \(setErr.rawValue)")
+        if setErr != .success {
+            _ = AXUIElementSetAttributeValue(composer, "AXSelectedText" as CFString, text as CFTypeRef)
         }
         usleep(250_000)
         // Re-resolve so a React re-render cannot leave us reading a stale node.
@@ -1535,6 +1540,9 @@ func sendPromptGeneric(name: String, text: String, requestId: String?, profile: 
            axString(c2, kAXValueAttribute).contains(prefix) {
             setOk = true
             break
+        }
+        if setErr != .success && attempt == 3 && !setOk {
+            return SendTurnResponse(ok: false, status: "VALUE_SET_FAILED", requestId: nil, error: "AXError \(setErr.rawValue)")
         }
     }
     if !setOk {

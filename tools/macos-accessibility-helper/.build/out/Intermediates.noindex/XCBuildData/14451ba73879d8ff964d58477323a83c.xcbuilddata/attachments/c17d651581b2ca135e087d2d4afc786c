@@ -1,0 +1,19 @@
+{
+  "" : {
+    "diagnostics" : "/Users/jayanthpranaykonada/agent-bridge/tools/macos-accessibility-helper/.build/out/Intermediates.noindex/AgentBridgeAXHelper.build/Debug/bridge-ax-helper-p.build/Objects-normal/arm64/bridge-ax-helper-primary.dia",
+    "emit-module-dependencies" : "/Users/jayanthpranaykonada/agent-bridge/tools/macos-accessibility-helper/.build/out/Intermediates.noindex/AgentBridgeAXHelper.build/Debug/bridge-ax-helper-p.build/Objects-normal/arm64/bridge-ax-helper-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/jayanthpranaykonada/agent-bridge/tools/macos-accessibility-helper/.build/out/Intermediates.noindex/AgentBridgeAXHelper.build/Debug/bridge-ax-helper-p.build/Objects-normal/arm64/bridge-ax-helper-primary-emit-module.dia",
+    "pch" : "/Users/jayanthpranaykonada/agent-bridge/tools/macos-accessibility-helper/.build/out/Intermediates.noindex/AgentBridgeAXHelper.build/Debug/bridge-ax-helper-p.build/Objects-normal/arm64/bridge-ax-helper-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/jayanthpranaykonada/agent-bridge/tools/macos-accessibility-helper/.build/out/Intermediates.noindex/AgentBridgeAXHelper.build/Debug/bridge-ax-helper-p.build/Objects-normal/arm64/bridge-ax-helper-primary.swiftdeps"
+  },
+  "/Users/jayanthpranaykonada/agent-bridge/tools/macos-accessibility-helper/helper.swift" : {
+    "const-values" : "/Users/jayanthpranaykonada/agent-bridge/tools/macos-accessibility-helper/.build/out/Intermediates.noindex/AgentBridgeAXHelper.build/Debug/bridge-ax-helper-p.build/Objects-normal/arm64/helper.swiftconstvalues",
+    "dependencies" : "/Users/jayanthpranaykonada/agent-bridge/tools/macos-accessibility-helper/.build/out/Intermediates.noindex/AgentBridgeAXHelper.build/Debug/bridge-ax-helper-p.build/Objects-normal/arm64/helper.d",
+    "diagnostics" : "/Users/jayanthpranaykonada/agent-bridge/tools/macos-accessibility-helper/.build/out/Intermediates.noindex/AgentBridgeAXHelper.build/Debug/bridge-ax-helper-p.build/Objects-normal/arm64/helper.dia",
+    "index-unit-output-path" : "/AgentBridgeAXHelper.build/Debug/bridge-ax-helper-p.build/Objects-normal/arm64/helper.o",
+    "llvm-bc" : "/Users/jayanthpranaykonada/agent-bridge/tools/macos-accessibility-helper/.build/out/Intermediates.noindex/AgentBridgeAXHelper.build/Debug/bridge-ax-helper-p.build/Objects-normal/arm64/helper.bc",
+    "object" : "/Users/jayanthpranaykonada/agent-bridge/tools/macos-accessibility-helper/.build/out/Intermediates.noindex/AgentBridgeAXHelper.build/Debug/bridge-ax-helper-p.build/Objects-normal/arm64/helper.o",
+    "swift-dependencies" : "/Users/jayanthpranaykonada/agent-bridge/tools/macos-accessibility-helper/.build/out/Intermediates.noindex/AgentBridgeAXHelper.build/Debug/bridge-ax-helper-p.build/Objects-normal/arm64/helper.swiftdeps",
+    "swiftmodule" : "/Users/jayanthpranaykonada/agent-bridge/tools/macos-accessibility-helper/.build/out/Intermediates.noindex/AgentBridgeAXHelper.build/Debug/bridge-ax-helper-p.build/Objects-normal/arm64/helper~partial.swiftmodule"
+  }
+}

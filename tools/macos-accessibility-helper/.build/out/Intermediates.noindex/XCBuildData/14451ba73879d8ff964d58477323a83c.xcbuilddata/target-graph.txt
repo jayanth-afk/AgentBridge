@@ -1,0 +1,2 @@
+Target dependency graph (1 target)
+Target 'bridge-ax-helper-product' in project 'AgentBridgeAXHelper' (no dependencies)

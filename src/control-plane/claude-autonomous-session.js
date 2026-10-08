@@ -88,7 +88,7 @@ export class ClaudeAutonomousSession extends ModelExecutionAdapter {
   /**
    * Send a prompt to Claude through the best available transport
    */
-  async send({ text, requestId, conversationTitle = null, mcpAdapter = null }) {
+  async send({ text, requestId, conversationTitle = null, mcpAdapter = null, timeoutMs = null }) {
     const resolvedReqId = requestId || `req_claude_${Date.now()}`;
     const selected = await this.selectTransport(mcpAdapter);
     const transport = selected.transport;
@@ -108,11 +108,12 @@ export class ClaudeAutonomousSession extends ModelExecutionAdapter {
         if (this.swiftBridge.isBinaryAvailable()) {
           // One native invocation captures the AX baseline BEFORE Send, then
           // observes the same turn. This closes the send/observe race.
+          const turnTimeout = timeoutMs || this.options.timeoutMs || 90000;
           const turnRes = await this.swiftBridge.sendAndObserve(
             this.appName,
             text,
             resolvedReqId,
-            this.options.timeoutMs || 30000
+            turnTimeout
           );
           if (turnRes.ok) {
             this.emit('model_turn_started', { requestId: resolvedReqId, transport: 'accessibility' });
