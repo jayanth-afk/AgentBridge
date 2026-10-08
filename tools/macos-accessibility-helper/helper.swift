@@ -260,6 +260,40 @@ func inspectApp(name: String) -> InspectResponse {
         }
     }
 
+    if windowCount == 0 {
+        var mainWindowValue: AnyObject?
+        if AXUIElementCopyAttributeValue(axApp, kAXMainWindowAttribute as CFString, &mainWindowValue) == .success,
+           let mainWindow = mainWindowValue {
+            let win = mainWindow as! AXUIElement
+            var titleVal: AnyObject?
+            let titleStr: String
+            if AXUIElementCopyAttributeValue(win, kAXTitleAttribute as CFString, &titleVal) == .success,
+               let str = titleVal as? String {
+                titleStr = str
+            } else {
+                titleStr = "\(name) Window"
+            }
+            windowTitles.append(titleStr)
+
+            var minVal: AnyObject?
+            var isMin = false
+            if AXUIElementCopyAttributeValue(win, kAXMinimizedAttribute as CFString, &minVal) == .success,
+               let b = minVal as? Bool {
+                isMin = b
+            }
+
+            var mainVal: AnyObject?
+            var isMain = true
+            if AXUIElementCopyAttributeValue(win, kAXMainAttribute as CFString, &mainVal) == .success,
+               let b = mainVal as? Bool {
+                isMain = b
+            }
+
+            windowDetails.append(WindowInfo(title: titleStr, minimized: isMin, main: isMain))
+            windowCount = 1
+        }
+    }
+
     return InspectResponse(
         ok: true,
         app: name,
@@ -819,10 +853,389 @@ func observeResponseFromClaude(name: String, requestId: String?, timeoutMs: Int,
     )
 }
 
+// ============================================================
+// Dedicated autonomous send + observe for Google Gemini Desktop
+// (com.google.GeminiMacOS)
+// Targets the native composer AXTextArea ("What's next?"),
+// the submit button (identifier: "send_button", description: "Submit"),
+// and extracts the generated model response from the conversation rows.
+// ============================================================
+
+func findGeminiApp() -> NSRunningApplication? {
+    let apps = NSWorkspace.shared.runningApplications
+    return apps.first { app in
+        if let bundle = app.bundleIdentifier, bundle.lowercased().contains("geminimacos") || bundle.lowercased() == "com.google.geminimacos" {
+            return true
+        }
+        if let appName = app.localizedName, appName.caseInsensitiveCompare("Gemini") == .orderedSame {
+            return true
+        }
+        return false
+    }
+}
+
+func resolveGeminiWindow(_ app: NSRunningApplication) -> AXUIElement? {
+    let axApp = AXUIElementCreateApplication(app.processIdentifier)
+    _ = AXUIElementSetAttributeValue(axApp, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+    _ = AXUIElementSetAttributeValue(axApp, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+
+    var val: AnyObject?
+    if AXUIElementCopyAttributeValue(axApp, kAXMainWindowAttribute as CFString, &val) == .success, let w = val {
+        return (w as! AXUIElement)
+    }
+    if AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &val) == .success, let w = val {
+        return (w as! AXUIElement)
+    }
+    if AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &val) == .success,
+       let wins = val as? [AXUIElement], let w = wins.first {
+        return w
+    }
+    return nil
+}
+
+func findGeminiComposer(_ win: AXUIElement) -> AXUIElement? {
+    var found: AXUIElement? = nil
+    func walk(_ el: AXUIElement, _ depth: Int) {
+        if depth > 60 || found != nil { return }
+        var roleVal: AnyObject?
+        AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleVal)
+        if (roleVal as? String) == "AXTextArea" {
+            var descVal: AnyObject?
+            AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &descVal)
+            let desc = (descVal as? String ?? "").lowercased()
+            if desc.contains("what's next") || desc.contains("whats next") || desc.contains("gemini") || found == nil {
+                found = el
+                if desc.contains("what's next") || desc.contains("whats next") { return }
+            }
+        }
+        var childrenVal: AnyObject?
+        if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenVal) == .success,
+           let children = childrenVal as? [AXUIElement] {
+            for c in children {
+                walk(c, depth + 1)
+                if found != nil { return }
+            }
+        }
+    }
+    walk(win, 0)
+    return found
+}
+
+func findGeminiSendButton(_ win: AXUIElement) -> AXUIElement? {
+    var found: AXUIElement? = nil
+    func walk(_ el: AXUIElement, _ depth: Int) {
+        if depth > 60 || found != nil { return }
+        var roleVal: AnyObject?
+        AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleVal)
+        if (roleVal as? String) == "AXButton" {
+            var idVal: AnyObject?
+            AXUIElementCopyAttributeValue(el, "AXIdentifier" as CFString, &idVal)
+            let ident = (idVal as? String ?? "").lowercased()
+            var descVal: AnyObject?
+            AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &descVal)
+            let desc = (descVal as? String ?? "").lowercased()
+
+            if ident == "send_button" || desc == "submit" || desc == "send" || desc == "send message" {
+                var enVal: AnyObject?
+                if AXUIElementCopyAttributeValue(el, kAXEnabledAttribute as CFString, &enVal) == .success,
+                   let en = enVal as? Bool, en {
+                    found = el
+                    return
+                } else if enVal == nil {
+                    found = el
+                    return
+                }
+            }
+        }
+        var childrenVal: AnyObject?
+        if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenVal) == .success,
+           let children = childrenVal as? [AXUIElement] {
+            for c in children {
+                walk(c, depth + 1)
+                if found != nil { return }
+            }
+        }
+    }
+    walk(win, 0)
+    return found
+}
+
+func sendPromptToGemini(name: String = "Gemini", text: String, requestId: String?) -> SendTurnResponse {
+    guard let app = findGeminiApp() else {
+        return SendTurnResponse(ok: false, status: "APP_NOT_RUNNING", requestId: requestId, error: "Application Gemini is not running")
+    }
+
+    guard let win = resolveGeminiWindow(app) else {
+        return SendTurnResponse(ok: false, status: "NO_WINDOW", requestId: requestId, error: "No open window found for Gemini")
+    }
+
+    guard let composer = findGeminiComposer(win) else {
+        return SendTurnResponse(ok: false, status: "INPUT_NOT_FOUND", requestId: requestId, error: "Prompt textarea not found in Gemini")
+    }
+
+    let setErr = AXUIElementSetAttributeValue(composer, kAXValueAttribute as CFString, text as CFTypeRef)
+    guard setErr == .success else {
+        return SendTurnResponse(ok: false, status: "VALUE_SET_FAILED", requestId: requestId, error: "AXError \(setErr.rawValue)")
+    }
+
+    var sendBtn: AXUIElement? = nil
+    for _ in 1...20 {
+        usleep(100_000) // 100ms
+        if let btn = findGeminiSendButton(win) {
+            sendBtn = btn
+            break
+        }
+    }
+
+    guard let btn = sendBtn else {
+        return SendTurnResponse(ok: false, status: "SEND_BUTTON_NOT_FOUND", requestId: requestId, error: "Send button did not become available")
+    }
+
+    let pressErr = AXUIElementPerformAction(btn, kAXPressAction as CFString)
+    guard pressErr == .success else {
+        return SendTurnResponse(ok: false, status: "PRESS_FAILED", requestId: requestId, error: "AXError \(pressErr.rawValue)")
+    }
+
+    return SendTurnResponse(ok: true, status: "SUBMITTED", requestId: requestId, error: nil)
+}
+
+func findGeminiRows(_ win: AXUIElement) -> [AXUIElement] {
+    var rows: [AXUIElement] = []
+    func walk(_ el: AXUIElement, _ depth: Int) {
+        if depth > 40 { return }
+        var roleVal: AnyObject?
+        AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleVal)
+        if (roleVal as? String) == "AXRow" {
+            rows.append(el)
+        }
+        var childrenVal: AnyObject?
+        if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenVal) == .success,
+           let children = childrenVal as? [AXUIElement] {
+            for c in children { walk(c, depth + 1) }
+        }
+    }
+    walk(win, 0)
+    return rows
+}
+
+func extractTextFromGeminiRow(_ row: AXUIElement) -> (text: String, isComplete: Bool) {
+    var copyBtnText = ""
+    var hasCopyBtn = false
+    func findCopyBtn(_ el: AXUIElement) {
+        var roleVal: AnyObject?
+        AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleVal)
+        if (roleVal as? String) == "AXButton" {
+            var idVal: AnyObject?
+            AXUIElementCopyAttributeValue(el, "AXIdentifier" as CFString, &idVal)
+            if (idVal as? String) == "copy-button" {
+                hasCopyBtn = true
+                var dVal: AnyObject?
+                AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &dVal)
+                var vVal: AnyObject?
+                AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &vVal)
+                let d = (dVal as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let v = (vVal as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if d.count > 15 && d != "Copy response" { copyBtnText = d }
+                else if v.count > 15 && v != "Copy response" { copyBtnText = v }
+            }
+        }
+        var cv: AnyObject?
+        if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &cv) == .success,
+           let kids = cv as? [AXUIElement] {
+            for k in kids { findCopyBtn(k) }
+        }
+    }
+    findCopyBtn(row)
+    if !copyBtnText.isEmpty {
+        return (copyBtnText, true)
+    }
+
+    var pieces: [String] = []
+    let skipTokens: Set<String> = [
+        "expand_more", "search_activity", "build", "Agent Bridge",
+        "check_circle", "Complete", "Approved", "Show all, expand_more",
+        "Good response", "Bad response", "Copy response", "More actions",
+        "Gemini is AI and can make mistakes."
+    ]
+    func collect(_ el: AXUIElement) {
+        var roleVal: AnyObject?
+        AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleVal)
+        let role = (roleVal as? String) ?? ""
+        if role == "AXStaticText" || role == "AXHeading" || role == "AXTextArea" {
+            var valVal: AnyObject?
+            AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &valVal)
+            var descVal: AnyObject?
+            AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &descVal)
+            let v = (valVal as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let d = (descVal as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = !v.isEmpty ? v : d
+            if !text.isEmpty && !skipTokens.contains(text) && !pieces.contains(text) {
+                pieces.append(text)
+            }
+        }
+        var cv: AnyObject?
+        if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &cv) == .success,
+           let kids = cv as? [AXUIElement] {
+            for k in kids { collect(k) }
+        }
+    }
+    collect(row)
+    let joined = pieces.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    return (joined, hasCopyBtn)
+}
+
+func checkGeminiGenerating(_ win: AXUIElement) -> Bool {
+    var isGenerating = false
+    func walk(_ el: AXUIElement, _ depth: Int) {
+        if depth > 40 || isGenerating { return }
+        var roleVal: AnyObject?
+        AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleVal)
+        if (roleVal as? String) == "AXButton" {
+            var descVal: AnyObject?
+            AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &descVal)
+            let desc = ((descVal as? String) ?? "").lowercased()
+            var idVal: AnyObject?
+            AXUIElementCopyAttributeValue(el, "AXIdentifier" as CFString, &idVal)
+            let ident = ((idVal as? String) ?? "").lowercased()
+            if desc.contains("stop") || ident.contains("stop") || desc.contains("cancel") {
+                isGenerating = true
+                return
+            }
+        }
+        var cv: AnyObject?
+        if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &cv) == .success,
+           let kids = cv as? [AXUIElement] {
+            for k in kids { walk(k, depth + 1) }
+        }
+    }
+    walk(win, 0)
+    return isGenerating
+}
+
+func extractLatestGeminiResponse(_ win: AXUIElement, requestId: String?) -> (response: String?, isComplete: Bool) {
+    let rows = findGeminiRows(win)
+    guard !rows.isEmpty else { return (nil, false) }
+
+    if let requestId, !requestId.isEmpty {
+        let marker = "[AB:\(requestId)]"
+        for i in 0..<rows.count {
+            let rowText = extractTextFromGeminiRow(rows[i]).text
+            if rowText.contains(marker) {
+                if i + 1 < rows.count {
+                    let asstRow = rows[i + 1]
+                    let (asstText, isComplete) = extractTextFromGeminiRow(asstRow)
+                    if !asstText.isEmpty {
+                        return (asstText, isComplete)
+                    }
+                }
+                return (nil, false)
+            }
+        }
+        return (nil, false)
+    }
+
+    for i in (0..<rows.count).reversed() {
+        let (rowText, isComplete) = extractTextFromGeminiRow(rows[i])
+        if !rowText.isEmpty && !rowText.contains("Gemini is AI and can make mistakes") {
+            return (rowText, isComplete)
+        }
+    }
+    return (nil, false)
+}
+
+func observeResponseFromGemini(name: String = "Gemini", requestId: String?, timeoutMs: Int) -> ObserveTurnResponse {
+    guard let app = findGeminiApp() else {
+        return ObserveTurnResponse(ok: false, status: "APP_NOT_RUNNING", requestId: requestId, response: nil, latencyMs: nil, error: "Application Gemini is not running")
+    }
+
+    guard let win = resolveGeminiWindow(app) else {
+        return ObserveTurnResponse(ok: false, status: "NO_WINDOW", requestId: requestId, response: nil, latencyMs: nil, error: "No window found for Gemini")
+    }
+
+    let start = Date()
+    let maxDuration = Double(timeoutMs > 0 ? timeoutMs : 60000) / 1000.0
+
+    var sawGenerating = false
+    var lastResponse = ""
+    var stableRounds = 0
+
+    while Date().timeIntervalSince(start) < maxDuration {
+        usleep(300_000)
+
+        let generating = checkGeminiGenerating(win)
+        if generating {
+            sawGenerating = true
+            stableRounds = 0
+        }
+
+        let (extracted, isComplete) = extractLatestGeminiResponse(win, requestId: requestId)
+        if let response = extracted, !response.isEmpty {
+            if response == lastResponse {
+                stableRounds += 1
+            } else {
+                lastResponse = response
+                stableRounds = 0
+            }
+
+            if !generating && (isComplete || sawGenerating || stableRounds >= 2) {
+                let latency = Date().timeIntervalSince(start) * 1000.0
+                return ObserveTurnResponse(
+                    ok: true,
+                    status: "COMPLETED",
+                    requestId: requestId,
+                    response: response,
+                    latencyMs: latency,
+                    error: nil
+                )
+            }
+        }
+    }
+
+    let (finalExtracted, _) = extractLatestGeminiResponse(win, requestId: requestId)
+    if let response = finalExtracted, !response.isEmpty {
+        let latency = Date().timeIntervalSince(start) * 1000.0
+        return ObserveTurnResponse(
+            ok: true,
+            status: "COMPLETED_RECONCILED",
+            requestId: requestId,
+            response: response,
+            latencyMs: latency,
+            error: nil
+        )
+    }
+
+    return ObserveTurnResponse(
+        ok: false,
+        status: "TIMEOUT",
+        requestId: requestId,
+        response: nil,
+        latencyMs: Date().timeIntervalSince(start) * 1000.0,
+        error: "Timed out waiting for Gemini model response"
+    )
+}
+
+func sendAndObserveGemini(name: String = "Gemini", text: String, requestId: String?, timeoutMs: Int) -> ObserveTurnResponse {
+    let sent = sendPromptToGemini(name: name, text: text, requestId: requestId)
+    guard sent.ok else {
+        return ObserveTurnResponse(
+            ok: false,
+            status: sent.status,
+            requestId: requestId,
+            response: nil,
+            latencyMs: nil,
+            error: sent.error
+        )
+    }
+    return observeResponseFromGemini(
+        name: name,
+        requestId: requestId,
+        timeoutMs: timeoutMs
+    )
+}
 
 // ============================================================
 // Profile-aware autonomous send + observe for desktop LLM clients.
-// Claude keeps its proven dedicated path; ChatGPT uses the generic
+// Claude and Gemini use dedicated paths; ChatGPT uses the generic
 // path below (composer identified by role, "Send" button, marker-based
 // response correlation over the complete live AX tree).
 // ============================================================
@@ -840,7 +1253,10 @@ func axBool(_ el: AXUIElement, _ attr: String) -> Bool {
 }
 
 func profileFor(_ name: String) -> String {
-    return name.lowercased().contains("chatgpt") ? "chatgpt" : "claude"
+    let lower = name.lowercased()
+    if lower.contains("chatgpt") { return "chatgpt" }
+    if lower.contains("gemini") { return "gemini" }
+    return "claude"
 }
 
 // Resolve the target application and its first accessible window, activating
@@ -877,17 +1293,15 @@ func resolveWindow(_ name: String, activate: Bool) -> (NSRunningApplication?, AX
         if !activate && name.caseInsensitiveCompare("ChatGPT") == .orderedSame, let cached = cachedChatGPTWindow {
             return (app, cached)
         }
-        if !activate {
-            var mainValue: AnyObject?
-            if AXUIElementCopyAttributeValue(axApp, ("AX" + "MainWindow") as CFString, &mainValue) == .success {
-                let mainWindow = mainValue as! AXUIElement
-                return (app, mainWindow)
-            }
-            var focusedValue: AnyObject?
-            if AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &focusedValue) == .success {
-                let focusedWindow = focusedValue as! AXUIElement
-                return (app, focusedWindow)
-            }
+        var mainValue: AnyObject?
+        if AXUIElementCopyAttributeValue(axApp, kAXMainWindowAttribute as CFString, &mainValue) == .success,
+           let mainWindow = mainValue {
+            return (app, (mainWindow as! AXUIElement))
+        }
+        var focusedValue: AnyObject?
+        if AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &focusedValue) == .success,
+           let focusedWindow = focusedValue {
+            return (app, (focusedWindow as! AXUIElement))
         }
         usleep(250_000)
     }
@@ -1351,27 +1765,42 @@ func handleRequest(_ req: RequestOp) {
         }
     case "sendPrompt":
         let profile = profileFor(req.targetApp)
-        let resp = profile == "claude"
-            ? sendPromptToClaude(name: req.targetApp, text: req.payloadText, requestId: req.requestId)
-            : sendPromptGeneric(name: req.targetApp, text: req.payloadText, requestId: req.requestId, profile: profile, activate: req.activate ?? true)
+        let resp: SendTurnResponse
+        if profile == "claude" {
+            resp = sendPromptToClaude(name: req.targetApp, text: req.payloadText, requestId: req.requestId)
+        } else if profile == "gemini" {
+            resp = sendPromptToGemini(name: req.targetApp, text: req.payloadText, requestId: req.requestId)
+        } else {
+            resp = sendPromptGeneric(name: req.targetApp, text: req.payloadText, requestId: req.requestId, profile: profile, activate: req.activate ?? true)
+        }
         if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
             print(str)
         }
     case "observeResponse":
         let timeout = req.timeoutMs ?? 30000
         let profile = profileFor(req.targetApp)
-        let resp = profile == "claude"
-            ? observeResponseFromClaude(name: req.targetApp, requestId: req.requestId, timeoutMs: timeout)
-            : observeResponseGeneric(name: req.targetApp, requestId: req.requestId, profile: profile, timeoutMs: timeout)
+        let resp: ObserveTurnResponse
+        if profile == "claude" {
+            resp = observeResponseFromClaude(name: req.targetApp, requestId: req.requestId, timeoutMs: timeout)
+        } else if profile == "gemini" {
+            resp = observeResponseFromGemini(name: req.targetApp, requestId: req.requestId, timeoutMs: timeout)
+        } else {
+            resp = observeResponseGeneric(name: req.targetApp, requestId: req.requestId, profile: profile, timeoutMs: timeout)
+        }
         if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
             print(str)
         }
     case "sendAndObserve":
         let timeout = req.timeoutMs ?? 30000
         let profile = profileFor(req.targetApp)
-        let resp = profile == "claude"
-            ? sendAndObserveClaude(name: req.targetApp, text: req.payloadText, requestId: req.requestId, timeoutMs: timeout)
-            : sendAndObserveGeneric(name: req.targetApp, text: req.payloadText, requestId: req.requestId, profile: profile, timeoutMs: timeout, activate: req.activate ?? true)
+        let resp: ObserveTurnResponse
+        if profile == "claude" {
+            resp = sendAndObserveClaude(name: req.targetApp, text: req.payloadText, requestId: req.requestId, timeoutMs: timeout)
+        } else if profile == "gemini" {
+            resp = sendAndObserveGemini(name: req.targetApp, text: req.payloadText, requestId: req.requestId, timeoutMs: timeout)
+        } else {
+            resp = sendAndObserveGeneric(name: req.targetApp, text: req.payloadText, requestId: req.requestId, profile: profile, timeoutMs: timeout, activate: req.activate ?? true)
+        }
         if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
             print(str)
         }

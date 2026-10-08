@@ -14,6 +14,9 @@ export { DesktopAgentWorker, DesktopAgentWorkerStatus } from './desktop-agent-wo
 export { ClaudeDesktopSession } from './claude-desktop-session.js';
 export { ClaudeDesktopWorker, ClaudeWorkerStatus } from './claude-desktop-worker.js';
 export { ClaudeAutonomousSession } from './claude-autonomous-session.js';
+export { GeminiDesktopSession } from './gemini-desktop-session.js';
+export { GeminiDesktopWorker, GeminiWorkerStatus } from './gemini-desktop-worker.js';
+export { GeminiAutonomousSession } from './gemini-autonomous-session.js';
 export { ConversationRegistry } from './conversation-registry.js';
 export { ModelOrchestrator } from './model-orchestrator.js';
 export { PersistentDesktopSessionManager, SessionState, FocusPolicy } from './persistent-session-manager.js';

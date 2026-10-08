@@ -330,6 +330,7 @@ export class DesktopAgentWorker extends EventEmitter {
 
   async capabilities() {
     const sessionCaps = await this.session.capabilities();
+    const isReady = Boolean(sessionCaps.uiSubmissionSupported || sessionCaps.modelTurnConfirmation);
     return {
       agentId: this.agentId,
       autonomousExecution: true,
@@ -337,6 +338,9 @@ export class DesktopAgentWorker extends EventEmitter {
       idleWakeupSupported: true,
       requiresUserPrompt: false,
       eventDriven: true,
+      canReceiveTasks: isReady,
+      autonomousWorker: true,
+      realModelInvocation: isReady,
       transport: sessionCaps.transport,
       engine: sessionCaps.engine,
       session: sessionCaps
