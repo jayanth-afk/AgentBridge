@@ -376,13 +376,15 @@ export class MailboxHub {
    * Atomically updates task, resolves any correlated bridge_requests,
    * emits live response event on event bus, and delivers durable mailbox message.
    */
-  submitTaskResult({ taskId, agentId, status = 'completed', result = null, error = null }) {
+  submitTaskResult({ taskId, agentId, status = 'completed', result = null, error = null, attemptId = null, epoch = null }) {
     const updated = this.tasks.updateTaskStatus({
       taskId,
       agentId,
       status,
       result,
-      error
+      error,
+      attemptId,
+      epoch
     });
 
     const task = this.tasks.getTask(taskId, false);

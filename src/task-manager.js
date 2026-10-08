@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import EventEmitter from 'node:events';
+import { AttemptLedger } from './attempts/attempt-ledger.js';
 
 export const TASK_STATUSES = [
   'pending',
@@ -13,10 +14,11 @@ export const TASK_STATUSES = [
 ];
 
 export class TaskManager extends EventEmitter {
-  constructor(auditLogger) {
+  constructor(auditLogger, attemptLedger = null) {
     super();
     this.logger = auditLogger;
     this.db = auditLogger.db;
+    this.attempts = attemptLedger || (auditLogger ? new AttemptLedger(auditLogger) : null);
     this.initTables();
   }
 
@@ -178,6 +180,19 @@ export class TaskManager extends EventEmitter {
     });
 
     const claimedTask = this.getTask(row.id, false);
+    if (this.attempts) {
+      try {
+        const att = this.attempts.createAttempt({
+          taskId: row.id,
+          agentId,
+          routeId: 'claimed_task'
+        });
+        this.attempts.acquireAttempt(att.attemptId, agentId);
+        claimedTask.attemptId = att.attemptId;
+        claimedTask.epoch = att.epoch;
+        claimedTask.nonce = att.nonce;
+      } catch {}
+    }
     this.emit('taskClaimed', claimedTask);
     return claimedTask;
   }
@@ -236,7 +251,11 @@ export class TaskManager extends EventEmitter {
     return recovered;
   }
 
-  touchTask({ taskId, agentId }) {
+  touchTask({ taskId, agentId, attemptId = null, epoch = null }) {
+    if (attemptId && epoch && this.attempts) {
+      this.attempts.touchAttempt(attemptId, epoch, agentId);
+    }
+
     const now = new Date().toISOString();
     const result = this.db.prepare(`
       UPDATE tasks
@@ -282,7 +301,7 @@ export class TaskManager extends EventEmitter {
     }
   }
 
-  updateTaskStatus({ taskId, agentId, status, result = null, error = null }) {
+  updateTaskStatus({ taskId, agentId, status, result = null, error = null, attemptId = null, epoch = null }) {
     if (!TASK_STATUSES.includes(status)) {
       throw new Error(`Invalid status '${status}'. Must be one of: ${TASK_STATUSES.join(', ')}`);
     }
@@ -291,6 +310,11 @@ export class TaskManager extends EventEmitter {
     const task = this.db.prepare(`SELECT * FROM tasks WHERE id = ?`).get(taskId);
     if (!task) {
       throw new Error(`Task '${taskId}' not found.`);
+    }
+
+    // Fencing invariant: validate attempt if attemptId and epoch provided
+    if (attemptId && epoch && this.attempts) {
+      this.attempts.validateFencing({ taskId, attemptId, epoch, agentId });
     }
 
     // Authorization: only the assignee (owner) or the creator may move a task
@@ -324,6 +348,27 @@ export class TaskManager extends EventEmitter {
     `);
 
     stmt.run(status, serializedResult, error, now, startedAt, completedAt, taskId);
+
+    if (this.attempts) {
+      try {
+        if (attemptId && epoch) {
+          if (status === 'completed') {
+            this.attempts.completeAttempt({ attemptId, epoch, result: serializedResult });
+          } else if (['failed', 'cancelled'].includes(status)) {
+            this.attempts.failAttempt({ attemptId, epoch, error: error || status });
+          }
+        } else {
+          const activeAtt = this.attempts.getActiveAttemptForTask(taskId);
+          if (activeAtt) {
+            if (status === 'completed') {
+              this.attempts.completeAttempt({ attemptId: activeAtt.attemptId, epoch: activeAtt.epoch, result: serializedResult });
+            } else if (['failed', 'cancelled'].includes(status)) {
+              this.attempts.failAttempt({ attemptId: activeAtt.attemptId, epoch: activeAtt.epoch, error: error || status });
+            }
+          }
+        }
+      } catch {}
+    }
 
     this.logger.log({
       agentId,

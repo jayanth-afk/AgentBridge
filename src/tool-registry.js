@@ -756,7 +756,9 @@ export class ToolRegistry {
           agentId: { type: 'string' },
           status: { type: 'string', enum: ['completed', 'failed', 'in_progress'] },
           result: { type: 'string' },
-          error: { type: 'string' }
+          error: { type: 'string' },
+          attemptId: { type: 'string', description: 'Attempt ID for monotonic fencing' },
+          epoch: { type: 'number', description: 'Attempt epoch token' }
         },
         required: ['taskId', 'agentId', 'status']
       },
