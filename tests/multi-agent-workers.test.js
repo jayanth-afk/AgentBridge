@@ -80,6 +80,8 @@ test('Agent Bridge v2 — Autonomous Multi-Agent Communication & Worker Fabric',
     const pendingTask = taskManager.getTask(timeoutRes.taskId, false);
     assert.ok(pendingTask);
     assert.strictEqual(pendingTask.status, 'pending', 'Timed-out request task must remain durably pending');
+    const pendingRequest = mailbox.getRequest(timeoutRes.requestId);
+    assert.equal(pendingRequest.status, 'pending', 'Caller timeout must not overwrite the durable request state');
 
     // Stage 2: Autonomous Worker comes online
     const antigravityRunner = new AgentRunner({

@@ -127,9 +127,10 @@ test('Agent Bridge v2 — End-to-End Adversarial Integration & Invariants Suite'
     const outcome = await askPromise;
     assert.equal(outcome.mode, 'request_timeout');
 
-    // Verify request is marked timeout in DB
+    // A caller deadline is not a durable request state: the crashed worker may
+    // recover later and deliver the correlated result.
     const req = mailbox.getRequest(outcome.requestId);
-    assert.equal(req.status, 'timeout');
+    assert.equal(req.status, 'pending');
   });
 
   // --------------------------------------------------------------------------

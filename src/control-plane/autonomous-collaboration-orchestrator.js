@@ -44,7 +44,12 @@ export class AutonomousCollaborationOrchestrator extends EventEmitter {
     this.defaultMaxHops = options.maxHops || 12;
     this.defaultMaxTurnsPerAgent = options.maxTurnsPerAgent || 6;
     this.defaultTimeoutMs = options.timeoutMs || 180000;
-    this.invisibilityMonitor = options.invisibilityMonitor || new DesktopInvisibilityMonitor(options);
+    // `null` is an intentional test/embedded-mode opt-out. `||` previously
+    // recreated a live monitor in that case, making pure state tests depend on
+    // the user's desktop focus.
+    this.invisibilityMonitor = Object.hasOwn(options, 'invisibilityMonitor')
+      ? options.invisibilityMonitor
+      : new DesktopInvisibilityMonitor(options);
     this.activeCollaborations = new Map();
   }
 
@@ -53,7 +58,7 @@ export class AutonomousCollaborationOrchestrator extends EventEmitter {
    */
   createCollaboration({
     objective,
-    authorizedAgents = ['chatgpt', 'gemini', 'claude', 'antigravity'],
+    authorizedAgents = ['chatgpt', 'gemini', 'claude'],
     initiator = 'chatgpt',
     title = null,
     maxHops = null,
@@ -297,7 +302,15 @@ Provide your authentic technical response for this turn. Do NOT include boilerpl
     }
 
     const responseText = String(modelResult.response).trim();
-    if (responseText === 'EXECUTED_BY_AGENT' || responseText.length === 0) {
+    // AgentRunner-style acknowledgement envelopes are transport receipts, not
+    // model answers. Reject both the bare marker and its historical JSON
+    // envelope so a collaboration cannot claim an invisible model turn that
+    // never occurred.
+    let syntheticEnvelope = false;
+    try {
+      syntheticEnvelope = JSON.parse(responseText)?.status === 'EXECUTED_BY_AGENT';
+    } catch {}
+    if (responseText === 'EXECUTED_BY_AGENT' || syntheticEnvelope || responseText.length === 0) {
       session.status = CollaborationStatus.FAILED;
       session.updatedAt = new Date().toISOString();
       const errorMsg = 'NON_MODEL_RESPONSE_REJECTED: Received synthetic or empty response';
@@ -370,7 +383,7 @@ Provide your authentic technical response for this turn. Do NOT include boilerpl
     objective,
     steps,
     initiator = 'chatgpt',
-    authorizedAgents = ['chatgpt', 'gemini', 'claude', 'antigravity'],
+    authorizedAgents = ['chatgpt', 'gemini', 'claude'],
     timeoutMs = null
   }) {
     const session = this.createCollaboration({

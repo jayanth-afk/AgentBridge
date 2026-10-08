@@ -617,7 +617,13 @@ func sendPromptToClaude(name: String, text: String, requestId: String?) -> SendT
         let composerCleared = curVal.isEmpty || curVal == "\n" || !curVal.contains(marker)
         let generating = checkGenerating(curWin)
 
-        if pressedSend && (composerCleared || generating) {
+        // Claude versions differ here: some clear the composer immediately,
+        // while others leave its AX value intact until the next layout pass.
+        // A previously enabled Send control becoming unavailable is the other
+        // reliable UI acknowledgement of a successful press. Completion is
+        // still gated by the separate correlated-response observer below.
+        let sendAvailable = findSendBtn(curWin) != nil
+        if pressedSend && (composerCleared || generating || !sendAvailable) {
             submitted = true
             break
         }
@@ -861,6 +867,15 @@ func observeResponseFromClaude(name: String, requestId: String?, timeoutMs: Int,
     var sawGenerating = false
     var lastCorrelatedResponse = ""
     var stableResponseRounds = 0
+    var sawTruncatedResponse = false
+
+    // Electron sometimes exposes only the visually clipped accessibility
+    // value, conventionally ending in an ellipsis. Treat that as incomplete:
+    // returning it as a completed model answer silently loses data.
+    func appearsTruncated(_ response: String) -> Bool {
+        let trimmed = response.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.hasSuffix("…") || trimmed.hasSuffix("...")
+    }
 
     func dismissModalsIfAny(_ el: AXUIElement) {
         var dVal: AnyObject?
@@ -901,6 +916,11 @@ func observeResponseFromClaude(name: String, requestId: String?, timeoutMs: Int,
         let rawSnapshot = snapshot.joined(separator: "\n")
         if let extracted = extractLatestClaudeResponse(rawSnapshot, requestId: requestId),
            !extracted.isEmpty {
+            if appearsTruncated(extracted) {
+                sawTruncatedResponse = true
+                stableResponseRounds = 0
+                continue
+            }
             if extracted == lastCorrelatedResponse {
                 stableResponseRounds += 1
             } else {
@@ -934,6 +954,16 @@ func observeResponseFromClaude(name: String, requestId: String?, timeoutMs: Int,
 
     if let extracted = extractLatestClaudeResponse(finalRaw, requestId: requestId),
        !extracted.isEmpty {
+        if appearsTruncated(extracted) || sawTruncatedResponse {
+            return ObserveTurnResponse(
+                ok: false,
+                status: "RESPONSE_TRUNCATED",
+                requestId: requestId,
+                response: nil,
+                latencyMs: Date().timeIntervalSince(start) * 1000.0,
+                error: "Claude exposed a visually truncated accessibility response; no complete response was delivered"
+            )
+        }
         let latency = Date().timeIntervalSince(start) * 1000.0
         return ObserveTurnResponse(
             ok: true,

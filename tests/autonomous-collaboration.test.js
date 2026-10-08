@@ -30,7 +30,11 @@ test('Autonomous Collaboration Orchestrator Safety & State Unit Suite', async (t
   const orchestrator = new AutonomousCollaborationOrchestrator({
     modelOrchestrator: mockMo,
     maxHops: 5,
-    maxTurnsPerAgent: 3
+    maxTurnsPerAgent: 3,
+    // This suite verifies orchestration state with a mock model route. Focus
+    // sampling has its own dedicated suite and otherwise makes these unit
+    // assertions depend on the user's live desktop state.
+    invisibilityMonitor: null
   });
 
   await t.test('1. Session creation and identity authorization boundary', () => {
@@ -192,5 +196,30 @@ test('Autonomous Collaboration Orchestrator Safety & State Unit Suite', async (t
 
     assert.equal(res.success, false);
     assert.equal(res.status, 'SYNTHETIC_RESPONSE_REJECTED');
+  });
+
+  await t.test('7. Rejects the historical AgentRunner acknowledgement envelope', async () => {
+    const orchestrator = new AutonomousCollaborationOrchestrator({
+      modelOrchestrator: {
+        delegateModelTask: async () => ({
+          success: true,
+          response: JSON.stringify({ status: 'EXECUTED_BY_AGENT', agent: 'antigravity-ide' }),
+          transport: 'synthetic-test'
+        })
+      },
+      invisibilityMonitor: null
+    });
+    const session = orchestrator.createCollaboration({
+      objective: 'reject acknowledgement envelope',
+      authorizedAgents: ['chatgpt', 'gemini']
+    });
+    const result = await orchestrator.executeTurn({
+      collaborationId: session.id,
+      fromAgent: 'chatgpt',
+      toAgent: 'gemini',
+      instruction: 'test acknowledgement rejection'
+    });
+    assert.equal(result.success, false);
+    assert.equal(result.status, 'SYNTHETIC_RESPONSE_REJECTED');
   });
 });

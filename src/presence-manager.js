@@ -385,7 +385,10 @@ export class PresenceManager {
         mcpConnected: isMcpLive,
         currentTaskId: workerRow?.current_task_id || mcpRow?.current_task_id || null,
         capabilities: caps,
-        health: primary?.health || 'healthy',
+        // Do not report the last stored health value as current health when
+        // the heartbeat has expired. A running PID alone does not prove that
+        // the worker can receive EventBus work.
+        health: anyLive ? (primary?.health || 'healthy') : (primary ? 'stale' : 'offline'),
         lastHeartbeat: latestHeartbeat
       });
     }

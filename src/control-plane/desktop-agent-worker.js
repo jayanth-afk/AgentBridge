@@ -41,7 +41,8 @@ export class DesktopAgentWorker extends EventEmitter {
     presenceManager = null,
     session = null,
     logger = null,
-    leaseRefreshMs = 5000
+    leaseRefreshMs = 5000,
+    allowSyntheticHandlers = false
   } = {}) {
     super();
     if (!agentId) throw new Error('DesktopAgentWorker requires an agentId');
@@ -61,6 +62,9 @@ export class DesktopAgentWorker extends EventEmitter {
     this.delivered = new Set();
     this.stats = { received: 0, delivered: 0, failed: 0, duplicatesSuppressed: 0 };
     this.customHandlers = new Map();
+    // Production desktop workers must always reach the real model session.
+    // This escape hatch is retained solely for isolated unit fixtures.
+    this.allowSyntheticHandlers = allowSyntheticHandlers === true;
     // Serial model-turn chain. A desktop app has a single composer, so
     // concurrent turns would corrupt each other's correlation. All deliveries
     // run one-at-a-time through this chain.
@@ -232,8 +236,9 @@ export class DesktopAgentWorker extends EventEmitter {
         return { handled: true, ...payload };
       }
 
-      // 1. Check custom handlers for domain tasks / multi-agent reasoning
-      if (this.customHandlers) {
+      // Test-only handlers may model a peer, but must never silently replace a
+      // real desktop model turn in a running worker.
+      if (this.allowSyntheticHandlers && this.customHandlers) {
         for (const [name, handler] of this.customHandlers.entries()) {
           if ((request.question || '').toLowerCase().includes(name.toLowerCase())) {
             const result = await handler(request);
@@ -245,23 +250,6 @@ export class DesktopAgentWorker extends EventEmitter {
             this.emit('delivered', payload);
             return { handled: true, ...payload };
           }
-        }
-      }
-
-      // Exact-reply deterministic communication test probe
-      let exactMatch = (request.question || '').match(/reply with exactly\s+["']([^"']+)["']/i);
-      if (!exactMatch) {
-        exactMatch = (request.question || '').match(/reply with exactly\s+(.+?)(?:\s+if\b|[.\r\n]|$)/i);
-      }
-      if (exactMatch) {
-        let token = exactMatch[1].trim().replace(/[\.\,\;\!\?]+$/, '').trim();
-        if (token) {
-          this._settle(request, { status: 'completed', result: token });
-          this.delivered.add(requestId);
-          this.stats.delivered++;
-          const payload = { requestId, response: token, latencyMs: Date.now() - t0, status: 'COMPLETED_DETERMINISTIC_PROBE' };
-          this.emit('delivered', payload);
-          return { handled: true, ...payload };
         }
       }
 

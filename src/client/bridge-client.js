@@ -62,7 +62,8 @@ export class AgentBridgeClient {
   }
 
   /** Correlated Query (Ask) */
-  async askAgent({ toAgent, question, context = null, timeoutMs = 30000, asyncMode = false }) {
+  // Native desktop model turns may take >30s; callers can still override this.
+  async askAgent({ toAgent, question, context = null, timeoutMs = 90000, asyncMode = false }) {
     return this.executeTool('bridge_ask_agent', {
       fromAgent: this.agentId,
       toAgent,

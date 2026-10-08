@@ -229,7 +229,10 @@ export class MailboxHub {
     context = null,
     conversationId = null,
     requestId = null,
-    timeoutMs = 30000,
+    // Desktop model turns can legitimately take longer than 30s. Keep the waiter
+    // attached long enough to capture the real correlated response while still
+    // allowing callers to override the timeout explicitly.
+    timeoutMs = 90000,
     asyncMode = false
   }) {
     const timestamp = new Date().toISOString();
@@ -405,12 +408,11 @@ export class MailboxHub {
         timestamp: outcome.completedAt || new Date().toISOString()
       };
     } else if (outcome.status === 'timeout') {
-      // Mark request as timed out in DB
-      try {
-        this.db.prepare(`
-          UPDATE bridge_requests SET status = 'timeout', updated_at = ? WHERE request_id = ?
-        `).run(new Date().toISOString(), reqId);
-      } catch {}
+      // A caller's wait deadline is not the task's execution deadline.  In
+      // particular, native desktop turns may keep generating after this
+      // waiter returns.  Do not overwrite the durable request state here:
+      // doing so made a still-deliverable request look terminal to readers
+      // and obscured its eventual correlated result.
 
       return {
         mode: 'request_timeout',
