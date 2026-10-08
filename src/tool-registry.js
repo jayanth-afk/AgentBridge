@@ -27,7 +27,20 @@ export class ToolRegistry {
   }
 
   async executeTool(name, rawArgs = {}, context = {}) {
-    const tool = this.tools.get(name);
+    let tool = this.tools.get(name);
+    if (!tool && name === 'bridge_explain_request') {
+      tool = {
+        name: 'bridge_explain_request',
+        handler: async (args, ctx) => {
+          if (ctx.requestExplainer) {
+            return ctx.requestExplainer.explainRequest(args.requestId);
+          }
+          const { RequestExplainer } = await import('./diagnostics/request-explainer.js');
+          const explainer = new RequestExplainer(ctx.db || ctx.audit?.db);
+          return explainer.explainRequest(args.requestId);
+        }
+      };
+    }
     if (!tool) {
       throw new Error(`Unknown tool: '${name}'`);
     }
@@ -137,14 +150,23 @@ export class ToolRegistry {
 
     this.registerTool({
       name: 'bridge_diagnostics',
-      description: 'Get compact performance metrics, tool latencies, cache statistics, or per-agent observability.',
+      description: 'Get compact performance metrics, tool latencies, cache statistics, per-agent observability, or request causal lifecycle traces.',
       inputSchema: {
         type: 'object',
         properties: {
-          agentId: { type: 'string', description: 'Optional agent ID to retrieve specific agent state, cursor, and pending metrics' }
+          agentId: { type: 'string', description: 'Optional agent ID to retrieve specific agent state, cursor, and pending metrics' },
+          requestId: { type: 'string', description: 'Optional request ID to explain the causal request lifecycle trace' }
         }
       },
       handler: async (args, ctx) => {
+        if (args.requestId) {
+          if (ctx.requestExplainer) {
+            return ctx.requestExplainer.explainRequest(args.requestId);
+          }
+          const { RequestExplainer } = await import('./diagnostics/request-explainer.js');
+          const explainer = new RequestExplainer(ctx.db || ctx.audit?.db);
+          return explainer.explainRequest(args.requestId);
+        }
         if (args.agentId && ctx.diagnostics) {
           return ctx.diagnostics.getAgentDiagnostics(args.agentId, {
             db: ctx.db || ctx.audit?.db,
@@ -796,24 +818,6 @@ export class ToolRegistry {
         required: ['requestId']
       },
       handler: async (args, ctx) => ctx.mailbox.getRequest(args.requestId)
-    });
-
-    this.registerTool({
-      name: 'bridge_explain_request',
-      description: 'Explain the complete evidence-backed lifecycle and causal trace for a request.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          requestId: { type: 'string', description: 'Request ID to explain' }
-        },
-        required: ['requestId']
-      },
-      handler: async (args, ctx) => {
-        if (ctx.requestExplainer) {
-          return ctx.requestExplainer.explainRequest(args.requestId);
-        }
-        return { error: 'RequestExplainer not available in context' };
-      }
     });
 
     this.registerTool({
