@@ -99,85 +99,93 @@ export class AttemptLedger {
 
     // 1. Transactional epoch advancement and fencing of prior attempts
     const attemptId = `att_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-    const nonce = crypto.randomBytes(16).toString('hex');
+    const nonce = `ABN-${crypto.randomBytes(8).toString('hex')}`;
 
-    // Retrieve or initialize task_epochs
-    const epochRow = this.db.prepare(`
-      SELECT current_epoch, active_attempt_id FROM task_epochs WHERE task_id = ?
-    `).get(taskId);
+    this.db.exec('BEGIN IMMEDIATE;');
+    try {
+      // Retrieve or initialize task_epochs
+      const epochRow = this.db.prepare(`
+        SELECT current_epoch, active_attempt_id FROM task_epochs WHERE task_id = ?
+      `).get(taskId);
 
-    const nextEpoch = (epochRow ? epochRow.current_epoch : 0) + 1;
+      const nextEpoch = (epochRow ? epochRow.current_epoch : 0) + 1;
 
-    // Fence prior active attempts for this task
-    if (epochRow?.active_attempt_id) {
+      // Fence prior active attempts for this task
+      if (epochRow?.active_attempt_id) {
+        this.db.prepare(`
+          UPDATE bridge_attempts
+          SET state = 'fenced',
+              completed_at = ?,
+              error = 'Fenced by newer attempt epoch ' || ?
+          WHERE task_id = ? AND state IN ('created', 'acquired', 'active')
+        `).run(now, nextEpoch, taskId);
+
+        this.logger?.log({
+          agentId: 'system',
+          action: 'fence_attempt',
+          status: 'fenced',
+          details: { taskId, priorAttemptId: epochRow.active_attempt_id, supersededByEpoch: nextEpoch }
+        });
+      }
+
+      // Determine attempt_number
+      const countRow = this.db.prepare(`
+        SELECT COUNT(*) as cnt FROM bridge_attempts WHERE task_id = ?
+      `).get(taskId);
+      const attemptNumber = (countRow?.cnt || 0) + 1;
+
+      // Lease expiration calculation
+      const expiresAt = new Date(Date.now() + leaseTimeoutMs).toISOString();
+      const grantStr = typeof grant === 'object' ? JSON.stringify(grant) : String(grant);
+
+      // Insert new attempt
       this.db.prepare(`
-        UPDATE bridge_attempts
-        SET state = 'fenced',
-            completed_at = ?,
-            error = 'Fenced by newer attempt epoch ' || ?
-        WHERE task_id = ? AND state IN ('created', 'acquired', 'active')
-      `).run(now, nextEpoch, taskId);
+        INSERT INTO bridge_attempts (
+          attempt_id, request_id, task_id, attempt_number, agent_id, route_id,
+          epoch, nonce, grant, worktree_path, state, lease_timeout_ms,
+          lease_expires_at, created_at, started_at, heartbeat_at, completed_at,
+          result, error, correlation_info
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL)
+      `).run(
+        attemptId,
+        resolvedReqId,
+        taskId,
+        attemptNumber,
+        agentId,
+        routeId,
+        nextEpoch,
+        nonce,
+        grantStr,
+        worktreePath,
+        leaseTimeoutMs,
+        expiresAt,
+        now
+      );
+
+      // Update task_epochs
+      this.db.prepare(`
+        INSERT INTO task_epochs (task_id, current_epoch, active_attempt_id, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(task_id) DO UPDATE SET
+          current_epoch = excluded.current_epoch,
+          active_attempt_id = excluded.active_attempt_id,
+          updated_at = excluded.updated_at
+      `).run(taskId, nextEpoch, attemptId, now);
+
+      this.db.exec('COMMIT;');
 
       this.logger?.log({
-        agentId: 'system',
-        action: 'fence_attempt',
-        status: 'fenced',
-        details: { taskId, priorAttemptId: epochRow.active_attempt_id, supersededByEpoch: nextEpoch }
+        agentId,
+        action: 'create_attempt',
+        status: 'created',
+        details: { attemptId, taskId, requestId: resolvedReqId, epoch: nextEpoch, attemptNumber }
       });
+
+      return this.getAttempt(attemptId);
+    } catch (err) {
+      try { this.db.exec('ROLLBACK;'); } catch {}
+      throw err;
     }
-
-    // Determine attempt_number
-    const countRow = this.db.prepare(`
-      SELECT COUNT(*) as cnt FROM bridge_attempts WHERE task_id = ?
-    `).get(taskId);
-    const attemptNumber = (countRow?.cnt || 0) + 1;
-
-    // Lease expiration calculation
-    const expiresAt = new Date(Date.now() + leaseTimeoutMs).toISOString();
-    const grantStr = typeof grant === 'object' ? JSON.stringify(grant) : String(grant);
-
-    // Insert new attempt
-    this.db.prepare(`
-      INSERT INTO bridge_attempts (
-        attempt_id, request_id, task_id, attempt_number, agent_id, route_id,
-        epoch, nonce, grant, worktree_path, state, lease_timeout_ms,
-        lease_expires_at, created_at, started_at, heartbeat_at, completed_at,
-        result, error, correlation_info
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL)
-    `).run(
-      attemptId,
-      resolvedReqId,
-      taskId,
-      attemptNumber,
-      agentId,
-      routeId,
-      nextEpoch,
-      nonce,
-      grantStr,
-      worktreePath,
-      leaseTimeoutMs,
-      expiresAt,
-      now
-    );
-
-    // Update task_epochs
-    this.db.prepare(`
-      INSERT INTO task_epochs (task_id, current_epoch, active_attempt_id, updated_at)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(task_id) DO UPDATE SET
-        current_epoch = excluded.current_epoch,
-        active_attempt_id = excluded.active_attempt_id,
-        updated_at = excluded.updated_at
-    `).run(taskId, nextEpoch, attemptId, now);
-
-    this.logger?.log({
-      agentId,
-      action: 'create_attempt',
-      status: 'created',
-      details: { attemptId, taskId, requestId: resolvedReqId, epoch: nextEpoch, attemptNumber }
-    });
-
-    return this.getAttempt(attemptId);
   }
 
   /**

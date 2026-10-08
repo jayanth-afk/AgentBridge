@@ -112,7 +112,7 @@ export class EffectsLedger {
       effectId,
       resolvedKey,
       attemptId,
-      taskId,
+      taskId || null,
       epoch,
       agentId,
       operation,
@@ -145,7 +145,9 @@ export class EffectsLedger {
     `).run(now, effectId);
   }
 
-  commitEffect(effectId, result = null) {
+  commitEffect(effectIdOrObj, resultArg = null) {
+    const effectId = (typeof effectIdOrObj === 'object' && effectIdOrObj !== null) ? effectIdOrObj.effectId : effectIdOrObj;
+    const result = (typeof effectIdOrObj === 'object' && effectIdOrObj !== null) ? (effectIdOrObj.result ?? resultArg) : resultArg;
     const now = new Date().toISOString();
     const resStr = typeof result === 'object' && result !== null ? JSON.stringify(result) : result;
     this.db.prepare(`
@@ -157,7 +159,9 @@ export class EffectsLedger {
     return { effectId, state: EffectState.COMMITTED, result };
   }
 
-  failEffect(effectId, error = null) {
+  failEffect(effectIdOrObj, errorArg = null) {
+    const effectId = (typeof effectIdOrObj === 'object' && effectIdOrObj !== null) ? effectIdOrObj.effectId : effectIdOrObj;
+    const error = (typeof effectIdOrObj === 'object' && effectIdOrObj !== null) ? (effectIdOrObj.error ?? errorArg) : errorArg;
     const now = new Date().toISOString();
     const errStr = error instanceof Error ? error.message : String(error || 'Failed');
     this.db.prepare(`

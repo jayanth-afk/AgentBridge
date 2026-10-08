@@ -312,7 +312,10 @@ export class TaskManager extends EventEmitter {
       throw new Error(`Task '${taskId}' not found.`);
     }
 
-    // Fencing invariant: validate attempt if attemptId and epoch provided
+    // Fencing invariant: validate attempt if attemptId or epoch provided
+    if (attemptId && (epoch === null || epoch === undefined)) {
+      throw new Error(`Fencing Error: epoch token is required when attemptId is provided for task '${taskId}'.`);
+    }
     if (attemptId && epoch && this.attempts) {
       this.attempts.validateFencing({ taskId, attemptId, epoch, agentId });
     }
@@ -350,24 +353,24 @@ export class TaskManager extends EventEmitter {
     stmt.run(status, serializedResult, error, now, startedAt, completedAt, taskId);
 
     if (this.attempts) {
-      try {
-        if (attemptId && epoch) {
-          if (status === 'completed') {
-            this.attempts.completeAttempt({ attemptId, epoch, result: serializedResult });
-          } else if (['failed', 'cancelled'].includes(status)) {
-            this.attempts.failAttempt({ attemptId, epoch, error: error || status });
-          }
-        } else {
-          const activeAtt = this.attempts.getActiveAttemptForTask(taskId);
-          if (activeAtt) {
+      if (attemptId && epoch) {
+        if (status === 'completed') {
+          this.attempts.completeAttempt({ attemptId, epoch, result: serializedResult });
+        } else if (['failed', 'cancelled'].includes(status)) {
+          this.attempts.failAttempt({ attemptId, epoch, error: error || status });
+        }
+      } else {
+        const activeAtt = this.attempts.getActiveAttemptForTask(taskId);
+        if (activeAtt) {
+          try {
             if (status === 'completed') {
               this.attempts.completeAttempt({ attemptId: activeAtt.attemptId, epoch: activeAtt.epoch, result: serializedResult });
             } else if (['failed', 'cancelled'].includes(status)) {
               this.attempts.failAttempt({ attemptId: activeAtt.attemptId, epoch: activeAtt.epoch, error: error || status });
             }
-          }
+          } catch {}
         }
-      } catch {}
+      }
     }
 
     this.logger.log({
