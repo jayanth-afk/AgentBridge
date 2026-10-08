@@ -37,7 +37,7 @@ export class SwiftAXBridge {
       return { ok: false, error: 'SWIFT_BINARY_NOT_FOUND' };
     }
 
-    const timeoutMs = (opObj.timeoutMs || 4000) + 2000;
+    const timeoutMs = (opObj.timeoutMs || 60000) + 30000;
     try {
       const { stdout } = await execFileAsync(this.binaryPath, [JSON.stringify(opObj)], { timeout: timeoutMs });
       return JSON.parse(stdout.trim());
@@ -75,7 +75,7 @@ export class SwiftAXBridge {
     return this.executeOp({ op: 'observeResponse', app: appName, requestId, timeoutMs });
   }
 
-  async sendAndObserve(appName, text, requestId, timeoutMs = 30000, { activate = true } = {}) {
+  async sendAndObserve(appName, text, requestId, timeoutMs = 30000, { activate = false } = {}) {
     return this.executeOp({
       op: 'sendAndObserve',
       app: appName,

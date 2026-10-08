@@ -25,3 +25,4 @@ export { PersistentDesktopLauncher } from './persistent-desktop-launcher.js';
 export { ResponseCorrelator } from './response-correlator.js';
 export { RequestEnvelope, PriorityScheduler, RequestState, PriorityLevel } from '../protocol/envelope.js';
 export { AutonomousCollaborationOrchestrator, CollaborationStatus } from './autonomous-collaboration-orchestrator.js';
+export { DesktopInvisibilityMonitor } from './desktop-invisibility-monitor.js';

@@ -18,7 +18,7 @@ export class ClaudeAutonomousSession extends ModelExecutionAdapter {
   constructor(options = {}) {
     super('claude-autonomous-session', options);
     this.swiftBridge = options.swiftBridge || new SwiftAXBridge(options);
-    this.axEngine = options.axEngine || new AXEngine({ ...options, swiftBridge: this.swiftBridge });
+    this.axEngine = options.axEngine || new AXEngine({ ...options, allowHiddenWindowActivation: false, swiftBridge: this.swiftBridge });
     this.observer = options.observer || new ResponseObserver(options);
     this.cdpAdapter = options.cdpAdapter || new CdpDesktopAdapter(options.cdp || {});
     this.browserAdapter = options.browserAdapter || new BrowserSessionAdapter(options.browser || {});
@@ -96,8 +96,6 @@ export class ClaudeAutonomousSession extends ModelExecutionAdapter {
     const startMs = Date.now();
     this.emit('turn_started', { requestId: resolvedReqId, transport });
 
-    const previousFocus = await this.sessionManager.captureUserFocus();
-
     try {
       let result;
       if (transport === 'mcp' && mcpAdapter) {
@@ -113,7 +111,8 @@ export class ClaudeAutonomousSession extends ModelExecutionAdapter {
             this.appName,
             text,
             resolvedReqId,
-            turnTimeout
+            turnTimeout,
+            { activate: false }
           );
           if (turnRes.ok) {
             this.emit('model_turn_started', { requestId: resolvedReqId, transport: 'accessibility' });
@@ -134,39 +133,14 @@ export class ClaudeAutonomousSession extends ModelExecutionAdapter {
           }
         }
 
-        // Do not resend after a native submission timeout/unknown state:
-        // Claude may already be processing the request. Only fall back when
-        // the native route never had a usable application.
-        if (!result || (!result.success && ['APP_NOT_RUNNING', 'NO_WINDOW', 'INPUT_NOT_FOUND'].includes(result.status))) {
-          const axRes = await this.axEngine.executeReliableSend({
-            targetApp: this.appName,
-            text,
-            requestId: resolvedReqId,
-            conversationTitle
-          });
-          if (axRes.success) {
-            this.observer.startObservation({ targetApp: this.appName, requestId: resolvedReqId });
-            result = {
-              success: true,
-              transport: 'accessibility',
-              status: 'REQUEST_SENT',
-              ...axRes
-            };
-          } else {
-            const notifRes = await sendDesktopNotification({
-              title: 'Agent Bridge -> Claude Desktop',
-              subtitle: 'Turn Requested',
-              message: `Request [${resolvedReqId}] queued: ${text.slice(0, 80)}`
-            });
-            result = {
-              success: true,
-              transport: 'notification',
-              status: 'queued_notification_fallback',
-              fallbackFrom: 'accessibility',
-              axError: axRes.error,
-              details: notifRes
-            };
-          }
+        // Do not fall back to activating AX: preserve background invariant.
+        if (!result) {
+          result = {
+            success: false,
+            status: 'SWIFT_BINARY_NOT_FOUND',
+            error: 'Swift AX helper binary is not available',
+            modelTurnConfirmed: false
+          };
         }
       } else if (transport === 'browser') {
         result = await this.browserAdapter.sendMessage({ requestId: resolvedReqId, message: text });
@@ -176,10 +150,6 @@ export class ClaudeAutonomousSession extends ModelExecutionAdapter {
           transport: 'notification',
           status: 'delivered_notification'
         };
-      }
-
-      if (previousFocus) {
-        await this.sessionManager.restoreUserFocus(previousFocus);
       }
 
       const turnResult = {
@@ -193,9 +163,6 @@ export class ClaudeAutonomousSession extends ModelExecutionAdapter {
       this.emit('turn_dispatched', turnResult);
       return turnResult;
     } catch (err) {
-      if (previousFocus) {
-        await this.sessionManager.restoreUserFocus(previousFocus).catch(() => {});
-      }
       return {
         success: false,
         transport,

@@ -7,6 +7,7 @@ struct RequestOp: Codable {
     let op: String
     let app: String?
     let appName: String?
+    let targetAppParam: String?
     let bundleId: String?
     let value: String?
     let text: String?
@@ -18,8 +19,13 @@ struct RequestOp: Codable {
     let activate: Bool?
     let minimized: Bool?
 
+    enum CodingKeys: String, CodingKey {
+        case op, app, appName, bundleId, value, text, requestId, pid, identifier, role, timeoutMs, activate, minimized
+        case targetAppParam = "targetApp"
+    }
+
     var targetApp: String {
-        return app ?? appName ?? "Claude"
+        return targetAppParam ?? app ?? appName ?? "Claude"
     }
 
     var payloadText: String {
@@ -111,7 +117,7 @@ func findAppProcess(name: String) -> NSRunningApplication? {
     // Priority 3: Known bundle IDs
     let knownBundles: [String: [String]] = [
         "gemini": ["com.google.geminimacos"],
-        "claude": ["com.anthropic.claudedesktop"],
+        "claude": ["com.anthropic.claudedesktop", "com.anthropic.claudefordesktop"],
         "chatgpt": ["com.openai.codex", "com.openai.chat"]
     ]
     if let bundles = knownBundles[name.lowercased()] {
@@ -252,6 +258,8 @@ func inspectApp(name: String) -> InspectResponse {
     let pid = app.processIdentifier
     let isHidden = app.isHidden
     let axApp = AXUIElementCreateApplication(pid)
+    _ = AXUIElementSetAttributeValue(axApp, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+    _ = AXUIElementSetAttributeValue(axApp, "AXManualAccessibility" as CFString, kCFBooleanTrue)
 
     var windowsValue: AnyObject?
     let result = AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsValue)
@@ -501,7 +509,7 @@ func setupObserver(name: String) -> SimpleResponse {
 }
 
 func sendPromptToClaude(name: String, text: String, requestId: String?) -> SendTurnResponse {
-    let (maybeApp, maybeWin) = resolveWindow(name, activate: true)
+    let (maybeApp, maybeWin) = resolveWindow(name, activate: false)
     guard let app = maybeApp else {
         return SendTurnResponse(ok: false, status: "APP_NOT_RUNNING", requestId: requestId, error: "Application \(name) is not running")
     }
@@ -531,7 +539,13 @@ func sendPromptToClaude(name: String, text: String, requestId: String?) -> SendT
         var titleVal: AnyObject?
         AXUIElementCopyAttributeValue(el, kAXTitleAttribute as CFString, &titleVal)
         let title = ((titleVal as? String) ?? "").lowercased()
-        if desc == "send message" || desc == "send" || title == "send" || title == "send message" { return el }
+        if desc == "send message" || desc == "send" || title == "send" || title == "send message" {
+            var enVal: AnyObject?
+            if AXUIElementCopyAttributeValue(el, kAXEnabledAttribute as CFString, &enVal) == .success,
+               let en = enVal as? Bool, en {
+                return el
+            }
+        }
         var childrenVal: AnyObject?
         if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenVal) == .success,
            let children = childrenVal as? [AXUIElement] {
@@ -542,31 +556,83 @@ func sendPromptToClaude(name: String, text: String, requestId: String?) -> SendT
         return nil
     }
 
+    func checkGenerating(_ el: AXUIElement) -> Bool {
+        var roleVal: AnyObject?
+        AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleVal)
+        if (roleVal as? String) == "AXButton" {
+            var descVal: AnyObject?
+            AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &descVal)
+            let desc = ((descVal as? String) ?? "").lowercased()
+            var titleVal: AnyObject?
+            AXUIElementCopyAttributeValue(el, kAXTitleAttribute as CFString, &titleVal)
+            let title = ((titleVal as? String) ?? "").lowercased()
+            if desc.contains("stop") || title.contains("stop") || desc.contains("cancel") || title.contains("cancel") {
+                return true
+            }
+        }
+        var childrenVal: AnyObject?
+        if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenVal) == .success,
+           let children = childrenVal as? [AXUIElement] {
+            for c in children { if checkGenerating(c) { return true } }
+        }
+        return false
+    }
+
+    // If Claude is currently generating from a prior turn, wait for it to settle
+    for _ in 1...60 {
+        let curWin = resolveWindow(name, activate: false).1 ?? win
+        if !checkGenerating(curWin) { break }
+        usleep(500_000)
+    }
+
     guard let input = findInput(win) else {
         return SendTurnResponse(ok: false, status: "INPUT_NOT_FOUND", requestId: requestId, error: "Prompt textarea not found")
     }
 
-    let setErr = AXUIElementSetAttributeValue(input, kAXValueAttribute as CFString, text as CFTypeRef)
+    let promptText: String
+    if let req = requestId, !req.isEmpty, !text.contains("[AB:\(req)]") {
+        promptText = "\(text)\n\n[AB:\(req)]"
+    } else {
+        promptText = text
+    }
+
+    _ = AXUIElementSetAttributeValue(input, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+
+    var range = CFRange(location: 0, length: 1000)
+    if let rangeVal = AXValueCreate(.cfRange, &range) {
+        _ = AXUIElementSetAttributeValue(input, kAXSelectedTextRangeAttribute as CFString, rangeVal)
+    }
+    _ = AXUIElementSetAttributeValue(input, "AXSelectedText" as CFString, promptText as CFTypeRef)
+    let setErr = AXUIElementSetAttributeValue(input, kAXValueAttribute as CFString, promptText as CFTypeRef)
     guard setErr == .success else {
         return SendTurnResponse(ok: false, status: "VALUE_SET_FAILED", requestId: requestId, error: "AXError \(setErr.rawValue)")
     }
 
-    var sendBtn: AXUIElement? = nil
-    for _ in 1...10 {
-        usleep(100_000) // 100ms
-        if let btn = findSendBtn(win) {
-            sendBtn = btn
+    let marker = requestId.map { "[AB:\($0)]" } ?? String(text.prefix(24))
+    var submitted = false
+    var pressedSend = false
+    for attempt in 1...40 {
+        let curWin = resolveWindow(name, activate: false).1 ?? win
+        let curVal = findInput(curWin).map { axString($0, kAXValueAttribute).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+        let composerCleared = curVal.isEmpty || curVal == "\n" || !curVal.contains(marker)
+        let generating = checkGenerating(curWin)
+
+        if pressedSend && (composerCleared || generating) {
+            submitted = true
             break
         }
+
+        if let btn = findSendBtn(curWin) {
+            let pErr = AXUIElementPerformAction(btn, kAXPressAction as CFString)
+            if pErr == .success {
+                pressedSend = true
+            }
+        }
+        usleep(250_000)
     }
 
-    guard let btn = sendBtn else {
-        return SendTurnResponse(ok: false, status: "SEND_BUTTON_NOT_FOUND", requestId: requestId, error: "Send button did not become available")
-    }
-
-    let pressErr = AXUIElementPerformAction(btn, kAXPressAction as CFString)
-    guard pressErr == .success else {
-        return SendTurnResponse(ok: false, status: "PRESS_FAILED", requestId: requestId, error: "AXError \(pressErr.rawValue)")
+    guard submitted else {
+        return SendTurnResponse(ok: false, status: "CLAUDE_SUBMISSION_FAILED", requestId: requestId, error: "Send button did not clear prompt input")
     }
 
     return SendTurnResponse(ok: true, status: "SUBMITTED", requestId: requestId, error: nil)
@@ -578,16 +644,22 @@ func captureTextSnapshot(name: String) -> [String] {
 
     var texts: [String] = []
     func collect(_ el: AXUIElement, depth: Int) {
-        if depth > 20 { return }
+        if depth > 80 { return }
         var roleVal: AnyObject?
         AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleVal)
         let role = (roleVal as? String) ?? ""
         if role == "AXStaticText" || role == "AXHeading" || role == "AXTextArea" || role == "AXTextField" {
-            var valueVal: AnyObject?
-            if AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &valueVal) == .success,
-               let s = valueVal as? String, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                texts.append(s)
-            }
+            var valVal: AnyObject?
+            AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &valVal)
+            var titleVal: AnyObject?
+            AXUIElementCopyAttributeValue(el, kAXTitleAttribute as CFString, &titleVal)
+            var descVal: AnyObject?
+            AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &descVal)
+            let v = (valVal as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let t = (titleVal as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let d = (descVal as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let s = !v.isEmpty ? v : (!t.isEmpty ? t : d)
+            if !s.isEmpty { texts.append(s) }
         }
         var childrenVal: AnyObject?
         if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenVal) == .success,
@@ -640,7 +712,9 @@ func extractLatestClaudeResponse(_ raw: String, requestId: String?) -> String? {
         "\n2 hours ago",
         "\n3 hours ago",
         "\nYesterday",
-        "\nAuto is on."
+        "\nAuto is on.",
+        "\nHow is Claude doing this session?",
+        "\nClaude is AI and can make mistakes."
     ]
 
     var cut = response.endIndex
@@ -723,18 +797,24 @@ func observeResponseFromClaude(name: String, requestId: String?, timeoutMs: Int,
     let start = Date()
     let maxDuration = Double(timeoutMs > 0 ? timeoutMs : 30000) / 1000.0
 
-    // Collect all text from the AX tree, depth up to 20
+    // Collect all text from the AX tree, depth up to 80
     func collectAllText(_ el: AXUIElement, depth: Int, texts: inout [String]) {
-        if depth > 60 { return }
+        if depth > 80 { return }
         var roleVal: AnyObject?
         AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleVal)
         let role = (roleVal as? String) ?? ""
         if role == "AXStaticText" || role == "AXHeading" || role == "AXTextArea" || role == "AXTextField" {
             var valVal: AnyObject?
-            if AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &valVal) == .success,
-               let s = valVal as? String, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                texts.append(s)
-            }
+            AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &valVal)
+            var titleVal: AnyObject?
+            AXUIElementCopyAttributeValue(el, kAXTitleAttribute as CFString, &titleVal)
+            var descVal: AnyObject?
+            AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &descVal)
+            let v = (valVal as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let t = (titleVal as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let d = (descVal as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let s = !v.isEmpty ? v : (!t.isEmpty ? t : d)
+            if !s.isEmpty { texts.append(s) }
         }
         var childrenVal: AnyObject?
         if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenVal) == .success,
@@ -782,17 +862,37 @@ func observeResponseFromClaude(name: String, requestId: String?, timeoutMs: Int,
     var lastCorrelatedResponse = ""
     var stableResponseRounds = 0
 
-    while Date().timeIntervalSince(start) < maxDuration {
-        usleep(300_000)
+    func dismissModalsIfAny(_ el: AXUIElement) {
+        var dVal: AnyObject?
+        AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &dVal)
+        var tVal: AnyObject?
+        AXUIElementCopyAttributeValue(el, kAXTitleAttribute as CFString, &tVal)
+        let d = ((dVal as? String) ?? "").lowercased()
+        let t = ((tVal as? String) ?? "").lowercased()
+        if d == "dismiss" || t == "dismiss" {
+            _ = AXUIElementPerformAction(el, kAXPressAction as CFString)
+            return
+        }
+        var childrenVal: AnyObject?
+        if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenVal) == .success,
+           let kids = childrenVal as? [AXUIElement] {
+            for k in kids { dismissModalsIfAny(k) }
+        }
+    }
 
-        let generating = checkGenerating(win)
+    while Date().timeIntervalSince(start) < maxDuration {
+        usleep(250_000)
+        let curWin = resolveWindow(name, activate: false).1 ?? win
+        dismissModalsIfAny(curWin)
+
+        let generating = checkGenerating(curWin)
         if generating {
             sawGenerating = true
             stableResponseRounds = 0
         }
 
         var snapshot: [String] = []
-        collectAllText(win, depth: 0, texts: &snapshot)
+        collectAllText(curWin, depth: 0, texts: &snapshot)
 
         // IMPORTANT: parse the COMPLETE current AX tree, not only values that
         // differ from the baseline. Claude can reuse/accessibly replace nodes,
@@ -977,6 +1077,13 @@ func sendPromptToGemini(name: String = "Gemini", text: String, requestId: String
         return SendTurnResponse(ok: false, status: "INPUT_NOT_FOUND", requestId: requestId, error: "Prompt textarea not found in Gemini")
     }
 
+    _ = AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+
+    var range = CFRange(location: 0, length: 1000)
+    if let rangeVal = AXValueCreate(.cfRange, &range) {
+        _ = AXUIElementSetAttributeValue(composer, kAXSelectedTextRangeAttribute as CFString, rangeVal)
+    }
+    _ = AXUIElementSetAttributeValue(composer, "AXSelectedText" as CFString, text as CFTypeRef)
     let setErr = AXUIElementSetAttributeValue(composer, kAXValueAttribute as CFString, text as CFTypeRef)
     guard setErr == .success else {
         return SendTurnResponse(ok: false, status: "VALUE_SET_FAILED", requestId: requestId, error: "AXError \(setErr.rawValue)")
@@ -1065,14 +1172,17 @@ func extractTextFromGeminiRow(_ row: AXUIElement) -> (text: String, isComplete: 
         var roleVal: AnyObject?
         AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleVal)
         let role = (roleVal as? String) ?? ""
-        if role == "AXStaticText" || role == "AXHeading" || role == "AXTextArea" {
+        if role == "AXStaticText" || role == "AXHeading" || role == "AXTextArea" || role == "AXButton" {
             var valVal: AnyObject?
             AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &valVal)
             var descVal: AnyObject?
             AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &descVal)
+            var titleVal: AnyObject?
+            AXUIElementCopyAttributeValue(el, kAXTitleAttribute as CFString, &titleVal)
             let v = (valVal as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let d = (descVal as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let text = !v.isEmpty ? v : d
+            let t = (titleVal as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = !v.isEmpty ? v : (!d.isEmpty ? d : t)
             if !text.isEmpty && !skipTokens.contains(text) && !pieces.contains(text) {
                 pieces.append(text)
             }
@@ -1275,37 +1385,23 @@ func resolvePrimaryAXWindow(_ app: NSRunningApplication) -> AXUIElement? {
     return (value as! AXUIElement)
 }
 
-func resolveWindow(_ name: String, activate: Bool) -> (NSRunningApplication?, AXUIElement?) {
+func resolveWindow(_ name: String, activate: Bool = false) -> (NSRunningApplication?, AXUIElement?) {
     guard let app = findAppProcess(name: name) else { return (nil, nil) }
-    if activate {
-        app.unhide()
-        _ = app.activate(options: [])
-    }
+    let axApp = AXUIElementCreateApplication(app.processIdentifier)
+    _ = AXUIElementSetAttributeValue(axApp, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+    _ = AXUIElementSetAttributeValue(axApp, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+
     for _ in 1...12 {
-        let axApp = AXUIElementCreateApplication(app.processIdentifier)
-        if !activate, let primary = resolvePrimaryAXWindow(app) {
-            return (app, primary)
-        }
-        _ = AXUIElementSetAttributeValue(axApp, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
-        _ = AXUIElementSetAttributeValue(axApp, "AXManualAccessibility" as CFString, kCFBooleanTrue)
         var winVal: AnyObject?
+        if AXUIElementCopyAttributeValue(axApp, kAXMainWindowAttribute as CFString, &winVal) == .success, let w = winVal {
+            return (app, (w as! AXUIElement))
+        }
+        if AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &winVal) == .success, let w = winVal {
+            return (app, (w as! AXUIElement))
+        }
         if AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &winVal) == .success,
            let wins = winVal as? [AXUIElement], let w = wins.first {
-            if name.caseInsensitiveCompare("ChatGPT") == .orderedSame { cachedChatGPTWindow = w }
-             return (app, w)
-        }
-        if !activate && name.caseInsensitiveCompare("ChatGPT") == .orderedSame, let cached = cachedChatGPTWindow {
-            return (app, cached)
-        }
-        var mainValue: AnyObject?
-        if AXUIElementCopyAttributeValue(axApp, kAXMainWindowAttribute as CFString, &mainValue) == .success,
-           let mainWindow = mainValue {
-            return (app, (mainWindow as! AXUIElement))
-        }
-        var focusedValue: AnyObject?
-        if AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &focusedValue) == .success,
-           let focusedWindow = focusedValue {
-            return (app, (focusedWindow as! AXUIElement))
+            return (app, w)
         }
         usleep(250_000)
     }
@@ -1438,7 +1534,8 @@ func extractChatGptResponse(_ texts: [String], requestId: String?) -> String? {
     var i = markerIdx + 1
     while i < texts.count {
         let t = texts[i].trimmingCharacters(in: .whitespacesAndNewlines)
-        if t.lowercased() == "chatgpt said:" {
+        let low = t.lowercased()
+        if low.contains("chatgpt said:") || low.contains("latest response") {
             assistantHeadingIndex = i
             break
         }
@@ -1463,7 +1560,7 @@ func extractChatGptResponse(_ texts: [String], requestId: String?) -> String? {
         if t.isEmpty { continue }
         let low = t.lowercased()
         if terminators.contains(low) { break }
-        if low == "copy" || low == "share" || low == "copy message" || low == "share prompt" || low == "edit message" || low == "rate response" {
+        if low == "copy" || low == "share" || low == "copy message" || low == "share prompt" || low == "edit message" || low == "rate response" || low == "read aloud" {
             continue
         }
         if low.hasPrefix("worked for ") || low.hasPrefix("thought for ") || low.hasPrefix("thinking for ") || low.hasPrefix("reasoned for ") {
@@ -1491,8 +1588,11 @@ func collectTextValues(_ win: AXUIElement) -> [String] {
         let role = axString(el, kAXRoleAttribute)
         if skipRoles.contains(role) { return }
         if role == "AXStaticText" || role == "AXHeading" || role == "AXTextArea" || role == "AXTextField" {
-            let v = axString(el, kAXValueAttribute)
-            if !v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { texts.append(v) }
+            let v = axString(el, kAXValueAttribute).trimmingCharacters(in: .whitespacesAndNewlines)
+            let t = axString(el, kAXTitleAttribute).trimmingCharacters(in: .whitespacesAndNewlines)
+            let d = axString(el, kAXDescriptionAttribute).trimmingCharacters(in: .whitespacesAndNewlines)
+            let s = !v.isEmpty ? v : (!t.isEmpty ? t : d)
+            if !s.isEmpty { texts.append(s) }
         }
         var cv: AnyObject?
         if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &cv) == .success,
@@ -1504,21 +1604,13 @@ func collectTextValues(_ win: AXUIElement) -> [String] {
     return texts
 }
 
-func sendPromptGeneric(name: String, text: String, requestId: String?, profile: String, activate: Bool = true) -> SendTurnResponse {
+func sendPromptGeneric(name: String, text: String, requestId: String?, profile: String, activate: Bool = false) -> SendTurnResponse {
     let (app, maybeWin) = resolveWindow(name, activate: activate)
     guard app != nil else {
         return SendTurnResponse(ok: false, status: "APP_NOT_RUNNING", requestId: nil, error: "\(name) is not running")
     }
     guard let win = maybeWin else {
         return SendTurnResponse(ok: false, status: "NO_WINDOW", requestId: nil, error: "No accessible window for \(name)")
-    }
-
-    // AXRaise does not activate the application. For a fullscreen ChatGPT
-    // worker on another Space, this can refresh the window's accessibility
-    // surface without switching the user's Space or stealing foreground focus.
-    if profile == "chatgpt" {
-        _ = AXUIElementPerformAction(win, kAXRaiseAction as CFString)
-        usleep(150_000)
     }
 
     guard let composer = findComposerElement(win, profile: profile) else {
@@ -1529,17 +1621,22 @@ func sendPromptGeneric(name: String, text: String, requestId: String?, profile: 
     var setOk = false
     for attempt in 1...3 {
         _ = AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-        let setErr = AXUIElementSetAttributeValue(composer, kAXValueAttribute as CFString, text as CFTypeRef)
-        if setErr != .success {
-            _ = AXUIElementSetAttributeValue(composer, "AXSelectedText" as CFString, text as CFTypeRef)
+        var range = CFRange(location: 0, length: 1000)
+        if let rangeVal = AXValueCreate(.cfRange, &range) {
+            _ = AXUIElementSetAttributeValue(composer, kAXSelectedTextRangeAttribute as CFString, rangeVal)
         }
+        _ = AXUIElementSetAttributeValue(composer, "AXSelectedText" as CFString, text as CFTypeRef)
+        let setErr = AXUIElementSetAttributeValue(composer, kAXValueAttribute as CFString, text as CFTypeRef)
         usleep(250_000)
         // Re-resolve so a React re-render cannot leave us reading a stale node.
         if let w2 = resolveWindow(name, activate: false).1 ?? maybeWin,
-           let c2 = findComposerElement(w2, profile: profile),
-           axString(c2, kAXValueAttribute).contains(prefix) {
-            setOk = true
-            break
+           let c2 = findComposerElement(w2, profile: profile) {
+            let val = axString(c2, kAXValueAttribute)
+            let cleanVal = val.trimmingCharacters(in: .whitespacesAndNewlines)
+            if cleanVal.contains(prefix) || (cleanVal != "Ask ChatGPT" && !cleanVal.isEmpty) {
+                setOk = true
+                break
+            }
         }
         if setErr != .success && attempt == 3 && !setOk {
             return SendTurnResponse(ok: false, status: "VALUE_SET_FAILED", requestId: nil, error: "AXError \(setErr.rawValue)")
@@ -1549,44 +1646,33 @@ func sendPromptGeneric(name: String, text: String, requestId: String?, profile: 
         return SendTurnResponse(ok: false, status: "VALUE_NOT_REGISTERED", requestId: nil, error: "Composer did not retain the submitted value")
     }
 
-    var sendOk = false
-    for _ in 1...20 {
-        guard let w3 = resolveWindow(name, activate: false).1 ?? maybeWin else { usleep(150_000); continue }
-        if let btn = findSendButton(w3) {
-            if AXUIElementPerformAction(btn, kAXPressAction as CFString) == .success { sendOk = true; break }
-        }
-        usleep(150_000)
-    }
-    guard sendOk else {
-        return SendTurnResponse(ok: false, status: "CHATGPT_SUBMISSION_FAILED", requestId: nil, error: "Send control could not be activated")
-    }
-
-    // Do not call a turn "submitted" merely because AXPress succeeded. In
-    // background/fullscreen mode ChatGPT can expose the composer while the
-    // action is still being processed. Require the composer to clear and the
-    // correlation marker to appear in the conversation tree.
     let marker = requestId.map { "[AB:\($0)]" } ?? String(text.prefix(24))
-    for attempt in 1...25 {
-        if attempt > 1 {
-            let sleepTime: useconds_t = attempt < 6 ? 50_000 : 100_000
-            usleep(sleepTime)
+    var submitted = false
+    for attempt in 1...30 {
+        guard let w3 = resolveWindow(name, activate: false).1 ?? maybeWin else {
+            usleep(200_000)
+            continue
         }
-        guard let verifyWindow = resolveWindow(name, activate: false).1 ?? maybeWin else { continue }
-        let composerValue = findComposerElement(verifyWindow, profile: profile).map { axString($0, kAXValueAttribute) } ?? ""
-        let values = collectTextValues(verifyWindow)
-        let markerInConversation = values.contains { $0.contains(marker) }
-        let composerStillContainsRequest = composerValue.contains(marker) || composerValue.contains(String(text.prefix(24)))
-        if markerInConversation && !composerStillContainsRequest {
-            return SendTurnResponse(ok: true, status: "SUBMITTED", requestId: requestId, error: nil)
+        let composerValue = findComposerElement(w3, profile: profile).map { axString($0, kAXValueAttribute).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+        let composerCleared = composerValue.isEmpty || composerValue == "Ask ChatGPT" || !composerValue.contains(marker)
+        let generating = isGenerating(w3, profile: profile)
+
+        if (composerCleared && attempt > 1) || generating {
+            submitted = true
+            break
         }
+
+        if let btn = findSendButton(w3) {
+            _ = AXUIElementPerformAction(btn, kAXPressAction as CFString)
+        }
+        usleep(250_000)
     }
 
-    return SendTurnResponse(
-        ok: false,
-        status: "SUBMISSION_NOT_REGISTERED",
-        requestId: requestId,
-        error: "Send action completed but ChatGPT did not register the request in the conversation"
-    )
+    guard submitted else {
+        return SendTurnResponse(ok: false, status: "CHATGPT_SUBMISSION_FAILED", requestId: nil, error: "Send button did not clear composer")
+    }
+
+    return SendTurnResponse(ok: true, status: "SUBMITTED", requestId: requestId, error: nil)
 }
 
 func observeResponseGeneric(name: String, requestId: String?, profile: String, timeoutMs: Int) -> ObserveTurnResponse {
@@ -1650,7 +1736,7 @@ func observeResponseGeneric(name: String, requestId: String?, profile: String, t
     return ObserveTurnResponse(ok: false, status: "CHATGPT_RESPONSE_CORRELATION_FAILED", requestId: requestId, response: nil, latencyMs: nil, error: "Correlation marker was not found in the live accessibility tree")
 }
 
-func sendAndObserveGeneric(name: String, text: String, requestId: String?, profile: String, timeoutMs: Int, activate: Bool = true) -> ObserveTurnResponse {
+func sendAndObserveGeneric(name: String, text: String, requestId: String?, profile: String, timeoutMs: Int, activate: Bool = false) -> ObserveTurnResponse {
     let sent = sendPromptGeneric(name: name, text: text, requestId: requestId, profile: profile, activate: activate)
     guard sent.ok else {
         return ObserveTurnResponse(ok: false, status: sent.status, requestId: requestId, response: nil, latencyMs: nil, error: sent.error)
@@ -1779,7 +1865,7 @@ func handleRequest(_ req: RequestOp) {
         } else if profile == "gemini" {
             resp = sendPromptToGemini(name: req.targetApp, text: req.payloadText, requestId: req.requestId)
         } else {
-            resp = sendPromptGeneric(name: req.targetApp, text: req.payloadText, requestId: req.requestId, profile: profile, activate: req.activate ?? true)
+            resp = sendPromptGeneric(name: req.targetApp, text: req.payloadText, requestId: req.requestId, profile: profile, activate: req.activate ?? false)
         }
         if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
             print(str)
@@ -1807,7 +1893,7 @@ func handleRequest(_ req: RequestOp) {
         } else if profile == "gemini" {
             resp = sendAndObserveGemini(name: req.targetApp, text: req.payloadText, requestId: req.requestId, timeoutMs: timeout)
         } else {
-            resp = sendAndObserveGeneric(name: req.targetApp, text: req.payloadText, requestId: req.requestId, profile: profile, timeoutMs: timeout, activate: req.activate ?? true)
+            resp = sendAndObserveGeneric(name: req.targetApp, text: req.payloadText, requestId: req.requestId, profile: profile, timeoutMs: timeout, activate: req.activate ?? false)
         }
         if let encoded = try? encoder.encode(resp), let str = String(data: encoded, encoding: .utf8) {
             print(str)

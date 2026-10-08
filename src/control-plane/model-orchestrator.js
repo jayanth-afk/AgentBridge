@@ -43,13 +43,14 @@ export class ModelOrchestrator extends EventEmitter {
     conversationId = null,
     deadline = null,
     priority = 'normal',
-    mcpAdapter = null
+    mcpAdapter = null,
+    requestId: requestedId = null
   }) {
     if (!fromAgent) throw new Error('fromAgent is required');
     if (!toAgent) throw new Error('toAgent is required');
     if (!message) throw new Error('message is required');
 
-    const requestId = `req_mod_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    const requestId = requestedId || `req_mod_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const resolvedConvId = conversationId || `conv_${fromAgent}_${toAgent}_${Date.now()}`;
 
     const envelope = new RequestEnvelope({
@@ -75,115 +76,79 @@ export class ModelOrchestrator extends EventEmitter {
 
       // 1. Target: ChatGPT Desktop
       if (normalizedTarget.includes('chatgpt')) {
-        envelope.transition(RequestState.TRANSPORT_CONNECTED, { transport: 'chatgpt-local-engine' });
+        envelope.transition(RequestState.TRANSPORT_CONNECTED, { transport: 'chatgpt-autonomous-session' });
         envelope.transition(RequestState.MODEL_TURN_CONFIRMED);
         envelope.transition(RequestState.ASSISTANT_STARTED);
 
-        // Attach to conversation registry
         let conv = this.conversations.get(resolvedConvId);
         if (!conv) {
           conv = this.conversations.createConversation({
             conversationId: resolvedConvId,
             agent: 'chatgpt',
-            transport: 'chatgpt-local-engine'
+            transport: 'chatgpt-autonomous-session'
           });
         }
 
         const taggedPrompt = this.correlator.tagMessage(envelope.message, requestId);
-        const engineRes = await this.chatgptEngine.executeTurn({
-          prompt: taggedPrompt,
+        const sessionRes = await this.chatgptSession.send({
+          text: taggedPrompt,
           requestId,
-          conversationId: resolvedConvId,
-          threadId: conv.threadId
+          activate: false,
+          timeoutMs: deadline ? Math.max(5000, deadline - Date.now()) : 90000
         });
 
-        if (!engineRes.ok) {
-          const prevFront = await this.swiftBridge.getFrontmostApp().catch(() => null);
-          let fallbackRes;
-          try {
-            fallbackRes = await this.chatgptSession.send({
-              text: taggedPrompt,
-              requestId,
-              timeoutMs: deadline ? Math.max(5000, deadline - Date.now()) : 90000
-            });
-          } finally {
-            if (prevFront?.pid) {
-              await this.swiftBridge.restoreFocus(prevFront.pid).catch(() => {});
-            }
-          }
-
-          if (fallbackRes.success && fallbackRes.response) {
-            envelope.transition(RequestState.ASSISTANT_COMPLETED);
-            const correlated = this.correlator.correlateTurn({
-              rawResponse: fallbackRes.response,
-              expectedRequestId: requestId
-            });
-
-            envelope.transition(RequestState.RESPONSE_CORRELATED);
-            envelope.transition(RequestState.DELIVERED);
-
-            this.conversations.updateActivity(resolvedConvId, {
-              request: envelope.message,
-              response: correlated.cleanedText,
-              latencyMs: fallbackRes.latencyMs
-            });
-
-            result = {
-              success: true,
-              requestId,
-              fromAgent,
-              toAgent,
-              transport: fallbackRes.transport || 'chatgpt-desktop-accessibility',
-              response: correlated.cleanedText,
-              rawResponse: fallbackRes.response,
-              latencyMs: Date.now() - startMs,
-              state: envelope.state
-            };
-          } else {
-            envelope.transition(RequestState.FAILED, { error: fallbackRes.error || engineRes.error });
-            return {
-              success: false,
-              requestId,
-              toAgent,
-              error: fallbackRes.error || engineRes.error,
-              latencyMs: Date.now() - startMs
-            };
-          }
-        } else {
-          // Attach discovered threadId for conversation continuation
-          if (engineRes.threadId) {
-            this.conversations.attach(resolvedConvId, { threadId: engineRes.threadId });
-          }
-
-          envelope.transition(RequestState.ASSISTANT_COMPLETED);
-          const correlated = this.correlator.correlateTurn({
-            rawResponse: engineRes.response,
-            expectedRequestId: requestId
-          });
-
-          envelope.transition(RequestState.RESPONSE_CORRELATED);
-          envelope.transition(RequestState.DELIVERED);
-
-          this.conversations.updateActivity(resolvedConvId, {
-            request: envelope.message,
-            response: correlated.cleanedText,
-            latencyMs: engineRes.latencyMs
-          });
-
-          result = {
-            success: true,
+        if (!sessionRes.success && sessionRes.error) {
+          envelope.transition(RequestState.FAILED, { error: sessionRes.error });
+          return {
+            success: false,
             requestId,
-            fromAgent,
             toAgent,
-            transport: 'chatgpt-local-engine',
-            response: correlated.cleanedText,
-            rawResponse: engineRes.response,
-            threadId: engineRes.threadId,
-            usage: engineRes.usage,
+            error: sessionRes.error,
+            latencyMs: Date.now() - startMs
+          };
+        }
+
+        const responseText = sessionRes.response || null;
+        if (!responseText) {
+          const noRespError = sessionRes.status || sessionRes.error || 'CHATGPT_NO_MODEL_RESPONSE';
+          envelope.transition(RequestState.FAILED, { error: noRespError });
+          return {
+            success: false,
+            requestId,
+            toAgent,
+            transport: sessionRes.transport || 'chatgpt-autonomous-session',
+            error: noRespError,
             latencyMs: Date.now() - startMs,
             state: envelope.state
           };
         }
+
+        envelope.transition(RequestState.ASSISTANT_COMPLETED);
+        const correlated = this.correlator.correlateTurn({
+          rawResponse: responseText,
+          expectedRequestId: requestId
+        });
+
+        envelope.transition(RequestState.RESPONSE_CORRELATED);
+        envelope.transition(RequestState.DELIVERED);
+
+        this.conversations.updateActivity(resolvedConvId, {
+          request: envelope.message,
+          response: correlated.cleanedText,
+          latencyMs: sessionRes.latencyMs || (Date.now() - startMs)
+        });
+
+        result = {
+          success: true,
+          requestId,
+          fromAgent,
+          toAgent,
+          transport: sessionRes.transport || 'chatgpt-autonomous-session',
+          response: correlated.cleanedText,
+          rawResponse: responseText,
+          latencyMs: Date.now() - startMs,
+          state: envelope.state
+        };
       }
 
       // 2. Target: Claude Desktop

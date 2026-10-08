@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
 import { ModelOrchestrator } from './model-orchestrator.js';
+import { DesktopInvisibilityMonitor } from './desktop-invisibility-monitor.js';
 
 export const CollaborationStatus = Object.freeze({
   PENDING: 'pending',
@@ -43,6 +44,7 @@ export class AutonomousCollaborationOrchestrator extends EventEmitter {
     this.defaultMaxHops = options.maxHops || 12;
     this.defaultMaxTurnsPerAgent = options.maxTurnsPerAgent || 6;
     this.defaultTimeoutMs = options.timeoutMs || 180000;
+    this.invisibilityMonitor = options.invisibilityMonitor || new DesktopInvisibilityMonitor(options);
     this.activeCollaborations = new Map();
   }
 
@@ -240,15 +242,46 @@ Provide your authentic technical response for this turn. Do NOT include boilerpl
       requestId
     });
 
-    // 5. Delegate turn to real model execution route
-    const modelResult = await this.modelOrchestrator.delegateModelTask({
-      fromAgent,
-      toAgent,
-      message: contextualPrompt,
-      context: { ...context, collaborationId: session.id, turnNumber: session.turns.length + 1 },
-      conversationId: session.id,
-      deadline
-    });
+    // 5. Delegate turn to real model execution route with continuous invisibility monitoring
+    let modelResult;
+    let invisibilityReport = null;
+
+    if (this.invisibilityMonitor) {
+      await this.invisibilityMonitor.startTurnSampling({
+        collaborationId: session.id,
+        requestId,
+        fromAgent,
+        toAgent
+      });
+    }
+
+    try {
+      modelResult = await this.modelOrchestrator.delegateModelTask({
+        fromAgent,
+        toAgent,
+        message: contextualPrompt,
+        context: { ...context, collaborationId: session.id, turnNumber: session.turns.length + 1 },
+        conversationId: session.id,
+        deadline
+      });
+    } finally {
+      if (this.invisibilityMonitor) {
+        try {
+          invisibilityReport = await this.invisibilityMonitor.stopTurnSampling();
+        } catch (invisErr) {
+          session.status = CollaborationStatus.FAILED;
+          session.updatedAt = new Date().toISOString();
+          this.emit('turn_failed', { collaborationId: session.id, requestId, error: invisErr.message });
+          return {
+            success: false,
+            status: invisErr.code || 'VISIBLE_TAKEOVER_DETECTED',
+            error: invisErr.message,
+            report: invisErr.report,
+            latencyMs: Date.now() - startMs
+          };
+        }
+      }
+    }
 
     // 6. Enforce Real Model Responses Only
     if (!modelResult.success || !modelResult.response) {
@@ -284,7 +317,10 @@ Provide your authentic technical response for this turn. Do NOT include boilerpl
       timestamp: new Date().toISOString()
     };
 
-    session.turns.push(turn);
+    session.turns.push({
+      ...turn,
+      invisibility: invisibilityReport
+    });
     session.turnCount += 1;
     session.agentTurnCounts.set(normTo, toTurnCount + 1);
     session.updatedAt = new Date().toISOString();

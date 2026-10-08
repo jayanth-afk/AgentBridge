@@ -213,7 +213,7 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
    * real model response.
    * @returns {Promise<{success:boolean,status:string,response:string|null,error:string|null,modelTurnConfirmed:boolean,requestId:string,transport:string,latencyMs:number}>}
    */
-  async send({ text, prompt, requestId, timeoutMs = null, onChunk = null } = {}) {
+  async send({ text, prompt, requestId, timeoutMs = null, onChunk = null, activate = false } = {}) {
     const resolvedId = requestId || `req_cg_ui_${Date.now()}`;
     const resolvedText = text || prompt || '';
     const startMs = Date.now();
@@ -399,7 +399,7 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
 
     const shouldActivate = typeof activate === 'boolean'
       ? activate
-      : (typeof this.options.activate === 'boolean' ? this.options.activate : true);
+      : (typeof this.options.activate === 'boolean' ? this.options.activate : false);
 
     const turn = await this.swiftBridge.sendAndObserve(
       this.appName,

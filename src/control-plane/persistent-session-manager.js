@@ -164,6 +164,10 @@ export class PersistentDesktopSessionManager {
     if (this.focusPolicy === FocusPolicy.NEVER) return { restored: false, policy: 'never' };
 
     try {
+      const cur = await this.swiftBridge.getFrontmostApp().catch(() => null);
+      if (cur && cur.pid === previousFocus.pid) {
+        return { restored: true, alreadyFrontmost: true };
+      }
       const res = await this.swiftBridge.restoreFocus(previousFocus.pid);
       return { restored: res.ok, restoredTo: previousFocus.name };
     } catch {
