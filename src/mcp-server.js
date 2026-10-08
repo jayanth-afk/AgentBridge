@@ -25,6 +25,8 @@ import { createSessionAdapter } from './session-adapters/index.js';
 import { BridgeHttpServer } from './http-server.js';
 import { CapabilityRegistry } from './capabilities/capability-registry.js';
 import { RequestExplainer } from './diagnostics/request-explainer.js';
+import { EffectsLedger } from './effects/effects-ledger.js';
+import { AttemptLedger } from './attempts/attempt-ledger.js';
 
 export class BridgeMcpServer {
   constructor(options = {}) {
@@ -44,6 +46,8 @@ export class BridgeMcpServer {
     this.identity = options.identityManager || new AgentIdentityManager(this.logger, this.agentId);
     this.eventBus = options.eventBus || new EventBus(this.logger);
     this.taskManager = options.taskManager || new TaskManager(this.logger);
+    this.attempts = options.attemptLedger || this.taskManager?.attempts || (this.logger?.db ? new AttemptLedger(this.logger) : null);
+    this.effectsLedger = options.effectsLedger || (this.logger?.db ? new EffectsLedger(this.logger) : null);
     this.mailbox = options.mailboxHub || new MailboxHub(this.logger, this.taskManager, this.eventBus);
     this.collaboration = options.collaborationManager || new CollaborationManager(this.logger);
     this.fileActivity = options.fileActivityManager || new FileActivityManager(this.logger);
@@ -125,7 +129,9 @@ export class BridgeMcpServer {
       sessionAdapter: this.sessionAdapter,
       capabilityRegistry: this.capabilityRegistry,
       requestExplainer: this.requestExplainer,
-      boundAgentId: this.agentId
+      boundAgentId: this.agentId,
+      attemptLedger: this.attempts,
+      effectsLedger: this.effectsLedger
     };
 
     // Tools list derived directly from unified registry

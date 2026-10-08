@@ -21,6 +21,39 @@ export const EffectState = Object.freeze({
   UNKNOWN: 'UNKNOWN' // When process crashed or timed out during execution; NEVER silently marked FAILED
 });
 
+/**
+ * Authoritative mapping of Tool names to side-effect classification
+ */
+export const TOOL_EFFECT_CLASSIFICATIONS = Object.freeze({
+  // Filesystem mutations
+  bridge_create_file: EffectClassification.IDEMPOTENT,
+  bridge_edit_file: EffectClassification.NON_IDEMPOTENT,
+  bridge_delete_file: EffectClassification.IDEMPOTENT,
+  bridge_apply_patch: EffectClassification.NON_IDEMPOTENT,
+  bridge_batch_write: EffectClassification.IDEMPOTENT,
+
+  // Command execution
+  bridge_execute_command: EffectClassification.NON_IDEMPOTENT,
+
+  // Git mutations
+  bridge_git_stage: EffectClassification.IDEMPOTENT,
+  bridge_git_commit: EffectClassification.NON_IDEMPOTENT,
+  bridge_git_create_branch: EffectClassification.IDEMPOTENT,
+  bridge_git_switch_branch: EffectClassification.IDEMPOTENT,
+  bridge_git_delete_branch: EffectClassification.IDEMPOTENT,
+  bridge_git_fetch: EffectClassification.EXTERNAL,
+  bridge_git_pull: EffectClassification.EXTERNAL,
+  bridge_git_push: EffectClassification.EXTERNAL
+});
+
+export function isEffectfulTool(toolName) {
+  return Boolean(toolName && TOOL_EFFECT_CLASSIFICATIONS[toolName] && TOOL_EFFECT_CLASSIFICATIONS[toolName] !== EffectClassification.PURE);
+}
+
+export function getToolClassification(toolName) {
+  return (toolName && TOOL_EFFECT_CLASSIFICATIONS[toolName]) || EffectClassification.PURE;
+}
+
 export class EffectsLedger {
   constructor(auditLogger) {
     this.logger = auditLogger;

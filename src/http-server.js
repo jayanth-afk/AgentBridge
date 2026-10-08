@@ -11,6 +11,8 @@ import { GitController } from './git-controller.js';
 import { ZiABackgroundGPT } from './control-plane/zia-background-gpt.js';
 import { ChatGptLocalEngineAdapter } from './control-plane/chatgpt-local-engine.js';
 import { AdapterHealth } from './control-plane/desktop-control-adapter.js';
+import { EffectsLedger } from './effects/effects-ledger.js';
+import { AttemptLedger } from './attempts/attempt-ledger.js';
 
 export class BridgeHttpServer {
   constructor(options = {}) {
@@ -28,6 +30,9 @@ export class BridgeHttpServer {
     this.identity = options.identityManager || (this.logger ? new AgentIdentityManager(this.logger) : null);
     this.git = options.gitController || (this.guard && this.logger ? new GitController(this.guard, this.logger) : null);
     this.registry = options.toolRegistry || new ToolRegistry();
+    this.taskManager = options.taskManager || this.mailbox?.tasks || (this.logger ? new TaskManager(this.logger) : null);
+    this.effectsLedger = options.effectsLedger || (this.logger?.db ? new EffectsLedger(this.logger) : null);
+    this.attemptLedger = options.attemptLedger || this.taskManager?.attempts || (this.logger?.db ? new AttemptLedger(this.logger) : null);
 
     // Authentication boundary for network-exposed control plane requests.
     // Enforced when `requireApiKey` is on (operator opt-in) or an explicit
@@ -543,6 +548,7 @@ export class BridgeHttpServer {
               const toolContext = {
                 controller: this.controller,
                 mailbox: this.mailbox,
+                taskManager: this.taskManager,
                 collaboration: this.collaboration,
                 fileActivity: this.fileActivity,
                 logger: this.logger,
@@ -550,7 +556,9 @@ export class BridgeHttpServer {
                 presence: this.presence,
                 identity: this.identity,
                 diagnostics: this.diagnostics,
-                cache: this.cache
+                cache: this.cache,
+                effectsLedger: this.effectsLedger,
+                attemptLedger: this.attemptLedger
               };
 
               try {

@@ -271,14 +271,26 @@ export class AttemptLedger {
       throw err;
     }
 
-    const row = this.db.prepare(`SELECT state, agent_id FROM bridge_attempts WHERE attempt_id = ?`).get(attemptId);
-    if (row && row.state === AttemptState.FENCED) {
-      const err = new Error(`FENCED_ATTEMPT_ERROR: Attempt '${attemptId}' is marked FENCED.`);
+    const row = this.db.prepare(`SELECT state, agent_id, lease_expires_at FROM bridge_attempts WHERE attempt_id = ?`).get(attemptId);
+    if (!row) {
+      const err = new Error(`Attempt '${attemptId}' does not exist.`);
+      err.code = 'ATTEMPT_NOT_FOUND';
+      throw err;
+    }
+
+    if (TERMINAL_ATTEMPT_STATES.has(row.state)) {
+      const err = new Error(`FENCED_ATTEMPT_ERROR: Attempt '${attemptId}' is marked ${row.state.toUpperCase()}.`);
       err.code = 'FENCED_ATTEMPT_ERROR';
       throw err;
     }
 
-    if (agentId && row && row.agent_id !== agentId) {
+    if (row.lease_expires_at && new Date(row.lease_expires_at).getTime() < Date.now()) {
+      const err = new Error(`LEASE_EXPIRED_ERROR: Attempt '${attemptId}' lease expired at ${row.lease_expires_at}.`);
+      err.code = 'LEASE_EXPIRED_ERROR';
+      throw err;
+    }
+
+    if (agentId && row.agent_id !== agentId) {
       const err = new Error(`Attempt '${attemptId}' belongs to agent '${row.agent_id}', not '${agentId}'.`);
       err.code = 'IMPERSONATION_ERROR';
       throw err;

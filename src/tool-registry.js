@@ -1,5 +1,8 @@
+import path from 'node:path';
 import { CONFIG } from './config.js';
 import { createSessionAdapter } from './session-adapters/index.js';
+import { isEffectfulTool, getToolClassification, EffectsLedger } from './effects/effects-ledger.js';
+import { AttemptLedger } from './attempts/attempt-ledger.js';
 
 /**
  * Unified Tool Registry: Single Source of Truth for all Bridge tools across
@@ -46,7 +49,6 @@ export class ToolRegistry {
     }
 
     const t0 = Date.now();
-    let success = true;
 
     // Resolve caller identity through AgentIdentityManager. The resolved
     // identity is authoritative for authorization; a caller cannot substitute
@@ -69,13 +71,194 @@ export class ToolRegistry {
     const args = { ...rawArgs, agentId: callerAgentId };
     if (rawArgs.fromAgent) args.fromAgent = callerAgentId;
 
+    // Classification & Authoritative Execution Boundary Check
+    const effectful = isEffectfulTool(name);
+
+    if (!effectful) {
+      // PURE / READ-ONLY: Executed directly without requiring Attempt context
+      try {
+        const result = await tool.handler(args, context);
+        const durationMs = Date.now() - t0;
+        context.diagnostics?.recordToolExecution(name, durationMs, true);
+        return result;
+      } catch (err) {
+        const durationMs = Date.now() - t0;
+        context.diagnostics?.recordToolExecution(name, durationMs, false);
+        throw err;
+      }
+    }
+
+    // EFFECTFUL TOOL: Validate attempt context and enforce EffectsLedger
+    const attemptId = rawArgs.attemptId || context.attemptId || null;
+    const epoch = rawArgs.epoch !== undefined && rawArgs.epoch !== null
+      ? Number(rawArgs.epoch)
+      : (context.epoch !== undefined && context.epoch !== null ? Number(context.epoch) : null);
+    const idempotencyKey = rawArgs.idempotencyKey || context.idempotencyKey || null;
+    const taskId = rawArgs.taskId || context.taskId || null;
+
+    const isV2Scoped = Boolean(attemptId);
+    const strictEnforced = context.enforcementMode === 'V2_ATTEMPT_SCOPED' ||
+      context.strictAttempts === true ||
+      Boolean(CONFIG.STRICT_V2_ATTEMPTS) ||
+      process.env.AGENT_BRIDGE_STRICT_ATTEMPTS === 'true';
+
+    if (!isV2Scoped) {
+      if (strictEnforced) {
+        const err = new Error(
+          `V2_ENFORCEMENT_ERROR: Effectful tool '${name}' requires an active Attempt context (attemptId, epoch). Operating under LEGACY_UNSCOPED is blocked in strict mode.`
+        );
+        err.code = 'V2_ENFORCEMENT_ERROR';
+        throw err;
+      }
+
+      // Legacy Compatibility Mode: explicit audit warning and proceed
+      context.logger?.log({
+        agentId: callerAgentId,
+        action: 'tool_execution_unscoped',
+        status: 'warning',
+        details: {
+          tool: name,
+          mode: 'LEGACY_UNSCOPED',
+          warning: 'Effectful tool executed without active AttemptLedger/EffectsLedger fencing.'
+        }
+      });
+
+      try {
+        const result = await tool.handler(args, context);
+        const durationMs = Date.now() - t0;
+        context.diagnostics?.recordToolExecution(name, durationMs, true);
+        return result;
+      } catch (err) {
+        const durationMs = Date.now() - t0;
+        context.diagnostics?.recordToolExecution(name, durationMs, false);
+        throw err;
+      }
+    }
+
+    // V2_ATTEMPT_SCOPED Execution
+    if (epoch === null || isNaN(epoch)) {
+      throw new Error(`Fencing Error: epoch token is required when attemptId is provided for effectful tool '${name}'.`);
+    }
+
+    const attemptLedger = context.attemptLedger || context.taskManager?.attempts || (context.logger?.db ? new AttemptLedger(context.logger) : null);
+    if (!attemptLedger) {
+      throw new Error(`AttemptLedger unavailable to validate attempt '${attemptId}'.`);
+    }
+
+    const attempt = attemptLedger.getAttempt(attemptId);
+    if (!attempt) {
+      const err = new Error(`Attempt '${attemptId}' does not exist.`);
+      err.code = 'ATTEMPT_NOT_FOUND';
+      throw err;
+    }
+
+    if (taskId && attempt.taskId !== taskId) {
+      const err = new Error(`Attempt '${attemptId}' is bound to task '${attempt.taskId}', not '${taskId}'.`);
+      err.code = 'TASK_BINDING_MISMATCH';
+      throw err;
+    }
+
+    // Monotonic fencing & lease check (throws FENCED_ATTEMPT_ERROR, LEASE_EXPIRED_ERROR, IMPERSONATION_ERROR)
+    attemptLedger.validateFencing({
+      taskId: attempt.taskId,
+      attemptId,
+      epoch,
+      agentId: callerAgentId
+    });
+
+    // Derive Effective Authority / Grant check
+    if (attempt.grant) {
+      let grantObj = attempt.grant;
+      if (typeof grantObj === 'string') {
+        try { grantObj = JSON.parse(grantObj); } catch {}
+      }
+      if (typeof grantObj === 'object' && grantObj !== null) {
+        if (grantObj.allowedTools && Array.isArray(grantObj.allowedTools)) {
+          if (!grantObj.allowedTools.includes('*') && !grantObj.allowedTools.includes(name)) {
+            const grantErr = new Error(`GRANT_VIOLATION_ERROR: Tool '${name}' is not permitted under attempt grant.`);
+            grantErr.code = 'GRANT_VIOLATION_ERROR';
+            throw grantErr;
+          }
+        }
+        if ((grantObj.allowedPaths || grantObj.allowedRoots) && (rawArgs.filePath || rawArgs.rootPath)) {
+          const target = path.resolve(rawArgs.filePath || rawArgs.rootPath);
+          const allowedList = (grantObj.allowedPaths || grantObj.allowedRoots).map(p => path.resolve(p));
+          const permitted = allowedList.some(p => target === p || target.startsWith(p + path.sep));
+          if (!permitted) {
+            const grantErr = new Error(`GRANT_VIOLATION_ERROR: Target path '${rawArgs.filePath || rawArgs.rootPath}' is outside attempt grant.`);
+            grantErr.code = 'GRANT_VIOLATION_ERROR';
+            throw grantErr;
+          }
+        }
+      }
+    }
+
+    // Workspace Worktree Isolation check
+    if (attempt.worktreePath && (rawArgs.filePath || rawArgs.rootPath)) {
+      const target = path.resolve(rawArgs.filePath || rawArgs.rootPath);
+      const authorizedWorktree = path.resolve(attempt.worktreePath);
+      if (target !== authorizedWorktree && !target.startsWith(authorizedWorktree + path.sep)) {
+        const wsErr = new Error(
+          `WORKSPACE_ISOLATION_ERROR: Attempt '${attemptId}' is restricted to isolated worktree '${attempt.worktreePath}'. Target path '${rawArgs.filePath || rawArgs.rootPath}' is outside authorized worktree.`
+        );
+        wsErr.code = 'WORKSPACE_ISOLATION_ERROR';
+        throw wsErr;
+      }
+    }
+
+    // Protected project (e.g. Zia) check
+    if (rawArgs.filePath || rawArgs.rootPath) {
+      const target = path.resolve(rawArgs.filePath || rawArgs.rootPath);
+      const ziaRoot = CONFIG.ZIA_ROOT ? path.resolve(CONFIG.ZIA_ROOT) : null;
+      if (ziaRoot && (target === ziaRoot || target.startsWith(ziaRoot + path.sep))) {
+        if (CONFIG.ZIA_WRITE_LOCKED) {
+          const ziaErr = new Error(`PROTECTED_PROJECT_ERROR: Direct writes to Zia (${CONFIG.ZIA_ROOT}) are strictly locked.`);
+          ziaErr.code = 'PROTECTED_PROJECT_ERROR';
+          throw ziaErr;
+        }
+      }
+    }
+
+    // Enforce Idempotency & Effects Ledger
+    const effectsLedger = context.effectsLedger || (context.logger?.db ? new EffectsLedger(context.logger) : null);
+    if (!effectsLedger) {
+      throw new Error('EffectsLedger unavailable for effectful tool execution.');
+    }
+
+    const classification = getToolClassification(name);
+    const intent = effectsLedger.recordIntent({
+      idempotencyKey,
+      attemptId,
+      taskId: attempt.taskId,
+      epoch,
+      agentId: callerAgentId,
+      operation: name,
+      classification,
+      params: args,
+      attemptLedger
+    });
+
+    if (intent.alreadyCommitted) {
+      context.logger?.log({
+        agentId: callerAgentId,
+        action: 'idempotent_effect_replayed',
+        status: 'replayed',
+        details: { tool: name, effectId: intent.effectId, idempotencyKey: intent.idempotencyKey }
+      });
+      const durationMs = Date.now() - t0;
+      context.diagnostics?.recordToolExecution(name, durationMs, true);
+      return intent.result;
+    }
+
+    effectsLedger.markExecuting(intent.effectId);
     try {
       const result = await tool.handler(args, context);
+      effectsLedger.commitEffect(intent.effectId, result);
       const durationMs = Date.now() - t0;
       context.diagnostics?.recordToolExecution(name, durationMs, true);
       return result;
     } catch (err) {
-      success = false;
+      effectsLedger.failEffect(intent.effectId, err);
       const durationMs = Date.now() - t0;
       context.diagnostics?.recordToolExecution(name, durationMs, false);
       throw err;
