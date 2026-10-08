@@ -2,6 +2,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveSecret, loadKeychainSecret } from './config-resolver.js';
+import { REGISTERED_VERIFICATION_TOKENS } from './security/verification-tokens.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,6 +14,9 @@ export const CONFIG = {
   DB_PATH: path.join(BRIDGE_ROOT, 'data', 'bridge.sqlite'),
   TEST_WORKSPACE: path.join(BRIDGE_ROOT, 'test-workspace'),
   ZIA_ROOT: '/Users/jayanthpranaykonada/Zia',
+  
+  // Registered non-sensitive verification tokens for Agent Bridge interoperability tests
+  VERIFICATION_TOKENS: REGISTERED_VERIFICATION_TOKENS,
   
   // Agent Bridge is explicitly authorized by the owner to mutate the
   // entire user home directory. macOS/TCC/UNIX permissions still apply.

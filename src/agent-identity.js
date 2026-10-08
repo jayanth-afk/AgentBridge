@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { CONFIG } from './config.js';
+import { isRegisteredVerificationToken } from './security/verification-tokens.js';
 
 export class AgentIdentityManager {
   constructor(auditLogger, boundAgentId = null) {
@@ -36,6 +37,11 @@ export class AgentIdentityManager {
 
   verifyToken(token) {
     if (!token) return null;
+    // Verification tokens are strictly non-sensitive test tokens and cannot be used
+    // as authentication credentials.
+    if (isRegisteredVerificationToken(token)) {
+      return null;
+    }
     const row = this.db.prepare(`
       SELECT * FROM agent_tokens WHERE token = ?
     `).get(token);

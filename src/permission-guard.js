@@ -2,6 +2,11 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import { CONFIG } from './config.js';
+import {
+  isSensitiveCredentialRequest,
+  isVerificationTokenRequest,
+  SECURITY_DENIAL_MESSAGE
+} from './security/verification-tokens.js';
 
 export class PermissionGuard {
   constructor(config = CONFIG) {
@@ -82,6 +87,32 @@ export class PermissionGuard {
       };
     }
 
+    return { allowed: true };
+  }
+
+  /**
+   * Validate safety of inter-agent queries.
+   * Strictly blocks any query attempting to extract credentials, passwords,
+   * API keys, private keys, or personal secrets.
+   */
+  validateInterAgentQuery(query) {
+    if (!query || typeof query !== 'string') {
+      return { allowed: true };
+    }
+    const sensitive = isSensitiveCredentialRequest(query);
+    if (sensitive.sensitive) {
+      return {
+        allowed: false,
+        reason: sensitive.reason || SECURITY_DENIAL_MESSAGE,
+        code: 'ACCESS_DENIED_SENSITIVE_CREDENTIAL'
+      };
+    }
+    if (isVerificationTokenRequest(query)) {
+      return {
+        allowed: true,
+        isVerificationToken: true
+      };
+    }
     return { allowed: true };
   }
 

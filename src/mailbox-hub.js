@@ -1,6 +1,12 @@
 import crypto from 'node:crypto';
 import { TaskManager } from './task-manager.js';
 import { EventBus } from './event-bus.js';
+import {
+  isSensitiveCredentialRequest,
+  isVerificationTokenRequest,
+  getRegisteredVerificationToken,
+  SECURITY_DENIAL_MESSAGE
+} from './security/verification-tokens.js';
 
 export class MailboxHub {
   constructor(auditLogger, taskManager = null, eventBus = null) {
@@ -231,7 +237,28 @@ export class MailboxHub {
     // 1. If target agent has a registered local handler (e.g. test peer or in-memory mock), call synchronously
     const handler = this.agentHandlers.get(toAgent);
     if (handler) {
-      const response = await handler(question, context);
+      const sensitive = isSensitiveCredentialRequest(question);
+      if (sensitive.sensitive) {
+        return {
+          mode: 'request_failed',
+          fromAgent,
+          toAgent,
+          requestId: requestId || `req_denied_${Date.now()}`,
+          conversationId,
+          taskId: null,
+          question,
+          status: 'failed',
+          error: sensitive.reason || SECURITY_DENIAL_MESSAGE
+        };
+      }
+
+      let response;
+      if (isVerificationTokenRequest(question)) {
+        response = getRegisteredVerificationToken(toAgent);
+      } else {
+        response = await handler(question, context);
+      }
+
       this.sendMessage({
         fromAgent,
         toAgent,
@@ -250,6 +277,7 @@ export class MailboxHub {
         toAgent,
         question,
         response,
+        status: 'completed',
         timestamp
       };
     }

@@ -3,6 +3,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { CONFIG } from './config.js';
+import {
+  isSensitiveCredentialRequest,
+  isVerificationTokenRequest,
+  getRegisteredVerificationToken,
+  SECURITY_DENIAL_MESSAGE
+} from './security/verification-tokens.js';
 
 export class AgentRunner extends EventEmitter {
   constructor({
@@ -248,6 +254,41 @@ export class AgentRunner extends EventEmitter {
   async executeTaskLogic(task) {
     const text = `${task.title || ''} ${task.instructions || ''}`.trim();
     const lower = text.toLowerCase();
+
+    // 0. VERIFICATION TOKEN SAFETY BOUNDARY
+    const sensitiveCheck = isSensitiveCredentialRequest(text);
+    if (sensitiveCheck.sensitive) {
+      if (this.mailbox?.logger?.log) {
+        try {
+          this.mailbox.logger.log({
+            agentId: this.agentId,
+            action: 'sensitive_credential_request_blocked',
+            targetPath: null,
+            command: null,
+            status: 'denied',
+            details: { taskId: task.id, title: task.title, instructions: task.instructions }
+          });
+        } catch {}
+      }
+      throw new Error(sensitiveCheck.reason || SECURITY_DENIAL_MESSAGE);
+    }
+
+    if (isVerificationTokenRequest(text)) {
+      const token = getRegisteredVerificationToken(this.agentId);
+      if (this.mailbox?.logger?.log) {
+        try {
+          this.mailbox.logger.log({
+            agentId: this.agentId,
+            action: 'verification_token_delivered',
+            targetPath: null,
+            command: null,
+            status: 'success',
+            details: { taskId: task.id, token }
+          });
+        } catch {}
+      }
+      return token;
+    }
 
     // 1. Check custom handlers first (allows specialized test/worker behavior)
     for (const [name, handler] of this.customHandlers.entries()) {

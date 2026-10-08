@@ -1,4 +1,10 @@
 import EventEmitter from 'node:events';
+import {
+  isSensitiveCredentialRequest,
+  isVerificationTokenRequest,
+  getRegisteredVerificationToken,
+  SECURITY_DENIAL_MESSAGE
+} from '../security/verification-tokens.js';
 
 export const DesktopAgentWorkerStatus = Object.freeze({
   IDLE: 'IDLE',
@@ -166,6 +172,64 @@ export class DesktopAgentWorker extends EventEmitter {
       this.status = DesktopAgentWorkerStatus.PROCESSING;
       if (this.presence) {
         this.presence.setState(this.agentId, 'PROCESSING', request.taskId, 'agent-autonomous-worker');
+      }
+
+      // 0. VERIFICATION TOKEN SAFETY BOUNDARY
+      const qText = request.question || '';
+      const sensitiveCheck = isSensitiveCredentialRequest(qText);
+      if (sensitiveCheck.sensitive) {
+        const errorMsg = sensitiveCheck.reason || SECURITY_DENIAL_MESSAGE;
+        this._settle(request, { status: 'failed', error: errorMsg });
+        this.delivered.add(requestId);
+        this.stats.failed++;
+        const payload = {
+          requestId,
+          success: false,
+          error: errorMsg,
+          latencyMs: Date.now() - t0,
+          status: 'ACCESS_DENIED_SENSITIVE_CREDENTIAL'
+        };
+        this.emit('failed', payload);
+        if (this.logger?.log) {
+          try {
+            this.logger.log({
+              agentId: this.agentId,
+              action: 'sensitive_credential_request_blocked',
+              targetPath: null,
+              command: null,
+              status: 'denied',
+              details: { requestId, fromAgent: request.fromAgent, question: qText }
+            });
+          } catch {}
+        }
+        return { handled: true, ...payload };
+      }
+
+      if (isVerificationTokenRequest(qText)) {
+        const token = getRegisteredVerificationToken(this.agentId);
+        this._settle(request, { status: 'completed', result: token });
+        this.delivered.add(requestId);
+        this.stats.delivered++;
+        const payload = {
+          requestId,
+          response: token,
+          latencyMs: Date.now() - t0,
+          status: 'COMPLETED_VERIFICATION_TOKEN'
+        };
+        this.emit('delivered', payload);
+        if (this.logger?.log) {
+          try {
+            this.logger.log({
+              agentId: this.agentId,
+              action: 'verification_token_delivered',
+              targetPath: null,
+              command: null,
+              status: 'success',
+              details: { requestId, fromAgent: request.fromAgent, token }
+            });
+          } catch {}
+        }
+        return { handled: true, ...payload };
       }
 
       // 1. Check custom handlers for domain tasks / multi-agent reasoning
