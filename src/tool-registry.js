@@ -799,6 +799,24 @@ export class ToolRegistry {
     });
 
     this.registerTool({
+      name: 'bridge_explain_request',
+      description: 'Explain the complete evidence-backed lifecycle and causal trace for a request.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          requestId: { type: 'string', description: 'Request ID to explain' }
+        },
+        required: ['requestId']
+      },
+      handler: async (args, ctx) => {
+        if (ctx.requestExplainer) {
+          return ctx.requestExplainer.explainRequest(args.requestId);
+        }
+        return { error: 'RequestExplainer not available in context' };
+      }
+    });
+
+    this.registerTool({
       name: 'bridge_get_pending_requests',
       description: 'Get pending correlated requests awaiting answer for a specific agent.',
       inputSchema: {

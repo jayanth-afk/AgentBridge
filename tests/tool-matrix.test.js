@@ -20,6 +20,7 @@ import { EventBus } from '../src/event-bus.js';
 import { CollaborationManager } from '../src/collaboration-manager.js';
 import { FileActivityManager } from '../src/file-activity-manager.js';
 import { ToolRegistry } from '../src/tool-registry.js';
+import { RequestExplainer } from '../src/diagnostics/request-explainer.js';
 
 const TEST_DB = path.join(CONFIG.DATA_DIR, 'test_tool_matrix.sqlite');
 const WS = CONFIG.TEST_WORKSPACE;
@@ -55,9 +56,11 @@ test('Agent Bridge Tool Matrix — all registered tools exercised', async (t) =>
 
   mailbox.registerAgentHandler('chatgpt-desktop', async (q) => `peer answered: ${q}`);
 
+  const requestExplainer = new RequestExplainer(logger);
+
   const ctx = {
     controller, mailbox, taskManager, collaboration, fileActivity, logger, git,
-    presence, identity, diagnostics, cache, eventBus, boundAgentId: AGENT
+    presence, identity, diagnostics, cache, eventBus, requestExplainer, boundAgentId: AGENT
   };
 
   // ---- fixtures -----------------------------------------------------------
@@ -144,6 +147,7 @@ test('Agent Bridge Tool Matrix — all registered tools exercised', async (t) =>
     ['bridge_submit_task_result', { taskId: task.id, agentId: 'chatgpt-desktop', status: 'completed', result: 'done' }],
     ['bridge_ask_agent', { fromAgent: AGENT, toAgent: 'chatgpt-desktop', question: 'matrix sync question' }],
     ['bridge_get_request_status', { requestId: pending.requestId }],
+    ['bridge_explain_request', { requestId: pending.requestId }],
     ['bridge_get_pending_requests', { agentId: AGENT }],
     ['bridge_answer_request', { requestId: pending.requestId, agentId: AGENT, response: 'answered' }],
     ['bridge_get_events', { agentId: AGENT, limit: 5 }],

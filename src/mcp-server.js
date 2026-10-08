@@ -24,6 +24,7 @@ import { EventBus } from './event-bus.js';
 import { createSessionAdapter } from './session-adapters/index.js';
 import { BridgeHttpServer } from './http-server.js';
 import { CapabilityRegistry } from './capabilities/capability-registry.js';
+import { RequestExplainer } from './diagnostics/request-explainer.js';
 
 export class BridgeMcpServer {
   constructor(options = {}) {
@@ -61,6 +62,7 @@ export class BridgeMcpServer {
     });
 
     this.capabilityRegistry = options.capabilityRegistry || new CapabilityRegistry(this.logger);
+    this.requestExplainer = options.requestExplainer || new RequestExplainer(this.logger);
 
     // Single unified source of truth for tools
     this.registry = options.toolRegistry || new ToolRegistry();
@@ -122,6 +124,7 @@ export class BridgeMcpServer {
       eventBus: this.eventBus,
       sessionAdapter: this.sessionAdapter,
       capabilityRegistry: this.capabilityRegistry,
+      requestExplainer: this.requestExplainer,
       boundAgentId: this.agentId
     };
 
