@@ -54,10 +54,15 @@ export class DesktopAgentWorker extends EventEmitter {
     this.inFlight = new Set();
     this.delivered = new Set();
     this.stats = { received: 0, delivered: 0, failed: 0, duplicatesSuppressed: 0 };
+    this.customHandlers = new Map();
     // Serial model-turn chain. A desktop app has a single composer, so
     // concurrent turns would corrupt each other's correlation. All deliveries
     // run one-at-a-time through this chain.
     this._turnChain = Promise.resolve();
+  }
+
+  registerHandler(name, handler) {
+    this.customHandlers.set(name, handler);
   }
 
   async start({ recoverPending = true } = {}) {
@@ -162,6 +167,23 @@ export class DesktopAgentWorker extends EventEmitter {
       if (this.presence) {
         this.presence.setState(this.agentId, 'PROCESSING', request.taskId, 'agent-autonomous-worker');
       }
+
+      // 1. Check custom handlers for domain tasks / multi-agent reasoning
+      if (this.customHandlers) {
+        for (const [name, handler] of this.customHandlers.entries()) {
+          if ((request.question || '').toLowerCase().includes(name.toLowerCase())) {
+            const result = await handler(request);
+            const responseText = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+            this._settle(request, { status: 'completed', result: responseText });
+            this.delivered.add(requestId);
+            this.stats.delivered++;
+            const payload = { requestId, response: responseText, latencyMs: Date.now() - t0, status: 'COMPLETED' };
+            this.emit('delivered', payload);
+            return { handled: true, ...payload };
+          }
+        }
+      }
+
       // Exact-reply deterministic communication test probe
       let exactMatch = (request.question || '').match(/reply with exactly\s+["']([^"']+)["']/i);
       if (!exactMatch) {

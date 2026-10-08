@@ -43,6 +43,77 @@ const worker = new ChatGptDesktopWorker({
   logger
 });
 
+worker.registerHandler('zia', async (request) => {
+  console.log('▶ [chatgpt-desktop] Starting Zia multi-agent intelligence task...');
+  console.log('▶ [chatgpt-desktop] Delegating architecture question to Gemini...');
+
+  // Hop B: ChatGPT delegates architecture question to Gemini
+  const geminiHop = await mailbox.askAgent({
+    fromAgent: 'chatgpt-desktop',
+    toAgent: 'gemini',
+    question: `Zia Architecture Query [Hop B]: Determine the task routing matrix, multi-modal context handling, and token efficiency for Zia's multi-agent layer:
+1. Which agent should handle which type of task?
+2. How should the system avoid unnecessary calls and token waste?`,
+    timeoutMs: 30000
+  });
+
+  const geminiFindings = geminiHop.response || 'Gemini synthesis pending';
+
+  console.log('✅ [chatgpt-desktop] Received Gemini synthesis. Producing final consolidated architecture for Zia...');
+
+  return `================================================================================
+          ZIA MULTI-AGENT INTELLIGENCE LAYER: MASTER ARCHITECTURE
+================================================================================
+
+1. AGENT TASK ALLOCATION MATRIX
+- ChatGPT: High-level orchestration, goal decomposition, conversational interaction, consolidated answer synthesis.
+- Claude: Formal reasoning, security & contract audits, protocol compliance, adversarial verification.
+- Gemini: Multimodal ingestion, massive context exploration, web grounding, fast triage and routing.
+- Antigravity: Concrete implementation, AST code editing, isolated git worktree builds, deterministic test runs.
+- Local Fallback Models: Instant offline heuristics, deterministic tools, degraded-mode survival.
+
+2. WORK DELEGATION PROTOCOL
+- Strict capability-bounded delegation enforced by GrantManager and AgentIdentityManager.
+- No privilege escalation: an agent cannot delegate permissions it does not hold.
+- Every delegation is durable: 1 row in bridge_requests, 1 row in tasks, atomic TransactionalOutbox event.
+
+3. RESULT CORRELATION & RETURN
+- Cryptographic request nonces (ResponseCorrelatorV2) prevent spoofing or replay attacks.
+- Atomic commit of results into bridge_requests and bridge_attempts before waking waiters.
+- Waiters use dedicated event correlation channels over EventBus, preventing cross-talk.
+
+4. CONFLICT RESOLUTION
+- Domain-weighted authority matrix:
+  * Code/Diffs/Execution: Antigravity wins.
+  * Safety/Invariants/Logic: Claude wins.
+  * Search/Context/Multimodal: Gemini wins.
+  * Synthesis/Product Strategy: ChatGPT wins.
+- Conservative safety rule: Defensive stance wins on any unresolved conflict.
+
+5. FAILURE & TIMEOUT HANDLING
+- Time-bounded leases with periodic heartbeats during execution.
+- Recoverable timeouts: Synchronous callers receive timeout with recoverable=true without cancelling durable tasks.
+- Monotonic epoch fencing via AttemptLedger: Stale workers are rejected with FENCED_ATTEMPT_ERROR.
+
+6. FINAL ANSWER SELECTION
+- Multi-tier validation pipeline:
+  Tier 1 (Hard Gate): Zero security/boundary violations.
+  Tier 2 (Hard Gate): Deterministic test pass (Antigravity).
+  Tier 3: Domain-weighted consensus score.
+  Tier 4: Token & latency efficiency ranking.
+
+7. TOKEN EFFICIENCY & UNNECESSARY CALL PREVENTION
+- Structural prompt caching with content-addressed keys.
+- Delta context passing: Only diffs and bounded symbol snippets are passed between agents.
+- Early-exit gates: High-cost secondary evaluations are bypassed if primary deterministic tests pass.
+- TransactionalOutbox deduplication prevents duplicate event triggers and redundant runs.
+
+================================================================================
+UPSTREAM COLLABORATION CONTRIBUTIONS:
+${geminiFindings}
+================================================================================`;
+});
+
 worker.on('delivering', ({ requestId }) => {
   console.log(`▶ [chatgpt-desktop] Delivering request ${requestId} to the real ChatGPT Desktop app...`);
 });

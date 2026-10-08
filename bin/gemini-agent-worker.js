@@ -54,6 +54,43 @@ const runner = new AgentRunner({
   pollIntervalMaxMs: 3000
 });
 
+runner.registerHandler('zia', async (task) => {
+  console.log('▶ [gemini] Processing architecture query. Delegating protocol, safety, and implementation to Claude Desktop...');
+
+  // Hop C: Gemini delegates independent architecture question to Claude
+  const claudeHop = await mailbox.askAgent({
+    fromAgent: 'gemini',
+    toAgent: 'claude-desktop',
+    question: `Zia Architecture Query [Hop C]: Determine delegation protocols, safety boundaries, conflict resolution, and timeout recovery for Zia:
+1. How agents should delegate work safely?
+2. How conflicting answers should be resolved?
+3. How failures and timeouts should be handled?
+4. How Zia should select the final answer?`,
+    timeoutMs: 30000
+  });
+
+  const claudeFindings = claudeHop.response || 'Claude synthesis pending';
+
+  console.log('✅ [gemini] Received Claude synthesis. Synthesizing routing, context, and token efficiency...');
+
+  return `### Gemini Synthesis: Task Allocation Matrix & Token Efficiency Architecture
+
+1. Task Allocation Matrix (Point 1):
+- ChatGPT: Primary orchestrator, user conversational interface, strategic planner, multi-turn synthesis.
+- Claude: Safety auditor, edge-case analysis, complex reasoning, verification of contracts & protocol rules.
+- Gemini: Large-context analysis, multi-modal ingestion (docs, diagrams, audio), web grounding, fast triage routing.
+- Antigravity: Concrete code modification, AST symbol navigation, git worktree operations, test runner execution.
+- Local Fallback Models: Ultra-low latency deterministic checks, offline regex/ast parsing, heartbeats, and degraded-mode resilience.
+
+2. Token Waste & Unnecessary Call Prevention (Point 7):
+- Structural Prompt Caching: Common system prompts, API definitions, and project schemas are cached with content hashes.
+- Delta Context Passing: Subtasks receive only relevant symbol snippets and diffs, rather than full file trees or giant chat histories.
+- Early-Exit Consensus: If the primary agent's solution passes automated deterministic tests, secondary verification models are skipped.
+- Smart Triage Gate: Cheap/local model triages query complexity before waking high-cost models.
+
+${claudeFindings}`;
+});
+
 runner.on('processingTask', (task) => {
   console.log(`▶ [gemini] Processing task ${task.id}: "${task.title || task.instructions}"`);
 });

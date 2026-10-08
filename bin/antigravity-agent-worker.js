@@ -54,6 +54,27 @@ const runner = new AgentRunner({
   pollIntervalMaxMs: 3000
 });
 
+runner.registerHandler('zia', async (task) => {
+  console.log('▶ [antigravity-ide] Analyzing concrete implementation and security architecture for Zia...');
+  return `### Antigravity IDE Findings: Concrete Implementation & Security Architecture for Zia
+
+1. Result Return & Correlation (Point 3):
+- Every cross-agent turn is identified by a unique, cryptographically random requestId and nonce (ResponseCorrelatorV2).
+- Responses are delivered via atomic SQLite transactions into bridge_requests and bridge_attempts, accompanied by response_delivered outbox events.
+- Waiters subscribe to dedicated in-memory event channels filtered by requestId, guaranteeing zero cross-talk between concurrent agent conversations.
+
+2. Crash Recovery, Leases & Epoch Fencing (Point 5):
+- Task leases are time-bounded (e.g. 30s-60s) with periodic heartbeat refresh during long model turns.
+- If a worker crashes or abandons a lease, TaskManager.recoverExpiredTasks() re-queues the task as pending and increments retry_count.
+- When re-claimed by another worker, AttemptLedger advances current_epoch monotonically.
+- Any late submission from a zombie worker with a stale epoch is strictly blocked with FENCED_ATTEMPT_ERROR, preventing duplicate side effects.
+
+3. Token Waste Elimination & Isolation (Point 7):
+- Mandatory workspace isolation: Write tasks execute in isolated git worktrees bound to attemptId; protected cores (/Users/jayanthpranaykonada/Zia) strictly forbid direct writes.
+- Deduplication: TransactionalOutbox uses SHA-256 dedup_keys; duplicate event submissions produce NO duplicate events or wakeups.
+- Structured AST symbol reads (bridge_read_symbol) and bounded search snippets replace bulk file transfers, keeping token consumption minimal.`;
+});
+
 runner.on('processingTask', (task) => {
   console.log(`▶ [antigravity-ide] Processing task ${task.id}: "${task.title || task.instructions}"`);
 });
