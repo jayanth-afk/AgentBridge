@@ -389,8 +389,21 @@ export class TaskManager extends EventEmitter {
       if (attemptId && (epoch === null || epoch === undefined)) {
         throw new Error(`Fencing Error: epoch token is required when attemptId is provided for task '${taskId}'.`);
       }
-      if (attemptId && epoch && this.attempts) {
-        this.attempts.validateFencing({ taskId, attemptId, epoch, agentId });
+      if ((epoch !== null && epoch !== undefined) && this.attempts) {
+        if (attemptId) {
+          this.attempts.validateFencing({ taskId, attemptId, epoch, agentId });
+        } else {
+          const epochRow = this.db.prepare(`
+            SELECT current_epoch, active_attempt_id FROM task_epochs WHERE task_id = ?
+          `).get(taskId);
+          if (epochRow && epoch !== epochRow.current_epoch) {
+            const err = new Error(
+              `FENCED_ATTEMPT_ERROR: Stale epoch ${epoch} for task '${taskId}'. Current epoch is ${epochRow.current_epoch}. Execution blocked.`
+            );
+            err.code = 'FENCED_ATTEMPT_ERROR';
+            throw err;
+          }
+        }
       }
 
       // Authorization: only the assignee (owner) or the creator may move a task

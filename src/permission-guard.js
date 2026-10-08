@@ -32,6 +32,10 @@ export class PermissionGuard {
         allowedPermissions: ['READ', 'SEARCH', 'WRITE', 'CREATE', 'EDIT', 'DELETE', 'EXECUTE', 'GIT_READ', 'GIT_WRITE', 'PUSH', 'MESSAGE', 'DELEGATE'],
         requiresHumanApproval: ['DESTRUCTIVE', 'MERGE']
       },
+      'gemini': {
+        allowedPermissions: ['READ', 'SEARCH', 'WRITE', 'CREATE', 'EDIT', 'DELETE', 'EXECUTE', 'GIT_READ', 'GIT_WRITE', 'PUSH', 'MESSAGE', 'DELEGATE'],
+        requiresHumanApproval: ['DESTRUCTIVE', 'MERGE']
+      },
       'freebuff': {
         allowedPermissions: ['READ', 'SEARCH', 'WRITE', 'CREATE', 'EDIT', 'DELETE', 'EXECUTE', 'GIT_READ', 'GIT_WRITE', 'PUSH', 'MESSAGE', 'DELEGATE'],
         requiresHumanApproval: ['DESTRUCTIVE', 'MERGE']

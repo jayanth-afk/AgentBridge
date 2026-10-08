@@ -11,6 +11,7 @@ import { PermissionGuard } from '../src/permission-guard.js';
 import { GitController } from '../src/git-controller.js';
 import { AgentRunner } from '../src/agent-runner.js';
 import { CacheManager } from '../src/cache-manager.js';
+import { WorkerSupervisor } from '../src/control-plane/worker-supervisor.js';
 
 const args = process.argv.slice(2);
 
@@ -24,6 +25,7 @@ Usage:
   bridge presence
   bridge snapshot [rootPath]
   bridge worker [--agent <agentId>] [--once]
+  bridge supervisor [start|stop|restart|status] [--worker <agentId>]
   bridge send <toAgent> <subject> <content> [--agent <agentId>]
   bridge broadcast <subject> <content> [--agent <agentId>]
   bridge inbox [--unread] [--compact] [--agent <agentId>]
@@ -106,6 +108,47 @@ try {
         const status = a.connected ? `ONLINE [${a.state}]` : 'OFFLINE';
         console.log(`  ${a.agentId.padEnd(18)} : ${status} (PID: ${a.pid || '-'}, transport: ${a.transport}, last: ${a.lastHeartbeat})`);
       });
+      break;
+    }
+
+    case 'supervisor': {
+      const supervisor = new WorkerSupervisor();
+      const subAction = filteredArgs[1] || 'status';
+      const workerIdx = filteredArgs.indexOf('--worker');
+      const targetWorker = workerIdx >= 0 ? filteredArgs[workerIdx + 1] : null;
+
+      if (subAction === 'start') {
+        if (targetWorker) {
+          const res = await supervisor.startWorker(targetWorker);
+          console.log(`Supervisor started worker [${targetWorker}]: PID ${res.pid} (alreadyRunning: ${res.alreadyRunning || false})`);
+        } else {
+          const res = await supervisor.startAll();
+          console.log('Supervisor started all workers:', res);
+        }
+      } else if (subAction === 'stop') {
+        if (targetWorker) {
+          const res = await supervisor.stopWorker(targetWorker);
+          console.log(`Supervisor stopped worker [${targetWorker}]:`, res);
+        } else {
+          const res = await supervisor.stopAll();
+          console.log('Supervisor stopped all workers:', res);
+        }
+      } else if (subAction === 'restart') {
+        if (targetWorker) {
+          const res = await supervisor.restartWorker(targetWorker);
+          console.log(`Supervisor restarted worker [${targetWorker}]: PID ${res.pid}`);
+        } else {
+          await supervisor.stopAll();
+          const res = await supervisor.startAll();
+          console.log('Supervisor restarted all workers:', res);
+        }
+      } else {
+        const status = supervisor.status();
+        console.log('Agent Bridge Worker Supervisor Status:');
+        for (const [id, s] of Object.entries(status)) {
+          console.log(`  ${id.padEnd(18)} : ${s.running ? `RUNNING (PID: ${s.pid})` : 'STOPPED'} [log: ${s.logFile}]`);
+        }
+      }
       break;
     }
 

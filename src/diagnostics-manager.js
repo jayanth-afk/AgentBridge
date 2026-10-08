@@ -182,9 +182,15 @@ export class DiagnosticsManager {
     }
 
     const connection = {
-      transport: presence?.metadata?.transport || 'mcp-stdio',
+      transport: presence?.transport || presence?.metadata?.transport || 'mcp-stdio',
       isAlive: Boolean(presence?.isAlive),
-      lastHeartbeat: presence?.lastHeartbeat || null
+      lastHeartbeat: presence?.lastHeartbeat || null,
+      autonomousWorker: Boolean(presence?.autonomousWorker),
+      canReceiveTasks: Boolean(presence?.canReceiveTasks),
+      canInitiateTurns: Boolean(presence?.canInitiateTurns),
+      mcpConnected: Boolean(presence?.mcpConnected),
+      workerPid: presence?.workerPid || null,
+      mcpPid: presence?.mcpPid || null
     };
 
     // Average tool latency across all calls if available

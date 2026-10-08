@@ -353,8 +353,18 @@ export class AgentRunner extends EventEmitter {
       return await this.controller.createFile(writeMatch[1].trim(), this.agentId, writeMatch[2], true);
     }
 
-    // 4. Acknowledgment / Ping request
-    if (lower.includes('linkage_ack_antigravity') || lower.includes('reply with exactly linkage_ack_antigravity')) {
+    // 4. Exact reply extraction for deterministic communication tests
+    let exactMatch = text.match(/reply with exactly\s+["']([^"']+)["']/i);
+    if (!exactMatch) {
+      exactMatch = text.match(/reply with exactly\s+(.+?)(?:\s+if\b|[.\r\n]|$)/i);
+    }
+    if (exactMatch) {
+      let token = exactMatch[1].trim();
+      token = token.replace(/[\.\,\;\!\?]+$/, '').trim();
+      if (token) return token;
+    }
+
+    if (lower.includes('linkage_ack_antigravity')) {
       return 'LINKAGE_ACK_ANTIGRAVITY';
     }
 

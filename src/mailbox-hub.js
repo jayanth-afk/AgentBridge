@@ -393,7 +393,8 @@ export class MailboxHub {
         taskId: task.id,
         question,
         status: 'timeout',
-        error: outcome.error || `Timed out after ${timeoutMs}ms waiting for response from ${toAgent}`
+        error: outcome.error || `Timed out after ${timeoutMs}ms waiting for response from ${toAgent}`,
+        recoverable: true
       };
     } else {
       return {

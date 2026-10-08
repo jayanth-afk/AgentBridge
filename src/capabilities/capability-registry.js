@@ -451,7 +451,7 @@ export class CapabilityRegistry {
    * Probe standard known routes across all registered agents
    */
   async probeAll(context = {}) {
-    const agents = ['chatgpt-desktop', 'claude-desktop', 'antigravity-ide'];
+    const agents = ['chatgpt-desktop', 'claude-desktop', 'antigravity-ide', 'gemini'];
     const results = {};
 
     for (const agent of agents) {
@@ -466,6 +466,8 @@ export class CapabilityRegistry {
         results[agent]['notification'] = await this.probe(agent, 'notification', context);
       } else if (agent === 'antigravity-ide') {
         results[agent]['ide-direct'] = await this.probe(agent, 'ide-direct', context);
+      } else if (agent === 'gemini') {
+        results[agent]['gemini-direct'] = await this.probe(agent, 'gemini-direct', context);
       }
     }
 

@@ -15,6 +15,7 @@ import { AuditLogger } from '../src/audit-logger.js';
 import { MailboxHub } from '../src/mailbox-hub.js';
 import { TaskManager } from '../src/task-manager.js';
 import { EventBus } from '../src/event-bus.js';
+import { PresenceManager } from '../src/presence-manager.js';
 import { ClaudeDesktopWorker } from '../src/control-plane/claude-desktop-worker.js';
 
 const args = process.argv.slice(2);
@@ -27,11 +28,13 @@ const logger = new AuditLogger(dbPath);
 const taskManager = new TaskManager(logger);
 const eventBus = new EventBus(logger);
 const mailbox = new MailboxHub(logger, taskManager, eventBus);
+const presence = new PresenceManager(logger);
 
 const worker = new ClaudeDesktopWorker({
   agentId: 'claude-desktop',
   mailboxHub: mailbox,
   eventBus,
+  presenceManager: presence,
   logger
 });
 

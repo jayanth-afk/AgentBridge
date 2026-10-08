@@ -103,6 +103,7 @@ export const CONFIG = {
     'claude-desktop',
     'zia',
     'antigravity-ide',
+    'gemini',
     'freebuff',
     'system'
   ],

@@ -31,8 +31,13 @@ import { AttemptLedger } from './attempts/attempt-ledger.js';
 export class BridgeMcpServer {
   constructor(options = {}) {
     // Default to the least-privileged broad identity, never the most-privileged
-    // 'system'. A launched client binds its real identity via AGENT_ID.
-    this.agentId = options.agentId || process.env.AGENT_ID || 'freebuff';
+    // 'system'. A launched client binds its real identity via AGENT_ID or --agent.
+    let detectedAgent = null;
+    if (process.env.__CFBundleIdentifier?.toLowerCase().includes('gemini') || 
+        process.env.GRPC_DEFAULT_SSL_ROOTS_FILE_PATH?.includes('Gemini.app')) {
+      detectedAgent = 'gemini';
+    }
+    this.agentId = options.agentId || process.env.AGENT_ID || detectedAgent || 'freebuff';
     this.startedAt = new Date().toISOString();
     this.instanceId = `bridge_${process.pid}_${Date.now()}`;
 
