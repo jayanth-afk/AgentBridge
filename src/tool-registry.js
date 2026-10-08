@@ -193,6 +193,17 @@ export class ToolRegistry {
       }
     }
 
+    // Workspace Worktree Substitution check
+    if (rawArgs.worktreePath && attempt.worktreePath) {
+      if (path.resolve(rawArgs.worktreePath) !== path.resolve(attempt.worktreePath)) {
+        const subErr = new Error(
+          `WORKSPACE_ISOLATION_ERROR: Worktree substitution forbidden. Attempt '${attemptId}' is bound to '${attempt.worktreePath}', but '${rawArgs.worktreePath}' was provided.`
+        );
+        subErr.code = 'WORKSPACE_ISOLATION_ERROR';
+        throw subErr;
+      }
+    }
+
     // Workspace Worktree Isolation check
     if (attempt.worktreePath && (rawArgs.filePath || rawArgs.rootPath)) {
       const target = path.resolve(rawArgs.filePath || rawArgs.rootPath);
@@ -206,13 +217,25 @@ export class ToolRegistry {
       }
     }
 
+    // External write task mandatory worktree check
+    const isExternalWriteTask = Boolean(rawArgs.isExternal || context.isExternal || rawArgs.isExternalWrite || context.isExternalWrite);
+    if (isExternalWriteTask && !attempt.worktreePath && ['bridge_create_file', 'bridge_edit_file', 'bridge_delete_file', 'bridge_apply_patch'].includes(name)) {
+      const noWsErr = new Error(
+        `WORKSPACE_ISOLATION_ERROR: Mandatory workspace isolation: external write tasks require an isolated worktree under v2 enforcement.`
+      );
+      noWsErr.code = 'WORKSPACE_ISOLATION_ERROR';
+      throw noWsErr;
+    }
+
     // Protected project (e.g. Zia) check
     if (rawArgs.filePath || rawArgs.rootPath) {
       const target = path.resolve(rawArgs.filePath || rawArgs.rootPath);
-      const ziaRoot = CONFIG.ZIA_ROOT ? path.resolve(CONFIG.ZIA_ROOT) : null;
-      if (ziaRoot && (target === ziaRoot || target.startsWith(ziaRoot + path.sep))) {
-        if (CONFIG.ZIA_WRITE_LOCKED) {
-          const ziaErr = new Error(`PROTECTED_PROJECT_ERROR: Direct writes to Zia (${CONFIG.ZIA_ROOT}) are strictly locked.`);
+      const isProtected = (context.workspaceManager && typeof context.workspaceManager.isProtectedProject === 'function' && context.workspaceManager.isProtectedProject(target)) ||
+        Boolean(CONFIG.ZIA_ROOT && (target === path.resolve(CONFIG.ZIA_ROOT) || target.startsWith(path.resolve(CONFIG.ZIA_ROOT) + path.sep)));
+
+      if (isProtected) {
+        if (CONFIG.ZIA_WRITE_LOCKED || !attempt.worktreePath) {
+          const ziaErr = new Error(`PROTECTED_PROJECT_ERROR: Direct writes to protected project (${target}) are strictly forbidden. Isolated worktree and human approval required.`);
           ziaErr.code = 'PROTECTED_PROJECT_ERROR';
           throw ziaErr;
         }

@@ -148,6 +148,95 @@ export class WorkspaceManager {
   }
 
   /**
+   * Verifies that a write target is permissible according to worktree isolation rules
+   */
+  validateWritePermitted({
+    targetPath,
+    attempt = null,
+    isExternal = false,
+    strictV2 = false,
+    substitutedWorktree = null
+  }) {
+    if (!targetPath) return { ok: true };
+    const resolvedTarget = path.resolve(targetPath);
+
+    // 1. Worktree substitution check
+    if (attempt?.worktreePath && substitutedWorktree) {
+      if (path.resolve(substitutedWorktree) !== path.resolve(attempt.worktreePath)) {
+        const err = new Error(
+          `WORKSPACE_ISOLATION_ERROR: Worktree substitution forbidden. Attempt is bound to '${attempt.worktreePath}', but '${substitutedWorktree}' was supplied.`
+        );
+        err.code = 'WORKSPACE_ISOLATION_ERROR';
+        throw err;
+      }
+    }
+
+    // 2. Protected project check (e.g. Zia)
+    const isProtected = this.isProtectedProject(resolvedTarget);
+    if (isProtected) {
+      // If no isolated worktree, direct write is strictly prohibited
+      if (!attempt?.worktreePath) {
+        const err = new Error(
+          `PROTECTED_PROJECT_ERROR: Direct writes to protected project '${resolvedTarget}' are forbidden. Isolated worktree and human approval required.`
+        );
+        err.code = 'PROTECTED_PROJECT_ERROR';
+        throw err;
+      }
+    }
+
+    // 3. Isolated worktree containment check
+    if (attempt?.worktreePath) {
+      const authorizedWorktree = path.resolve(attempt.worktreePath);
+      if (resolvedTarget !== authorizedWorktree && !resolvedTarget.startsWith(authorizedWorktree + path.sep)) {
+        const err = new Error(
+          `WORKSPACE_ISOLATION_ERROR: Target path '${resolvedTarget}' is outside authorized worktree '${authorizedWorktree}'.`
+        );
+        err.code = 'WORKSPACE_ISOLATION_ERROR';
+        throw err;
+      }
+      return { ok: true, worktree: authorizedWorktree };
+    }
+
+    // 4. External write task under strict v2 requires isolated worktree
+    if ((isExternal || strictV2) && !attempt?.worktreePath) {
+      const err = new Error(
+        `WORKSPACE_ISOLATION_ERROR: Mandatory workspace isolation: external write tasks require an isolated worktree under v2 enforcement.`
+      );
+      err.code = 'WORKSPACE_ISOLATION_ERROR';
+      throw err;
+    }
+
+    return { ok: true };
+  }
+
+  /**
+   * Verify diff of completed attempt in worktree
+   */
+  async verifyWorktreeDiff({ repoPath, worktreePath, baseCommit = 'HEAD' }) {
+    const resolvedWorktree = path.resolve(worktreePath);
+    try {
+      const { stdout } = await this.git._execGit(resolvedWorktree, [
+        'diff',
+        '--name-only',
+        baseCommit
+      ]);
+      const changedFiles = stdout.split('\n').map(s => s.trim()).filter(Boolean);
+      return {
+        ok: true,
+        changedFiles,
+        worktreePath: resolvedWorktree,
+        baseCommit
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err.message,
+        worktreePath: resolvedWorktree
+      };
+    }
+  }
+
+  /**
    * Enqueue a completed attempt branch for verified integration into the target branch
    */
   enqueueIntegration({
