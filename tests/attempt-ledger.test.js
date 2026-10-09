@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { AttemptLedger, AttemptState } from '../src/attempts/attempt-ledger.js';
+import { TaskManager } from '../src/task-manager.js';
+import { EventBus } from '../src/event-bus.js';
 
 test('AttemptLedger: Monotonic Fencing & Late Response Quarantine', async (t) => {
   const db = new DatabaseSync(':memory:');
@@ -102,5 +104,45 @@ test('AttemptLedger: Monotonic Fencing & Late Response Quarantine', async (t) =>
     assert.throws(() => {
       ledger.acquireAttempt(activeAtt.attemptId, 'claude-desktop');
     }, /terminal state/);
+  });
+
+  await t.test('6. Claiming new work sweeps expired attempt leases after worker crash', () => {
+    const eventBus = new EventBus(mockLogger);
+    const taskManager = new TaskManager(mockLogger, ledger, eventBus);
+    const abandoned = taskManager.createTask({
+      fromAgent: 'dispatcher',
+      toAgent: 'worker',
+      title: 'Abandoned task',
+      instructions: 'Simulate a worker crash'
+    });
+    const claimed = taskManager.claimNextTask('worker');
+    assert.equal(claimed.id, abandoned.id);
+    assert.ok(claimed.attemptId);
+
+    const priorExpiry = new Date(Date.now() + 1000).toISOString();
+    db.prepare(`UPDATE bridge_attempts SET lease_timeout_ms = 60000, lease_expires_at = ? WHERE attempt_id = ?`)
+      .run(priorExpiry, claimed.attemptId);
+    taskManager.touchTask({
+      taskId: claimed.id,
+      agentId: 'worker',
+      attemptId: claimed.attemptId,
+      epoch: claimed.epoch
+    });
+    const renewed = ledger.getAttempt(claimed.attemptId);
+    assert.ok(Date.parse(renewed.leaseExpiresAt) > Date.parse(priorExpiry), 'Task heartbeat should renew its attempt lease');
+
+    db.prepare(`UPDATE bridge_attempts SET lease_expires_at = ? WHERE attempt_id = ?`)
+      .run(new Date(Date.now() - 1000).toISOString(), claimed.attemptId);
+
+    taskManager.createTask({
+      fromAgent: 'dispatcher',
+      toAgent: 'worker',
+      title: 'Next task',
+      instructions: 'Trigger the recovery sweep'
+    });
+    const next = taskManager.claimNextTask('worker');
+    assert.ok(next, 'A pending task should still be claimable');
+    assert.equal(ledger.getAttempt(claimed.attemptId).state, AttemptState.TIMED_OUT);
+    eventBus.close();
   });
 });

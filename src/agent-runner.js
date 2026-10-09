@@ -199,13 +199,27 @@ export class AgentRunner extends EventEmitter {
     const heartbeatMs = Math.max(10, Math.min(Math.floor((task.timeoutMs || 60000) / 3), 5000));
     const heartbeat = taskManager?.touchTask
       ? setInterval(() => {
-          try { taskManager.touchTask({ taskId: task.id, agentId: this.agentId }); } catch {}
+          try {
+            taskManager.touchTask({
+              taskId: task.id,
+              agentId: this.agentId,
+              attemptId: task.attemptId || null,
+              epoch: task.epoch || null
+            });
+          } catch {}
         }, heartbeatMs)
       : null;
 
     try {
       if (taskManager?.touchTask) {
-        try { taskManager.touchTask({ taskId: task.id, agentId: this.agentId }); } catch {}
+        try {
+          taskManager.touchTask({
+            taskId: task.id,
+            agentId: this.agentId,
+            attemptId: task.attemptId || null,
+            epoch: task.epoch || null
+          });
+        } catch {}
       }
 
       // Execute task logic

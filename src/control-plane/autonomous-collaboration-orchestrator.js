@@ -44,6 +44,9 @@ export class AutonomousCollaborationOrchestrator extends EventEmitter {
     this.defaultMaxHops = options.maxHops || 12;
     this.defaultMaxTurnsPerAgent = options.maxTurnsPerAgent || 6;
     this.defaultTimeoutMs = options.timeoutMs || 180000;
+    // Per-turn character cap for each prior turn's response when building the
+    // carried context. Bounds prompt growth without dropping earlier turns.
+    this.historySnippetChars = options.historySnippetChars || 300;
     // `null` is an intentional test/embedded-mode opt-out. `||` previously
     // recreated a live monitor in that case, making pure state tests depend on
     // the user's desktop focus.
@@ -132,32 +135,36 @@ export class AutonomousCollaborationOrchestrator extends EventEmitter {
   }
 
   /**
-   * Format contextual prompt with accumulated conversation state.
+   * Format the contextual prompt with accumulated conversation state.
+   *
+   * Token discipline: every character here is re-sent to the provider on every
+   * turn. The objective, the accumulated turns, and the current instruction are
+   * all semantically required and are always preserved (each prior response is
+   * bounded per turn by `historySnippetChars`). Everything else is decorative
+   * framing and is deliberately kept to one short line per concern:
+   *   - the `[AB:<requestId>]` correlation marker is added downstream, so it is
+   *     not duplicated here;
+   *   - the authorized-agent list is enforced server-side and is not model input;
+   *   - ASCII banner rules carry no information and were removed.
    */
   formatContextualPrompt({ session, toAgent, instruction }) {
+    const limit = this.historySnippetChars;
     const historyLines = session.turns.map(t => {
-      const summary = t.response.length > 300 ? t.response.slice(0, 300) + '... [truncated]' : t.response;
-      return `[Turn ${t.turnNumber}] (${t.fromAgent} -> ${t.toAgent}):\n${summary}`;
-    }).join('\n\n');
+      const summary = t.response.length > limit ? t.response.slice(0, limit) + '... [truncated]' : t.response;
+      return `[Turn ${t.turnNumber}] (${t.fromAgent} -> ${t.toAgent}): ${summary}`;
+    }).join('\n');
 
-    let prompt = `================================================================================
-AUTONOMOUS AGENT COLLABORATION OBJECTIVE:
-"${session.objective}"
-================================================================================
-Session: ${session.id} | Turn: ${session.turns.length + 1}
-Authorized Agents: ${[...session.authorizedAgents].join(', ')}
-`;
+    const blocks = [
+      `AUTONOMOUS AGENT COLLABORATION OBJECTIVE: ${session.objective}\nSession: ${session.id} | Turn: ${session.turns.length + 1}`
+    ];
 
     if (historyLines.length > 0) {
-      prompt += `\n--- PREVIOUS COLLABORATION CONTEXT ---\n${historyLines}\n---------------------------------------\n`;
+      blocks.push(`--- PREVIOUS COLLABORATION CONTEXT ---\n${historyLines}\n--- END PREVIOUS CONTEXT ---`);
     }
 
-    prompt += `\nINSTRUCTION FOR ${toAgent.toUpperCase()}:
-${instruction}
+    blocks.push(`INSTRUCTION FOR ${toAgent.toUpperCase()}:\n${instruction}\nGive your authentic technical response for this turn; no pleasantries or boilerplate.`);
 
-Provide your authentic technical response for this turn. Do NOT include boilerplate pleasantries. Focus strictly on the objective.`;
-
-    return prompt;
+    return blocks.join('\n\n');
   }
 
   /**

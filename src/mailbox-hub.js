@@ -556,8 +556,21 @@ export class MailboxHub {
         } catch {}
       }
 
-      // Lifecycle: durable result persisted (still inside the same transaction).
+      // Record persistence inside the same transaction as the authoritative
+      // terminal row. The trace record becomes visible only when this transaction
+      // commits, and is inserted before outbox events are dispatched; this keeps
+      // RESULT_PERSISTED ordered before WAITER_RESOLVED in same-process traces.
       lifecycle = { requestId, taskId, agentId, status };
+      if (requestId) {
+        this.tracer.mark({
+          requestId,
+          stage: LifecycleStage.RESULT_PERSISTED,
+          taskId,
+          attemptId,
+          agentId,
+          meta: { status }
+        });
+      }
 
       const recipient = task ? task.creator : (reqRow ? reqRow.from_agent : '*');
       const snippet = resultStr ? (resultStr.length > 100 ? resultStr.slice(0, 100) + '...' : resultStr) : null;
@@ -626,16 +639,10 @@ export class MailboxHub {
       submitWork(this.db, null);
     }
 
-    // Lifecycle: the terminal state + completion event are committed.
+    // Lifecycle: completion event publication occurs only after the transaction
+    // commits and the outbox flushes. RESULT_PERSISTED was recorded atomically
+    // with the terminal row above, before any waiter can be woken.
     if (lifecycle && lifecycle.requestId) {
-      this.tracer.mark({
-        requestId: lifecycle.requestId,
-        stage: LifecycleStage.RESULT_PERSISTED,
-        taskId: lifecycle.taskId,
-        attemptId,
-        agentId: lifecycle.agentId,
-        meta: { status: lifecycle.status }
-      });
       this.tracer.mark({
         requestId: lifecycle.requestId,
         stage: LifecycleStage.COMPLETION_EVENT_COMMITTED,

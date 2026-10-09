@@ -25,7 +25,11 @@ export class EventBus extends EventEmitter {
     this.subscribers = new Map();
     // In-memory cursor cache: agentId -> lastEventId
     this.cursorCache = new Map();
-    // Waiters for correlated request/response: requestId -> { resolve, reject, timer, agentId }
+    // Waiters for correlated request/response: requestId -> Set<waiter>.
+    // A single request may have more than one concurrent waiter (an original
+    // caller plus a re-attaching observer). Every waiter for a request must
+    // resolve from the same authoritative durable row; previously a second
+    // registration overwrote the first, silently orphaning it until timeout.
     this.responseWaiters = new Map();
 
     this.fileWatcher = null;
@@ -175,7 +179,7 @@ export class EventBus extends EventEmitter {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    stmt.run(
+    const insertInfo = stmt.run(
       timestamp,
       type,
       agentId,
@@ -188,9 +192,10 @@ export class EventBus extends EventEmitter {
       dedupKey
     );
 
-    // Retrieve generated monotonically increasing event_id
-    const row = this.db.prepare(`SELECT last_insert_rowid() as eventId`).get();
-    const eventId = Number(row?.eventId || 0);
+    // The SQLite driver already returns the generated monotonically increasing
+    // event_id from run(); a second `SELECT last_insert_rowid()` round trip per
+    // published event is redundant work on the hot delivery path.
+    const eventId = Number(insertInfo?.lastInsertRowid || 0);
 
     const event = {
       eventId,
@@ -472,28 +477,33 @@ export class EventBus extends EventEmitter {
    * @returns {boolean} true if a waiter was resolved by this call.
    */
   _settleWaiter(requestId, source = 'event') {
-    const waiter = this.responseWaiters.get(requestId);
-    if (!waiter) return false;
+    const waiters = this.responseWaiters.get(requestId);
+    if (!waiters || waiters.size === 0) return false;
 
     const settled = this._readTerminalRequest(requestId);
     if (!settled) return false; // Not terminal yet: keep waiting for the real result.
 
+    // Remove the whole set first so a re-entrant notification cannot double-resolve.
     this.responseWaiters.delete(requestId);
-    if (waiter.timer) clearTimeout(waiter.timer);
 
-    if (this.tracer) {
-      this.tracer.mark({
-        requestId,
-        stage: LifecycleStage.WAITER_RESOLVED,
-        taskId: waiter.taskId || null,
-        attemptId: waiter.attemptId || null,
-        agentId: waiter.agentId || null,
-        routeId: waiter.routeId || null,
-        meta: { source, status: settled.status }
-      });
+    const now = Date.now();
+    for (const waiter of waiters) {
+      if (waiter.timer) clearTimeout(waiter.timer);
+
+      if (this.tracer) {
+        this.tracer.mark({
+          requestId,
+          stage: LifecycleStage.WAITER_RESOLVED,
+          taskId: waiter.taskId || null,
+          attemptId: waiter.attemptId || null,
+          agentId: waiter.agentId || null,
+          routeId: waiter.routeId || null,
+          meta: { source, status: settled.status }
+        });
+      }
+
+      waiter.resolve({ ...settled, source, waiterLatencyMs: now - (waiter.registeredAt || now) });
     }
-
-    waiter.resolve({ ...settled, source, waiterLatencyMs: Date.now() - (waiter.registeredAt || Date.now()) });
     return true;
   }
 
@@ -513,9 +523,44 @@ export class EventBus extends EventEmitter {
     // same-process (dispatchLocal) and cross-process (notify file / poll) cases.
     let timer = null;
     const waiterPromise = new Promise((resolve) => {
+      const waiter = {
+        resolve: (eventOrReq) => {
+          if (timer) clearTimeout(timer);
+          resolve(eventOrReq);
+        },
+        reject: (err) => {
+          if (timer) clearTimeout(timer);
+          resolve({
+            requestId,
+            status: 'failed',
+            response: null,
+            error: err.message
+          });
+        },
+        timer: null,
+        agentId,
+        taskId,
+        attemptId,
+        routeId,
+        registeredAt: Date.now()
+      };
+
+      // Register BEFORE the timeout is armed and BEFORE the authoritative
+      // check below, so a result committed in any window is never missed.
+      let waiters = this.responseWaiters.get(requestId);
+      if (!waiters) {
+        waiters = new Set();
+        this.responseWaiters.set(requestId, waiters);
+      }
+      waiters.add(waiter);
+
       if (timeoutMs > 0 && Number.isFinite(timeoutMs)) {
         timer = setTimeout(() => {
-          this.responseWaiters.delete(requestId);
+          const current = this.responseWaiters.get(requestId);
+          if (current) {
+            current.delete(waiter);
+            if (current.size === 0) this.responseWaiters.delete(requestId);
+          }
           if (this.tracer) {
             this.tracer.mark({
               requestId,
@@ -536,33 +581,12 @@ export class EventBus extends EventEmitter {
             recoverable: true
           });
         }, timeoutMs);
+        waiter.timer = timer;
         // Deliberately NOT unref'd: a process that is synchronously awaiting a
         // correlated response must stay alive until that response arrives or the
         // deadline expires. Unref'ing this timer let short-lived requester
         // processes exit before a cross-process reply was delivered.
       }
-
-      this.responseWaiters.set(requestId, {
-        resolve: (eventOrReq) => {
-          if (timer) clearTimeout(timer);
-          resolve(eventOrReq);
-        },
-        reject: (err) => {
-          if (timer) clearTimeout(timer);
-          resolve({
-            requestId,
-            status: 'failed',
-            response: null,
-            error: err.message
-          });
-        },
-        timer,
-        agentId,
-        taskId,
-        attemptId,
-        routeId,
-        registeredAt: Date.now()
-      });
     });
 
     // Second, authoritative check now that a waiter exists. If the result was
@@ -654,8 +678,10 @@ export class EventBus extends EventEmitter {
   close() {
     this.isClosed = true;
     this.stopWatcher();
-    for (const waiter of this.responseWaiters.values()) {
-      if (waiter.timer) clearTimeout(waiter.timer);
+    for (const waiters of this.responseWaiters.values()) {
+      for (const waiter of waiters) {
+        if (waiter.timer) clearTimeout(waiter.timer);
+      }
     }
     this.responseWaiters.clear();
     this.subscribers.clear();

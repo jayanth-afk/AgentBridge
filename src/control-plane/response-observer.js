@@ -24,6 +24,10 @@ export class ResponseObserver extends EventEmitter {
     this.pollIntervalMs = options.pollIntervalMs || 600;
     this.deltaAggregationThreshold = options.deltaAggregationThreshold || 40; // min characters for delta
     this.activeObservations = new Map(); // requestId -> observationState
+    // Injectable UI probe. Defaults to the real accessibility probe; tests and
+    // embedding hosts may supply a deterministic probe so completion detection
+    // and delivery can be verified without the live desktop applications.
+    this.probe = options.probe || probeApplicationUI;
   }
 
   /**
@@ -64,7 +68,7 @@ export class ResponseObserver extends EventEmitter {
     }
 
     try {
-      const probe = await probeApplicationUI(obs.targetApp);
+      const probe = await this.probe(obs.targetApp);
       if (!probe.running || !probe.textRegions || probe.textRegions.length === 0) {
         return;
       }

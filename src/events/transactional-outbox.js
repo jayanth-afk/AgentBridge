@@ -153,7 +153,7 @@ export class TransactionalOutbox {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    stmt.run(
+    const insertInfo = stmt.run(
       timestamp,
       type,
       agentId,
@@ -166,8 +166,9 @@ export class TransactionalOutbox {
       dedupKey
     );
 
-    const row = this.db.prepare(`SELECT last_insert_rowid() as eventId`).get();
-    const eventId = Number(row?.eventId || 0);
+    // run() already returns the generated event_id; skip the extra
+    // SELECT last_insert_rowid() round trip staged inside every transaction.
+    const eventId = Number(insertInfo?.lastInsertRowid || 0);
 
     // 2. Insert into outbox table (marking unpublished)
     this.db.prepare(`

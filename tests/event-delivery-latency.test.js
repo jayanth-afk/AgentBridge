@@ -384,4 +384,38 @@ test('Correlated result delivery: race-safety, recovery, and latency', async (t)
       assert.equal(durable.response, 'BOUNDARY_RESPONSE');
     }
   });
+
+  await t.test('16. Two concurrent waiters on one requestId both resolve from the durable row', async () => {
+    const requestId = 'req_multi_waiter';
+    insertPendingRequest(env.mailbox, requestId);
+
+    const w1 = env.eventBus.waitForResponse({ requestId, timeoutMs: 5000 });
+    const w2 = env.eventBus.waitForResponse({ requestId, timeoutMs: 5000 });
+    assert.equal(env.eventBus.responseWaiters.get(requestId).size, 2, 'both waiters must be registered');
+
+    completeAndPublish(env.mailbox, requestId, 'BOTH');
+
+    const [r1, r2] = await Promise.all([w1, w2]);
+    assert.equal(r1.status, 'completed');
+    assert.equal(r1.response, 'BOTH');
+    assert.equal(r2.status, 'completed');
+    assert.equal(r2.response, 'BOTH');
+  });
+
+  await t.test('17. A timed-out waiter does not orphan a still-registered second waiter', async () => {
+    const requestId = 'req_multi_waiter_timeout';
+    insertPendingRequest(env.mailbox, requestId);
+
+    const shortWaiter = env.eventBus.waitForResponse({ requestId, timeoutMs: 30 });
+    const longWaiter = env.eventBus.waitForResponse({ requestId, timeoutMs: 5000 });
+
+    const shortOutcome = await shortWaiter;
+    assert.equal(shortOutcome.status, 'timeout');
+    assert.equal(env.eventBus.responseWaiters.get(requestId).size, 1, 'the long waiter must remain registered');
+
+    completeAndPublish(env.mailbox, requestId, 'SURVIVOR');
+    const longOutcome = await longWaiter;
+    assert.equal(longOutcome.status, 'completed');
+    assert.equal(longOutcome.response, 'SURVIVOR');
+  });
 });

@@ -222,4 +222,38 @@ test('Autonomous Collaboration Orchestrator Safety & State Unit Suite', async (t
     assert.equal(result.success, false);
     assert.equal(result.status, 'SYNTHETIC_RESPONSE_REJECTED');
   });
+
+  await t.test('8. Contextual prompt preserves required information without banner boilerplate', () => {
+    const orch = new AutonomousCollaborationOrchestrator({ invisibilityMonitor: null });
+    const session = {
+      id: 'collab_prompt_test',
+      objective: 'Verify prompt information preservation across turns.',
+      authorizedAgents: new Set(['chatgpt', 'claude']),
+      turns: []
+    };
+    for (let n = 1; n <= 6; n++) {
+      session.turns.push({
+        turnNumber: n,
+        fromAgent: 'chatgpt',
+        toAgent: 'claude',
+        instruction: `step ${n}`,
+        response: 'R'.repeat(500)
+      });
+    }
+
+    const prompt = orch.formatContextualPrompt({ session, toAgent: 'claude', instruction: 'Final synthesis.' });
+
+    // Required information is preserved verbatim.
+    assert.ok(prompt.includes('Verify prompt information preservation across turns.'), 'objective must survive');
+    assert.ok(prompt.includes('PREVIOUS COLLABORATION CONTEXT'), 'history section must survive');
+    for (let n = 1; n <= 6; n++) assert.ok(prompt.includes(`[Turn ${n}]`), `turn ${n} must be present`);
+    assert.ok(prompt.includes('Final synthesis.'), 'current instruction must survive');
+    assert.ok(prompt.includes('INSTRUCTION FOR CLAUDE:'), 'instruction heading must survive');
+
+    // Decorative ASCII banner rules are pure token overhead and must not be sent.
+    assert.ok(!prompt.includes('====='), 'decorative banner rules must not be sent');
+
+    // Each prior response is bounded by historySnippetChars, so a 6-turn prompt stays bounded.
+    assert.ok(prompt.length < 3000, `prompt grew unexpectedly: ${prompt.length} chars`);
+  });
 });

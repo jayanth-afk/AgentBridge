@@ -45,6 +45,10 @@ export class TaskManager extends EventEmitter {
     this.attempts = attemptLedger || (auditLogger ? new AttemptLedger(auditLogger) : null);
     this.eventBus = eventBus || null;
     this.outbox = this.eventBus?.outbox || (auditLogger ? new TransactionalOutbox(auditLogger, this.eventBus) : null);
+    // Runaway-delegation guard. Each task may name a parent task; the parent
+    // chain depth is bounded so agent-to-agent delegation cannot recurse
+    // without limit. Overridable per instance (and by env) for tests.
+    this.maxDelegationDepth = Number(process.env.AGENT_BRIDGE_MAX_DELEGATION_DEPTH || 24);
     this.initTables();
   }
 
@@ -97,6 +101,31 @@ export class TaskManager extends EventEmitter {
     } catch {}
   }
 
+  /**
+   * Ancestor depth of a task (0 = no ancestors). Cycle-safe and bounded by the
+   * configured maximum so a corrupted chain can never loop forever.
+   */
+  _delegationDepth(taskId) {
+    let depth = 0;
+    let cursor = taskId;
+    const seen = new Set();
+    const limit = this.maxDelegationDepth + 1;
+    while (cursor && depth < limit) {
+      if (seen.has(cursor)) break;
+      seen.add(cursor);
+      let row = null;
+      try {
+        row = this.db.prepare('SELECT parent_task_id FROM tasks WHERE id = ?').get(cursor);
+      } catch {
+        break;
+      }
+      if (!row || !row.parent_task_id) break;
+      cursor = row.parent_task_id;
+      depth += 1;
+    }
+    return depth;
+  }
+
   createTask({
     fromAgent,
     toAgent,
@@ -113,6 +142,17 @@ export class TaskManager extends EventEmitter {
     emitEvent = true,
     dedupKey = null
   }) {
+    if (parentTaskId && this.maxDelegationDepth > 0) {
+      const depth = this._delegationDepth(parentTaskId);
+      if (depth >= this.maxDelegationDepth) {
+        const err = new Error(
+          `DELEGATION_DEPTH_EXCEEDED: maximum delegation depth (${this.maxDelegationDepth}) reached for parent '${parentTaskId}'.`
+        );
+        err.code = 'DELEGATION_DEPTH_EXCEEDED';
+        throw err;
+      }
+    }
+
     const id = `task_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const timestamp = new Date().toISOString();
     const depsJson = Array.isArray(dependencies) ? JSON.stringify(dependencies) : null;
@@ -200,7 +240,11 @@ export class TaskManager extends EventEmitter {
   }
 
   claimNextTask(agentId) {
-    // Recover abandoned leases before claiming new work.
+    // Reconcile attempt leases as well as task leases before assigning more work.
+    // Otherwise timed-out attempts can remain ACTIVE indefinitely after a worker crash.
+    if (this.attempts?.recoverExpiredAttempts) {
+      this.attempts.recoverExpiredAttempts();
+    }
     this.recoverExpiredTasks(agentId);
 
     // Check if there are blocked tasks whose dependencies are now completed

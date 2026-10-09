@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { AdapterHealth } from './desktop-control-adapter.js';
 import { AXEngine } from './ax-engine.js';
 import { SwiftAXBridge } from './swift-ax-bridge.js';
@@ -20,8 +21,9 @@ import { sendDesktopNotification, activateDesktopApp } from '../session-adapters
  * Selects the highest legitimate route available without silent unsafe downgrade.
  * Manages session persistence, focus restoration, authentic model execution, and cross-route deduplication.
  */
-export class DesktopControlPlane {
+export class DesktopControlPlane extends EventEmitter {
   constructor(options = {}) {
+    super();
     this.options = options;
     this.swiftBridge = new SwiftAXBridge(options);
     this.axEngine = new AXEngine({ ...options, swiftBridge: this.swiftBridge });
@@ -57,6 +59,92 @@ export class DesktopControlPlane {
     this.routeHistory = []; // Audit log of dispatched routes
     this.requestRegistry = new Map(); // requestId -> envelope
     this.inFlightLocks = new Set(); // Prevent duplicate dispatch across routes
+
+    // Completion-triggered delivery: when an accessibility response observer
+    // captures a COMPLETE, correlated response it must settle the durable
+    // request immediately instead of leaving the requester to poll or time out.
+    // `mailboxHub` is optional so the control plane keeps working (as a pure
+    // send-side router) when no durable request store is wired.
+    this.mailbox = options.mailboxHub || options.mailbox || null;
+    if (this.observer && typeof this.observer.on === 'function') {
+      this.observer.on('response_completed', (ev) => {
+        this.settleFromCompletion({
+          requestId: ev && ev.requestId,
+          targetApp: ev && ev.targetApp,
+          response: ev && ev.response,
+          status: 'completed'
+        }).catch(() => {});
+      });
+      // Observer failure/timeout is deliberately NOT allowed to overwrite the
+      // durable request. A timeout means the observer stopped looking, not that
+      // the provider failed; erasing durable state here would lose a late but
+      // valid result. Late correction happens through the normal timeout path.
+      this.observer.on('response_failed', (ev) => {
+        this.emit('observer_failed', {
+          requestId: ev && ev.requestId,
+          error: (ev && ev.error) || 'OBSERVATION_FAILED'
+        });
+      });
+    }
+  }
+
+  /**
+   * Persist a completion captured by a response observer and immediately publish
+   * the bridge completion event so every waiter for this request resolves
+   * without another polling interval.
+   *
+   * Idempotent and correlation-safe:
+   *  - a request already in a terminal state is left untouched (duplicate events);
+   *  - a completion is only applied when the durable request targets the same
+   *    application that produced it (never associate a response with the wrong
+   *    request/session);
+   *  - the result is persisted inside the mailbox's transactional outbox before
+   *    any completion event is dispatched.
+   *
+   * @returns {Promise<{handled:boolean, reason?:string, requestId?:string}>}
+   */
+  async settleFromCompletion({ requestId, targetApp = null, response = null, status = 'completed' }) {
+    if (!this.mailbox || !requestId) return { handled: false, reason: 'NO_MAILBOX_OR_REQUEST_ID' };
+    let request = null;
+    try {
+      request = this.mailbox.getRequest(requestId);
+    } catch {
+      return { handled: false, reason: 'REQUEST_LOOKUP_FAILED' };
+    }
+    if (!request) return { handled: false, reason: 'REQUEST_NOT_FOUND' };
+    if (['completed', 'failed', 'cancelled'].includes(request.status)) {
+      return { handled: false, reason: 'ALREADY_TERMINAL', requestId };
+    }
+    if (status === 'completed' && (response === null || response === undefined || String(response).length === 0)) {
+      return { handled: false, reason: 'EMPTY_RESPONSE', requestId };
+    }
+    if (targetApp && request.toAgent && !request.toAgent.toLowerCase().includes(String(targetApp).toLowerCase())) {
+      return { handled: false, reason: 'TARGET_MISMATCH', requestId };
+    }
+
+    try {
+      if (request.taskId) {
+        this.mailbox.submitTaskResult({
+          taskId: request.taskId,
+          agentId: request.toAgent,
+          status,
+          result: response
+        });
+      } else {
+        this.mailbox.answerRequest({
+          requestId,
+          agentId: request.toAgent,
+          response,
+          status
+        });
+      }
+    } catch (err) {
+      this.emit('completion_settle_failed', { requestId, error: err.message });
+      return { handled: false, reason: 'SETTLE_FAILED', requestId };
+    }
+
+    this.emit('completion_settled', { requestId, targetApp, status });
+    return { handled: true, requestId };
   }
 
   registerTransportsWithScheduler() {

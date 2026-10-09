@@ -1,23 +1,23 @@
 # Agent Bridge — Current Implementation State
 
-**Refreshed:** 2026-10-09  
+**Refreshed:** 2026-10-10
 **Repository:** `/Users/jayanthpranaykonada/agent-bridge`  
-**HEAD:** `cc45b9696c4aaa3217ca378cd43c0279b5b77223` (with verified AX helper and provider repairs)  
-**Branch:** `main`  
-**Tree:** clean on `main`. Zero uncommitted regressions. Zia untouched.  
-**Live Control Plane:** Bound to `127.0.0.1:8765` (PID 48913). Both `/mcp` and `/api/mcp/call` active in full parity.
+**HEAD (baseline):** `daf41886f880223b99e1ab0982302c31d7fbdb23`
+**Branch:** `main`
+**Tree:** working tree carries messaging/completion-delivery optimizations and attempt-lease recovery hardening (see below). Zia untouched.
+**Live Control Plane:** Bound to `127.0.0.1:8765` (PID `5882` at measurement time). Both `/mcp` and `/api/mcp/call` active in full parity.
 
 This is the authoritative implementation handoff for Agent Bridge. It supersedes older notes and reflects the ground-truth state verified against live processes and providers.
 
 ## Verification
 
-Full regression suite (`node --test --test-concurrency=1 tests/*.test.js`):
+Full regression suite (`npm test` → `node --test --test-concurrency=1 tests/*.test.js`), latest run after the attempt-lease recovery change:
 
-- tests: **563**
-- pass: **555**
+- tests: **591**
+- pass: **583**
 - fail: **0**
 - skipped: **8** (explicitly live-gated: live model quota/credentials requiring explicit opt-in)
-- duration: **18.88s**
+- duration: **18.55s**
 - exit code: **0**
 
 ## Runtime composition
@@ -393,6 +393,113 @@ The following matrix represents the empirical, ground-truth capabilities verifie
   - Verification tokens: Registered as non-secret test values; sensitive credential access (API keys, SSH keys, passwords) strictly denied and audited.
   - Path security: Protected project (`Zia`) remains strictly read-only and write-fenced; direct writes prohibited without isolated worktrees.
   - Artifact store: OS-level `O_NOFOLLOW` and descriptor `fstat` checks protect against symlinks and TOCTOU races.
+
+## Messaging performance measurement & optimization (2026-10-09)
+
+Reproducible harness: `node scripts/bench/bench-messaging.mjs` (uses a temp SQLite DB,
+never the live control plane; spawns a real second process via
+`scripts/bench/bench-worker.mjs` for the cross-process case).
+
+Measured on `darwin arm64`, Node `v24.12.0`, after the changes below:
+
+| Path | n | p50 | p95 | max |
+| :--- | :--: | :--: | :--: | :--: |
+| In-process correlated round trip (`askAgent`) | 200 | 2.02 ms | 3.57 ms | 4.99 ms |
+| Cross-process round trip (separate worker process) | 60 | 3.87 ms | 5.93 ms | 6.31 ms |
+| `EventBus.publish` throughput | 2000 | — | — | 11.96k events/s (0.084 ms/event) |
+
+- Large response integrity: a 120,004-char response was delivered intact (not truncated; 6.95 ms).
+- Timeout + late result: caller timed out while the worker kept running; the
+  durable request reached `completed` and re-attached at 0.63 ms — no lost or duplicated result.
+- Independent concurrency: 4 agents each with a simulated 30 ms provider turn ran in
+42.10 ms wall (≈3.33× parallel speedup); one slow provider does not block the others.
+
+**Conclusion (truthful):** bridge-owned overhead is already sub-3 ms (in-process) and
+sub-6 ms (cross-process), well below the 20 ms p95 target. It is *not* the bottleneck for
+real agent-to-agent latency. Real latency is dominated by (a) provider accessibility UI
+submission/observation and (b) model generation time, which this harness does **not** and
+must not fake. A real-provider benchmark is therefore explicitly marked unavailable here.
+
+Changes made (both regression-covered, no test weakened):
+
+1. `EventBus.publish()` and `TransactionalOutbox._stageEventInTransaction()` no longer run a
+   second `SELECT last_insert_rowid()` per event; they use `stmt.run().lastInsertRowid`.
+2. `EventBus.responseWaiters` is now `requestId -> Set<waiter>`. Previously a second
+   `waitForResponse()` for the same request overwrote the first waiter, orphaning it until
+   timeout. All waiters for a request now resolve from the same authoritative durable row.
+
+Known remaining latency (not changed, by design — no evidence of bridge fault):
+
+- Claude/Gemini response completion is detected by a 250 ms / 300 ms accessibility poll in the
+  Swift helper (`observeResponseFromClaude` / `observeResponseFromGemini`), i.e. a bounded
+  ≤300 ms observation tail. Which of `sawGenerating` / stability governs completion cannot be
+  measured without a live, opt-in provider turn; no blind interval change was made.
+
+## Phase 2 — token analysis & completion-triggered delivery (2026-10-09)
+
+### MCP tool-schema token analysis
+
+Measured with `node scripts/bench/bench-tool-schema.mjs`:
+
+- 64 tools, **21,397 serialized bytes** (exact). Breakdown: names 1,332; descriptions 4,236; schemas 13,012.
+- Token figure is an **estimate only** (no serving-model tokenizer is bundled): ~4,755–5,944
+  tokens depending on chars/token ratio. Not an exact provider count.
+- The schema is **already minimal**: 172/218 properties are type-only, no `additionalProperties`,
+  no empty `required`, no duplicated property descriptions, no duplicated tool descriptions.
+- Determination: the bridge always serves all 64 tools from `tools/list` (stdio and HTTP), emits no
+  `notifications/tools/list_changed`, and has no per-route filtering. Whether a client re-injects the
+  list into model context every turn is client-controlled and cannot be observed from the bridge.
+- **Rejected reductions (with reasons):** dynamic/capability-filtered tool exposure (MCP client
+  compatibility cannot be verified here; hiding capabilities risks task failure); removing fields or
+  tools (no redundancy remains; capability loss not justified); aggressive description shortening
+  (no measurable selection evidence without a live model).
+- Delivered: `scripts/bench/bench-tool-schema.mjs`, `scripts/bench/tool-selection-corpus.mjs`
+  (20 fixed tasks across 10 categories + `scoreSelection`), `tests/tool-schema-integrity.test.js`.
+  The LLM tool-selection evaluation harness is ready but **not run** (requires a live model; not simulated).
+- A measured reduction was delivered on the autonomous-collaboration prompt: **21,918 → 19,253 chars**
+  over 10 turns (**−12.2%**), preserving the objective, every prior turn, and the instruction.
+
+### Completion-triggered event-driven response delivery
+
+- **Before:** the production worker path (`DesktopAgentWorker` → `session.send` →
+  `MailboxHub.submitTaskResult`) already persisted + dispatched a completion event transactionally and
+  resolved waiters event-driven. The gap was the `DesktopControlPlane` accessibility route: it started
+  `ResponseObserver` but **nothing consumed `response_completed`**, so that route never delivered.
+- **After:** `DesktopControlPlane extends EventEmitter`, accepts `mailboxHub`, and subscribes to
+  `response_completed`; `settleFromCompletion()` persists inside the durable outbox transaction and then
+  the same commit dispatches the completion event, resolving every waiter. Idempotent (terminal rows are
+  left untouched), correlation-safe (target-app mismatch is refused), and never settles an empty response.
+  Observer timeout/failure does **not** overwrite durable state, so a late but valid result is preserved.
+  `ResponseObserver` gained an injectable `probe` seam for deterministic tests.
+- Lifecycle stages already present and reused: `REQUEST_CREATED → TASK_CLAIMED → PROVIDER_SUBMITTED →
+  PROVIDER_RESPONSE_COMPLETED → RESULT_PERSISTED → WAITER_RESOLVED → RESPONSE_RETURNED`.
+- Measured with `node scripts/bench/bench-completion-delivery.mjs` (fallback poll set to 60 s to prove
+  the path is event-driven, not polling-driven):
+
+| Measurement | p50 | p95 | p99 |
+| :--- | :--: | :--: | :--: |
+| In-process completion → requester receipt | 0.26 ms | 0.66 ms | 1.56 ms |
+| Cross-process completion → requester receipt | 1.71 ms | 2.96 ms | 4.40 ms |
+| `RESULT_PERSISTED` → `WAITER_RESOLVED` | 0.38 ms in the latest run (varies by run) | | |
+
+- 4 concurrent independent requests completed in 2.05 ms wall, all correctly correlated.
+- **Provider completion DETECTION (accessibility observation) is not measured** — it requires live provider
+  turns and is not simulated. The known bounded tail is the Swift helper's 250 ms / 300 ms observation poll.
+- **Auto-resumption (stage D) is NOT supported:** a completed MCP tool call returns the result to the
+  calling model within that call, but the bridge cannot resume an already-finished model turn. Results are
+  delivered through the durable waiting tool call / mailbox. Reported truthfully rather than faked.
+
+### Attempt-lease crash recovery
+
+- `TaskManager.claimNextTask()` now sweeps expired attempt leases before recovering/reassigning expired task leases, so crashed workers do not leave attempts marked active indefinitely.
+- `AgentRunner` passes the claimed task's `attemptId` and `epoch` through both its immediate and periodic heartbeats. Task and attempt leases therefore stay aligned while work is running, and fencing metadata is not silently omitted.
+- Regression coverage: `tests/attempt-ledger.test.js` verifies that claiming new work expires a stale attempt; the full suite passes.
+
+### Runaway delegation bound
+
+`TaskManager.maxDelegationDepth` (default 24, override via `AGENT_BRIDGE_MAX_DELEGATION_DEPTH`) rejects a
+`createTask` whose parent chain exceeds the bound with `DELEGATION_DEPTH_EXCEEDED`. The chain walk is
+cycle-safe and bounded. Covered by `tests/delegation-bounds.test.js`.
 
 ## Long-term topology
 
