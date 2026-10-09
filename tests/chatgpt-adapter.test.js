@@ -132,11 +132,21 @@ test('ChatGPT Autonomous Desktop Delivery Suite', async (t) => {
     assert.equal(caps.trueHeadlessEngine, false);
   });
 
-  await t.test('6. Foreground/default mode preserves activation behavior', async () => {
+  await t.test('6. Activation is non-stealing by default and honored only when explicitly requested', async () => {
+    // The invisibility invariant is authoritative: neither the default nor the
+    // foreground path may activate ChatGPT unless the caller explicitly asks.
+    // (The default was intentionally changed to non-activating; the previous
+    // assertion encoded the pre-invisibility behavior.)
     const fakeBridge = makeFakeBridge();
     const session = new ChatGptAutonomousSession({ swiftBridge: fakeBridge });
     await session.send({ text: 'foreground turn', requestId: 'req_foreground_01' });
-    assert.equal(fakeBridge.calls[0].activate, true);
+    assert.equal(fakeBridge.calls[0].activate, false, 'default must not steal focus');
+
+    // Explicit activation is still honored when a caller really requests it.
+    const activatingBridge = makeFakeBridge();
+    const activatingSession = new ChatGptAutonomousSession({ swiftBridge: activatingBridge });
+    await activatingSession.send({ text: 'explicit activate', requestId: 'req_foreground_02', activate: true });
+    assert.equal(activatingBridge.calls[0].activate, true);
   });
 
   await t.test('6a. Background mode repeatedly enforces the minimized ChatGPT invariant', async () => {

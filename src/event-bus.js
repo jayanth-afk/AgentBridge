@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import EventEmitter from 'node:events';
 import { TransactionalOutbox } from './events/transactional-outbox.js';
+import { LifecycleStage } from './diagnostics/request-tracer.js';
 
 /**
  * CrossProcessEventBus
@@ -17,6 +18,8 @@ export class EventBus extends EventEmitter {
     this.dbPath = auditLogger.dbPath || (options.dbPath || 'data/bridge.sqlite');
     this.notifyFilePath = `${this.dbPath}.notify`;
     this.fallbackIntervalMs = options.fallbackIntervalMs || 500;
+    // Optional lifecycle tracer (assigned by MailboxHub). Never required.
+    this.tracer = options.tracer || null;
 
     // Subscriptions: agentId -> Set of handler functions
     this.subscribers = new Map();
@@ -213,29 +216,12 @@ export class EventBus extends EventEmitter {
   }
 
   dispatchLocal(event) {
-    // 1. Check if there are waiters for correlated request/response
-    if (event.requestId && this.responseWaiters.has(event.requestId)) {
-      if (event.type === 'response_delivered' || event.type === 'task_completed' || event.status === 'completed' || event.status === 'failed') {
-        const waiter = this.responseWaiters.get(event.requestId);
-        this.responseWaiters.delete(event.requestId);
-        if (waiter.timer) clearTimeout(waiter.timer);
-
-        let finalResponse = event.payload?.snippet || null;
-        let finalError = event.payload?.error || null;
-        try {
-          const reqRow = this.db.prepare('SELECT response, error FROM bridge_requests WHERE request_id = ?').get(event.requestId);
-          if (reqRow) {
-            if (reqRow.response !== undefined && reqRow.response !== null) finalResponse = reqRow.response;
-            if (reqRow.error) finalError = reqRow.error;
-          }
-        } catch {}
-
-        waiter.resolve({
-          ...event,
-          response: finalResponse,
-          error: finalError
-        });
-      }
+    // 1. Live wakeup for correlated request/response waiters.
+    //    The durable bridge_requests row is authoritative; this notification only
+    //    accelerates discovery of an already-committed terminal result. It never
+    //    substitutes a payload snippet for the real stored response.
+    if (event.requestId) {
+      this._settleWaiter(event.requestId, 'event');
     }
 
     // 2. Dispatch to agent-specific subscribers
@@ -423,29 +409,9 @@ export class EventBus extends EventEmitter {
         maxId = r.event_id;
       }
 
-      // Also check response waiters
-      if (event.requestId && this.responseWaiters.has(event.requestId)) {
-        if (event.type === 'response_delivered' || event.type === 'task_completed' || event.status === 'completed' || event.status === 'failed') {
-          const waiter = this.responseWaiters.get(event.requestId);
-          this.responseWaiters.delete(event.requestId);
-          if (waiter.timer) clearTimeout(waiter.timer);
-
-          let finalResponse = event.payload?.snippet || null;
-          let finalError = event.payload?.error || null;
-          try {
-            const reqRow = this.db.prepare('SELECT response, error FROM bridge_requests WHERE request_id = ?').get(event.requestId);
-            if (reqRow) {
-              if (reqRow.response !== undefined && reqRow.response !== null) finalResponse = reqRow.response;
-              if (reqRow.error) finalError = reqRow.error;
-            }
-          } catch {}
-
-          waiter.resolve({
-            ...event,
-            response: finalResponse,
-            error: finalError
-          });
-        }
+      // Also wake any correlated waiter for this request (durable row decides).
+      if (event.requestId) {
+        this._settleWaiter(event.requestId, 'event');
       }
 
       if (handlers) {
@@ -466,67 +432,111 @@ export class EventBus extends EventEmitter {
   }
 
   checkPendingWaiters() {
-    for (const [requestId, waiter] of this.responseWaiters.entries()) {
-      try {
-        const reqRow = this.db.prepare(`
-          SELECT * FROM bridge_requests WHERE request_id = ?
-        `).get(requestId);
-
-        if (reqRow && (reqRow.status === 'completed' || reqRow.status === 'failed')) {
-          this.responseWaiters.delete(requestId);
-          if (waiter.timer) clearTimeout(waiter.timer);
-          waiter.resolve({
-            requestId,
-            conversationId: reqRow.conversation_id,
-            status: reqRow.status,
-            response: reqRow.response,
-            error: reqRow.error,
-            completedAt: reqRow.completed_at
-          });
-        }
-      } catch (err) {}
+    for (const requestId of Array.from(this.responseWaiters.keys())) {
+      this._settleWaiter(requestId, 'poll');
     }
+  }
+
+  /**
+   * Read the authoritative terminal state of a correlated request.
+   * @returns {{requestId,conversationId,status,response,error,completedAt}|null}
+   */
+  _readTerminalRequest(requestId) {
+    if (!requestId) return null;
+    try {
+      const row = this.db.prepare(`SELECT * FROM bridge_requests WHERE request_id = ?`).get(requestId);
+      if (!row) return null;
+      if (row.status !== 'completed' && row.status !== 'failed') return null;
+      return {
+        requestId: row.request_id,
+        conversationId: row.conversation_id,
+        status: row.status,
+        response: row.response,
+        error: row.error,
+        completedAt: row.completed_at
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Single, consistent waiter-resolution path used by live dispatch, DB drain,
+   * pre-registration checks and fallback polling. Resolves ONLY from the durable
+   * bridge_requests row, so a stale/duplicate/out-of-order notification can never
+   * deliver a wrong status or a truncated snippet.
+   *
+   * @returns {boolean} true if a waiter was resolved by this call.
+   */
+  _settleWaiter(requestId, source = 'event') {
+    const waiter = this.responseWaiters.get(requestId);
+    if (!waiter) return false;
+
+    const settled = this._readTerminalRequest(requestId);
+    if (!settled) return false; // Not terminal yet: keep waiting for the real result.
+
+    this.responseWaiters.delete(requestId);
+    if (waiter.timer) clearTimeout(waiter.timer);
+
+    if (this.tracer) {
+      this.tracer.mark({
+        requestId,
+        stage: LifecycleStage.WAITER_RESOLVED,
+        taskId: waiter.taskId || null,
+        attemptId: waiter.attemptId || null,
+        agentId: waiter.agentId || null,
+        routeId: waiter.routeId || null,
+        meta: { source, status: settled.status }
+      });
+    }
+
+    waiter.resolve({ ...settled, source, waiterLatencyMs: Date.now() - (waiter.registeredAt || Date.now()) });
+    return true;
   }
 
   /**
    * Correlated Request/Response Waiter:
    * Keeps caller attached to correlated response channel without manual polling.
    */
-  async waitForResponse({ requestId, agentId = null, timeoutMs = 30000 }) {
+  async waitForResponse({ requestId, agentId = null, taskId = null, attemptId = null, routeId = null, timeoutMs = 30000 }) {
     if (!requestId) throw new Error('requestId is required to wait for response');
-
-    // 1. Check if already answered in bridge_requests table (handles race conditions)
-    try {
-      const existing = this.db.prepare(`
-        SELECT * FROM bridge_requests WHERE request_id = ?
-      `).get(requestId);
-
-      if (existing && (existing.status === 'completed' || existing.status === 'failed')) {
-        return {
-          requestId: existing.request_id,
-          conversationId: existing.conversation_id,
-          status: existing.status,
-          response: existing.response,
-          error: existing.error,
-          completedAt: existing.completed_at
-        };
-      }
-    } catch {}
 
     this.ensureWatcherStarted();
 
-    return new Promise((resolve) => {
-      let timer = null;
+    // Register the waiter BEFORE any authoritative check. Previously the code
+    // checked the database first and registered second, so a result committed in
+    // that window produced no live wakeup and had to wait for the fallback poll.
+    // Registering first and checking second closes the window for BOTH the
+    // same-process (dispatchLocal) and cross-process (notify file / poll) cases.
+    let timer = null;
+    const waiterPromise = new Promise((resolve) => {
       if (timeoutMs > 0 && Number.isFinite(timeoutMs)) {
         timer = setTimeout(() => {
           this.responseWaiters.delete(requestId);
+          if (this.tracer) {
+            this.tracer.mark({
+              requestId,
+              stage: LifecycleStage.WAITER_RESOLVED,
+              taskId,
+              attemptId,
+              agentId,
+              routeId,
+              meta: { source: 'timeout', timeoutMs }
+            });
+          }
           resolve({
             requestId,
             status: 'timeout',
             response: null,
-            error: `Request timed out after ${timeoutMs}ms waiting for response`
+            error: `Request timed out after ${timeoutMs}ms waiting for response`,
+            timedOut: true,
+            recoverable: true
           });
         }, timeoutMs);
+        // Deliberately NOT unref'd: a process that is synchronously awaiting a
+        // correlated response must stay alive until that response arrives or the
+        // deadline expires. Unref'ing this timer let short-lived requester
+        // processes exit before a cross-process reply was delivered.
       }
 
       this.responseWaiters.set(requestId, {
@@ -544,9 +554,22 @@ export class EventBus extends EventEmitter {
           });
         },
         timer,
-        agentId
+        agentId,
+        taskId,
+        attemptId,
+        routeId,
+        registeredAt: Date.now()
       });
     });
+
+    // Second, authoritative check now that a waiter exists. If the result was
+    // already committed (even in the window between an earlier check and
+    // registration), this resolves synchronously with the full durable response.
+    if (this._readTerminalRequest(requestId)) {
+      this._settleWaiter(requestId, 'precheck');
+    }
+
+    return waiterPromise;
   }
 
   getCursor(agentId) {

@@ -3,6 +3,21 @@ import { CONFIG } from './config.js';
 import { createSessionAdapter } from './session-adapters/index.js';
 import { isEffectfulTool, getToolClassification, EffectsLedger } from './effects/effects-ledger.js';
 import { AttemptLedger } from './attempts/attempt-ledger.js';
+import { ArtifactStore, ArtifactError } from './artifacts/artifact-store.js';
+
+// Lazily-created per-context artifact store, so every transport (stdio MCP, HTTP
+// MCP, plugins) can store/retrieve real bytes without each wiring its own.
+const artifactStoreCache = new WeakMap();
+async function resolveArtifactStore(ctx) {
+  if (ctx.artifactStore) return ctx.artifactStore;
+  let store = artifactStoreCache.get(ctx);
+  if (!store && ctx.logger) {
+    store = new ArtifactStore(ctx.logger);
+    artifactStoreCache.set(ctx, store);
+  }
+  if (!store) throw new ArtifactError('Artifact store unavailable: no audit logger in context', 'ARTIFACT_STORE_UNAVAILABLE');
+  return store;
+}
 
 /**
  * Unified Tool Registry: Single Source of Truth for all Bridge tools across
@@ -1323,6 +1338,107 @@ export class ToolRegistry {
           }));
         }
         return logs;
+      }
+    });
+
+    // 8. Binary Artifacts (real image/video byte transport)
+    this.registerTool({
+      name: 'bridge_artifact_store',
+      description: 'Store REAL binary artifact bytes (PNG/JPEG/MP4/...) and return a compact, SHA-256-verified retrieval reference. Bytes are never echoed back inline here; a stored reference carries metadata only.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agentId: { type: 'string' },
+          dataBase64: { type: 'string', description: 'Base64 of the actual artifact bytes' },
+          mimeType: { type: 'string', description: 'Declared MIME type; must agree with the content magic bytes when recognized' },
+          filename: { type: 'string' },
+          taskId: { type: 'string' },
+          attemptId: { type: 'string' },
+          ttlMs: { type: 'number', description: 'Time-to-live in ms (default 24h)' },
+          authorizedAgents: { type: 'array', items: { type: 'string' }, description: 'Additional agents allowed to retrieve' },
+          metadata: { type: 'object', description: 'Optional provider/route metadata' }
+        },
+        required: ['dataBase64']
+      },
+      handler: async (args, ctx) => {
+        const store = await resolveArtifactStore(ctx);
+        const ref = store.put({
+          base64: args.dataBase64,
+          mimeType: args.mimeType || null,
+          filename: args.filename || null,
+          taskId: args.taskId || null,
+          attemptId: args.attemptId || null,
+          agentId: args.agentId,
+          ttlMs: args.ttlMs,
+          authorizedAgents: args.authorizedAgents,
+          metadata: args.metadata || null
+        });
+        return ref;
+      }
+    });
+
+    this.registerTool({
+      name: 'bridge_artifact_get',
+      description: 'Get compact metadata and retrievability for a stored artifact (no bytes).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agentId: { type: 'string' },
+          artifactId: { type: 'string' }
+        },
+        required: ['artifactId']
+      },
+      handler: async (args, ctx) => {
+        const store = await resolveArtifactStore(ctx);
+        return store.getMetadata(args.artifactId, { agentId: args.agentId });
+      }
+    });
+
+    this.registerTool({
+      name: 'bridge_artifact_read',
+      description: 'Authorized retrieval of an artifact\'s REAL bytes as base64, with SHA-256 integrity verification. Restricted to the storing agent and explicitly authorized agents.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agentId: { type: 'string' },
+          artifactId: { type: 'string' },
+          expectedSha256: { type: 'string', description: 'Optional hash to assert the retrieved bytes against' }
+        },
+        required: ['artifactId']
+      },
+      handler: async (args, ctx) => {
+        const store = await resolveArtifactStore(ctx);
+        // The 8 MiB inline ceiling is enforced from metadata inside `read` so the
+        // bytes are never loaded into memory only to be rejected afterwards.
+        const { bytes, metadata, integrityVerified } = store.read(args.artifactId, {
+          agentId: args.agentId,
+          maxBytes: ArtifactStore.maxInlineBytes
+        });
+        const hashMatches = args.expectedSha256 ? metadata.sha256 === args.expectedSha256 : true;
+        return {
+          ...metadata,
+          integrityVerified: integrityVerified && hashMatches,
+          expectedSha256Matches: hashMatches,
+          encoding: 'base64',
+          dataBase64: bytes.toString('base64')
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'bridge_artifact_cleanup',
+      description: 'Delete expired artifact bytes and mark their metadata expired.',
+      inputSchema: { type: 'object', properties: { agentId: { type: 'string' } } },
+      handler: async (args, ctx) => {
+        const store = await resolveArtifactStore(ctx);
+        const result = store.cleanupExpired();
+        ctx.logger?.log?.({
+          agentId: args.agentId,
+          action: 'artifact_cleanup',
+          status: 'success',
+          details: result
+        });
+        return result;
       }
     });
   }

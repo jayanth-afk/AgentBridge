@@ -13,6 +13,7 @@ import { ChatGptLocalEngineAdapter } from './control-plane/chatgpt-local-engine.
 import { AdapterHealth } from './control-plane/desktop-control-adapter.js';
 import { EffectsLedger } from './effects/effects-ledger.js';
 import { AttemptLedger } from './attempts/attempt-ledger.js';
+import { ArtifactStore } from './artifacts/artifact-store.js';
 
 export class BridgeHttpServer {
   constructor(options = {}) {
@@ -33,6 +34,7 @@ export class BridgeHttpServer {
     this.taskManager = options.taskManager || this.mailbox?.tasks || (this.logger ? new TaskManager(this.logger) : null);
     this.effectsLedger = options.effectsLedger || (this.logger?.db ? new EffectsLedger(this.logger) : null);
     this.attemptLedger = options.attemptLedger || this.taskManager?.attempts || (this.logger?.db ? new AttemptLedger(this.logger) : null);
+    this.artifactStore = options.artifactStore || (this.logger ? new ArtifactStore(this.logger) : null);
 
     // Authentication boundary for network-exposed control plane requests.
     // Enforced when `requireApiKey` is on (operator opt-in) or an explicit
@@ -528,7 +530,10 @@ export class BridgeHttpServer {
             }
           }
 
-          if (pathname === '/mcp' && method === 'POST') {
+          // Canonical MCP JSON-RPC endpoint. `/api/mcp/call` is retained as an
+          // alias because the shipped AgentBridgeClient SDK (used by Zia) posts
+          // there; without this alias every SDK tool call returned HTTP 404.
+          if ((pathname === '/mcp' || pathname === '/api/mcp/call') && method === 'POST') {
             const body = await readBody();
             const { method: rpcMethod, params = {}, id = 1 } = body;
 
@@ -558,7 +563,8 @@ export class BridgeHttpServer {
                 diagnostics: this.diagnostics,
                 cache: this.cache,
                 effectsLedger: this.effectsLedger,
-                attemptLedger: this.attemptLedger
+                attemptLedger: this.attemptLedger,
+                artifactStore: this.artifactStore
               };
 
               try {

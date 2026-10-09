@@ -27,6 +27,7 @@ import { CapabilityRegistry } from './capabilities/capability-registry.js';
 import { RequestExplainer } from './diagnostics/request-explainer.js';
 import { EffectsLedger } from './effects/effects-ledger.js';
 import { AttemptLedger } from './attempts/attempt-ledger.js';
+import { ArtifactStore } from './artifacts/artifact-store.js';
 
 export class BridgeMcpServer {
   constructor(options = {}) {
@@ -72,6 +73,7 @@ export class BridgeMcpServer {
 
     this.capabilityRegistry = options.capabilityRegistry || new CapabilityRegistry(this.logger);
     this.requestExplainer = options.requestExplainer || new RequestExplainer(this.logger);
+    this.artifactStore = options.artifactStore || new ArtifactStore(this.logger);
 
     // Single unified source of truth for tools
     this.registry = options.toolRegistry || new ToolRegistry();
@@ -134,6 +136,7 @@ export class BridgeMcpServer {
       sessionAdapter: this.sessionAdapter,
       capabilityRegistry: this.capabilityRegistry,
       requestExplainer: this.requestExplainer,
+      artifactStore: this.artifactStore,
       boundAgentId: this.agentId,
       attemptLedger: this.attempts,
       effectsLedger: this.effectsLedger

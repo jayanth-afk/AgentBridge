@@ -8,10 +8,10 @@ Its purpose is not to become another chatbot. It provides a shared, authenticate
 
 - Repository: `/Users/jayanthpranaykonada/agent-bridge`
 - Branch: `main`
-- HEAD at this documentation refresh: `2366dbe`
-- Working tree: clean and aligned with `origin/main`
-- Node test suite: **372 tests**
-- **364 passed**
+- HEAD at this documentation refresh: `be75a5d`
+- Working tree: contains the delivery-reliability and binary-artifact changes from the current session (not yet committed)
+- Node test suite: **551 tests**
+- **543 passed**
 - **8 intentionally skipped**
 - **0 failed**
 - Skips are explicit live-model/live-desktop checks that require external quota or physical desktop conditions.
@@ -34,7 +34,7 @@ AI agent
    │      │          │           │
    ├──────┼──────────┼───────────┤
    │      │          │           │
- files  commands    git      mailbox/events
+ files  commands    git   mailbox/events/artifacts
    │      │          │           │
    └──────┴──────────┴───────────┘
           │
@@ -78,6 +78,31 @@ Agents can:
 - recover persisted request/results after reconnect
 
 The current tests prove autonomous wake/response behavior and multi-process event exchange.
+
+#### Correlated result delivery (race-safe)
+
+The correlated waiter is now **registered before** the authoritative database
+check, closing the window in which a result committed after an initial check but
+before registration lost its live wakeup. Notifications are treated as an
+accelerator only: the durable `bridge_requests` row is always authoritative, so a
+stale, duplicate, or out-of-order event can never deliver a wrong status or a
+truncated snippet instead of the full response. A caller timeout never erases the
+durable task or its later result.
+
+A `RequestTracer` records correlated lifecycle stages (request created, task
+created, worker awakened, task claimed, provider submitted/observed, result
+persisted, completion committed, waiter resolved, response returned) with both
+wall-clock and monotonic timestamps, without ever logging prompt or response
+bodies.
+
+#### Binary artifacts (real bytes)
+
+`ArtifactStore` provides a durable, integrity-checked transport for real binary
+artifacts (PNG/JPEG/GIF/WEBP/MP4/MOV). Task results carry only compact artifact
+metadata plus a retrieval reference; actual bytes flow through an authorized
+`bridge_artifact_read` call. Every write and read is SHA-256 verified, size
+limited, MIME-checked against content magic bytes, path-containment checked, and
+refuses symlinked storage. See `src/artifacts/artifact-store.js`.
 
 ### Collaboration
 
@@ -166,6 +191,16 @@ The bridge also contains adapters for:
 - Claude Desktop
 - generic desktop/UI routes
 - CDP/browser routes where explicitly enabled
+
+## Media capability (honest status)
+
+The bridge now transports real binary bytes, but the **desktop providers still do
+not expose a route to raw bytes**. The shipped macOS Accessibility helper has no
+screenshot/image/export operation, and the ChatGPT Desktop, Claude Desktop, and
+Gemini Desktop sessions return correlated **text** only. Therefore: images or
+videos that a provider renders in its own UI cannot yet be exported through the
+current route. The artifact store only accepts bytes a caller actually supplies;
+it never fabricates bytes from a filename or a UI element id.
 
 ## Transports
 

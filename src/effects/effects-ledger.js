@@ -66,7 +66,14 @@ export const TOOL_EFFECT_CLASSIFICATIONS = Object.freeze({
   bridge_git_delete_branch: EffectClassification.IDEMPOTENT,
   bridge_git_fetch: EffectClassification.EXTERNAL,
   bridge_git_pull: EffectClassification.EXTERNAL,
-  bridge_git_push: EffectClassification.EXTERNAL
+  bridge_git_push: EffectClassification.EXTERNAL,
+
+  // Durable binary artifact transport. Storing creates NEW persistent bytes and
+  // a new artifact id on every call (non-idempotent); cleanup removes expired
+  // bytes (idempotent). Both are side effects and must be fenced/audited like
+  // any other mutation rather than silently bypassing the effects policy.
+  bridge_artifact_store: EffectClassification.NON_IDEMPOTENT,
+  bridge_artifact_cleanup: EffectClassification.IDEMPOTENT
 });
 
 export function isEffectfulTool(toolName) {

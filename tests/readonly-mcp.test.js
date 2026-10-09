@@ -75,10 +75,13 @@ test('Read-Only MCP Server Test Suite', async (t) => {
     assert.equal(info.extension, '.md');
     assert.ok(info.size > 0);
 
-    // Test readonly_read_file
+    // Test readonly_read_file. NOTE: this asserts against the CURRENT content of
+    // the read-only Zia AGENTS.md. The document was retitled upstream; the old
+    // 'Agent Architecture' literal no longer exists. Zia is deliberately NOT
+    // modified to satisfy a test — the assertion tracks the real file instead.
     const file = await executeReadonlyTool('readonly_read_file', { path: 'AGENTS.md' });
     assert.equal(file.path, 'AGENTS.md');
-    assert.ok(file.content.includes('Agent Architecture'));
+    assert.ok(file.content.includes('Task Execution Architecture'));
     assert.ok(file.lineCount > 10);
 
     // Test readonly_list_directory
@@ -88,9 +91,9 @@ test('Read-Only MCP Server Test Suite', async (t) => {
     const hasAgents = dir.entries.some(e => e.name === 'AGENTS.md');
     assert.ok(hasAgents, 'Directory listing should include AGENTS.md');
 
-    // Test readonly_search_files
-    const search = await executeReadonlyTool('readonly_search_files', { query: 'AgentLoop' });
-    assert.equal(search.query, 'AgentLoop');
+    // Test readonly_search_files against a token that actually exists upstream.
+    const search = await executeReadonlyTool('readonly_search_files', { query: 'TaskOrchestration' });
+    assert.equal(search.query, 'TaskOrchestration');
     assert.ok(search.matchCount > 0);
     assert.ok(search.matches.some(m => m.file.includes('AGENTS.md')));
   });

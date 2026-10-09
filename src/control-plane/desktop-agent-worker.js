@@ -5,6 +5,7 @@ import {
   getRegisteredVerificationToken,
   SECURITY_DENIAL_MESSAGE
 } from '../security/verification-tokens.js';
+import { LifecycleStage } from '../diagnostics/request-tracer.js';
 
 export const DesktopAgentWorkerStatus = Object.freeze({
   IDLE: 'IDLE',
@@ -121,7 +122,14 @@ export class DesktopAgentWorker extends EventEmitter {
     if (!event.requestId) return;
     if (event.status && ['completed', 'failed', 'cancelled'].includes(event.status)) return;
     if (event.fromAgent === this.agentId) return;
+    this._trace(event.requestId, LifecycleStage.WORKER_AWAKENED, { trigger: event.type }, event.taskId);
     this.handleRequest(event.requestId).catch((err) => this.emit('error', err));
+  }
+
+  _trace(requestId, stage, meta = null, taskId = null) {
+    try {
+      this.mailbox?.tracer?.mark({ requestId, stage, taskId, agentId: this.agentId, meta });
+    } catch {}
   }
 
   async handleRequest(requestId) {
@@ -160,6 +168,7 @@ export class DesktopAgentWorker extends EventEmitter {
     this.status = DesktopAgentWorkerStatus.DELIVERING;
     this.stats.received++;
     const t0 = Date.now();
+    this._trace(requestId, LifecycleStage.TASK_CLAIMED, { status: request.status }, request.taskId);
     this.emit('delivering', { requestId });
 
     // Keep the task lease fresh while a long real model turn is in progress so
@@ -253,10 +262,12 @@ export class DesktopAgentWorker extends EventEmitter {
         }
       }
 
+      this._trace(requestId, LifecycleStage.PROVIDER_SUBMITTED, { session: this.session?.name || null }, request.taskId);
       const result = await this.session.send({ text: request.question || '', requestId });
 
       const hasResponse = Boolean(result.success) && typeof result.response === 'string' && result.response.trim().length > 0;
       if (hasResponse) {
+        this._trace(requestId, LifecycleStage.PROVIDER_RESPONSE_COMPLETED, { status: result.status, latencyMs: result.latencyMs }, request.taskId);
         this._settle(request, { status: 'completed', result: result.response });
         this.delivered.add(requestId);
         this.stats.delivered++;
@@ -264,6 +275,9 @@ export class DesktopAgentWorker extends EventEmitter {
         this.emit('delivered', payload);
         return { handled: true, ...payload };
       }
+
+      // Submission happened but no correlated model response was observed.
+      this._trace(requestId, LifecycleStage.PROVIDER_UNCONFIRMED, { status: result.status, error: result.error || null, uiSubmitted: result.uiSubmitted === true }, request.taskId);
 
       const error = result.error || result.status || (result.response === '' ? 'MODEL_RESPONSE_EMPTY' : 'MODEL_RESPONSE_FAILED');
       this._settle(request, { status: 'failed', error });

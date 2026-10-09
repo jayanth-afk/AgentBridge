@@ -45,7 +45,7 @@ test('Real MCP stdio client handshake (official SDK)', async (t) => {
 
   await t.test('initialize completed and tools/list returns the full registry', async () => {
     const { tools } = await client.listTools();
-    assert.strictEqual(tools.length, 60, `expected 60 tools, got ${tools.length}`);
+    assert.strictEqual(tools.length, 64, `expected 64 tools, got ${tools.length}`);
     const names = tools.map(tl => tl.name);
     assert.ok(names.includes('bridge_ping'));
     assert.ok(names.includes('bridge_read_file'));
@@ -151,7 +151,7 @@ test('MCP stdio JSON-RPC framing survives malformed input', async (t) => {
   child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }) + '\n');
 
   const list = await waitFor(m => m.id === 2 && m.result);
-  assert.strictEqual(list.result.tools.length, 60);
+  assert.strictEqual(list.result.tools.length, 64);
 
   // 4. Unknown method yields a JSON-RPC error, not silence.
   child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'no/such/method' }) + '\n');

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { TaskManager } from './task-manager.js';
 import { EventBus } from './event-bus.js';
+import { RequestTracer, LifecycleStage } from './diagnostics/request-tracer.js';
 import {
   isSensitiveCredentialRequest,
   isVerificationTokenRequest,
@@ -21,6 +22,13 @@ export class MailboxHub {
       }
     }
     this.agentHandlers = new Map(); // agentId -> async (question, context) => response
+
+    // Structured, correlated request lifecycle tracing (observability only;
+    // never influences delivery semantics).
+    this.tracer = new RequestTracer(auditLogger);
+    if (this.eventBus && !this.eventBus.tracer) {
+      this.eventBus.tracer = this.tracer;
+    }
   }
 
   registerAgentHandler(agentId, handler) {
@@ -366,6 +374,23 @@ export class MailboxHub {
       }
     }
 
+    // Lifecycle: request + backing task durably created (post-commit).
+    this.tracer.mark({
+      requestId: reqId,
+      stage: LifecycleStage.REQUEST_CREATED,
+      taskId: task ? task.id : null,
+      agentId: toAgent,
+      meta: { fromAgent, conversationId: convId, asyncMode }
+    });
+    if (task) {
+      this.tracer.mark({
+        requestId: reqId,
+        stage: LifecycleStage.TASK_CREATED,
+        taskId: task.id,
+        agentId: toAgent
+      });
+    }
+
     // If explicit asynchronous mode requested, return immediately with correlation IDs
     if (asyncMode) {
       return {
@@ -385,7 +410,17 @@ export class MailboxHub {
     const outcome = await this.eventBus.waitForResponse({
       requestId: reqId,
       agentId: fromAgent,
+      taskId: task ? task.id : null,
       timeoutMs
+    });
+
+    // Lifecycle: the correlated response (or a truthful timeout) reached the caller.
+    this.tracer.mark({
+      requestId: reqId,
+      stage: LifecycleStage.RESPONSE_RETURNED,
+      taskId: task ? task.id : null,
+      agentId: fromAgent,
+      meta: { outcome: outcome.status }
     });
 
     if (outcome.status === 'completed') {
@@ -468,6 +503,7 @@ export class MailboxHub {
    */
   submitTaskResult({ taskId, agentId, status = 'completed', result = null, error = null, attemptId = null, epoch = null }) {
     let updated = null;
+    let lifecycle = null;
 
     const submitWork = (targetDb, stageEventFn = null) => {
       updated = this.tasks.updateTaskStatus({
@@ -511,6 +547,9 @@ export class MailboxHub {
           `).run(status, resultStr, error, now, now, requestId);
         } catch {}
       }
+
+      // Lifecycle: durable result persisted (still inside the same transaction).
+      lifecycle = { requestId, taskId, agentId, status };
 
       const recipient = task ? task.creator : (reqRow ? reqRow.from_agent : '*');
       const snippet = resultStr ? (resultStr.length > 100 ? resultStr.slice(0, 100) + '...' : resultStr) : null;
@@ -577,6 +616,26 @@ export class MailboxHub {
       });
     } else {
       submitWork(this.db, null);
+    }
+
+    // Lifecycle: the terminal state + completion event are committed.
+    if (lifecycle && lifecycle.requestId) {
+      this.tracer.mark({
+        requestId: lifecycle.requestId,
+        stage: LifecycleStage.RESULT_PERSISTED,
+        taskId: lifecycle.taskId,
+        attemptId,
+        agentId: lifecycle.agentId,
+        meta: { status: lifecycle.status }
+      });
+      this.tracer.mark({
+        requestId: lifecycle.requestId,
+        stage: LifecycleStage.COMPLETION_EVENT_COMMITTED,
+        taskId: lifecycle.taskId,
+        attemptId,
+        agentId: lifecycle.agentId,
+        meta: { status: lifecycle.status }
+      });
     }
 
     return updated;

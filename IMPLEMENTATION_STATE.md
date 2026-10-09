@@ -1,10 +1,10 @@
 # Agent Bridge — Current Implementation State
 
-**Refreshed:** 2026-10-08  
+**Refreshed:** 2026-10-09  
 **Repository:** `/Users/jayanthpranaykonada/agent-bridge`  
-**HEAD:** `2366dbe`  
+**HEAD:** `be75a5d`  
 **Branch:** `main`  
-**Tree:** clean
+**Tree:** modified, uncommitted on `main` (delivery-reliability + binary-artifact work, plus the follow-up security audit: artifact caller-identity enforcement, artifact-store hardening, and HTTP endpoint parity tests). Nothing pushed.
 
 This is the implementation handoff for the current bridge. It supersedes older notes and should be updated whenever architecture changes.
 
@@ -12,8 +12,8 @@ This is the implementation handoff for the current bridge. It supersedes older n
 
 Current `npm test` result:
 
-- tests: **372**
-- pass: **364**
+- tests: **551**
+- pass: **543**
 - fail: **0**
 - skipped: **8**
 
@@ -94,11 +94,34 @@ The known identities currently include:
 
 The special `system` identity must never be reachable through ordinary caller-supplied impersonation.
 
+## Client SDK endpoint
+
+`AgentBridgeClient` posts JSON-RPC to `/api/mcp/call`. That path never existed on
+the HTTP server (which serves the canonical `/mcp`), so every SDK tool call
+returned 404. The HTTP server now serves `/api/mcp/call` as an alias of `/mcp`.
+
 ## Messaging
 
 ### EventBus
 
 The EventBus is the internal event path.
+
+Delivery guarantees implemented in this session:
+
+- `waitForResponse()` registers the in-memory waiter **before** the
+  authoritative `bridge_requests` check, eliminating the lost-wakeup window.
+- A single `_settleWaiter()` path (used by live dispatch, DB drain,
+  pre-registration check, and fallback poll) resolves a waiter **only** from the
+  durable terminal row — never from an event payload snippet.
+- The waiter timeout timer is intentionally **referenced** (not unref'd): a
+  short-lived requester process must stay alive until a cross-process reply
+  arrives. Unref'ing it caused cross-process requesters to exit early.
+- A caller timeout is reported as `timeout` with `recoverable: true` and never
+  overwrites the durable request/task, so a late result stays retrievable.
+
+`src/diagnostics/request-tracer.js` (`RequestTracer`) records correlated lifecycle
+stages with monotonic + wall-clock timestamps for stage-level latency analysis.
+It never stores prompts or response bodies.
 
 ### MailboxHub
 
@@ -227,6 +250,41 @@ Current adapters include:
 - notification/browser support
 
 This allows the bridge to evolve transports independently of logical task/message semantics.
+
+## Binary artifact transport
+
+`src/artifacts/artifact-store.js` (`ArtifactStore`) provides durable,
+integrity-verified transport for real binary artifacts:
+
+- table `bridge_artifacts` with `artifact_id`, `task_id`, `attempt_id`,
+  `agent_id`, `mime_type`, `media_type`, `filename`, `size_bytes`, `sha256`,
+  `storage_backend`, `retrieval_method`, `transfer_status`, `created_at`,
+  `expires_at`
+- bytes stored under `data/artifacts/` with O_EXCL creation, size limits,
+  magic-byte MIME agreement, SHA-256 verification on store **and** read,
+  lexical + realpath containment checks, symlink refusal, expiry, and cleanup
+- retrieval authorized per artifact (storing agent + explicitly authorized
+  agents), so one task cannot read another task's artifact
+- exposed through tools `bridge_artifact_store`, `bridge_artifact_get`,
+  `bridge_artifact_read`, `bridge_artifact_cleanup` (registry now 64 tools)
+
+Security hardening (follow-up audit):
+
+- Caller identity for every artifact tool is resolved from the trusted,
+  server-side bound context (`AgentIdentityManager.resolveIdentity`), never from
+  the caller-supplied `agentId`; a bound connection can never act as another
+  agent. Regression coverage: `tests/artifact-identity-security.test.js`.
+- Base64 payloads are rejected by **encoded length before decoding** and must be
+  well-formed; the 8 MiB inline retrieval ceiling is enforced from stored
+  metadata before bytes are read into memory.
+- A declared `image/*`/`video/*` MIME must be confirmed by content magic bytes.
+- `bridge_artifact_store` (non-idempotent) and `bridge_artifact_cleanup`
+  (idempotent) are now classified as effectful tools, so they are fenced and
+  audited like other mutations and no longer bypass the effects policy.
+
+Provider limitation (unchanged): no desktop provider exposes a raw-byte export
+route today — the Ax helper has no screenshot/export op and all desktop sessions
+return text. The store refuses to fabricate bytes from a filename or UI element id.
 
 ## Durable storage
 

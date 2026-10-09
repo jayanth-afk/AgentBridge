@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 import path from 'node:path';
 import fs from 'node:fs';
+import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 
 import { CONFIG } from '../src/config.js';
@@ -21,6 +22,7 @@ import { CollaborationManager } from '../src/collaboration-manager.js';
 import { FileActivityManager } from '../src/file-activity-manager.js';
 import { ToolRegistry } from '../src/tool-registry.js';
 import { RequestExplainer } from '../src/diagnostics/request-explainer.js';
+import { ArtifactStore } from '../src/artifacts/artifact-store.js';
 
 const TEST_DB = path.join(CONFIG.DATA_DIR, 'test_tool_matrix.sqlite');
 const WS = CONFIG.TEST_WORKSPACE;
@@ -105,6 +107,16 @@ test('Agent Bridge Tool Matrix — all registered tools exercised', async (t) =>
   }
 
   // ---- matrix: each entry exercises one tool with a valid invocation -------
+  // Binary-artifact transport fixtures (real PNG bytes, isolated temp storage root).
+  ctx.artifactStore = new ArtifactStore(logger, { root: fs.mkdtempSync(path.join(os.tmpdir(), 'matrix-artifacts-')) });
+  const matrixPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const storedArtifact = ctx.artifactStore.put({
+    base64: matrixPngBase64,
+    mimeType: 'image/png',
+    filename: 'matrix.png',
+    agentId: AGENT
+  });
+
   const valid = [
     ['bridge_ping', {}],
     ['bridge_discover_agents', {}],
@@ -166,7 +178,11 @@ test('Agent Bridge Tool Matrix — all registered tools exercised', async (t) =>
     ['bridge_file_activity_stop', { filePath: mainFile, agentId: AGENT, activityType: 'editing' }],
     ['bridge_get_audit_log', { limit: 5 }],
     ['bridge_delete_file', { filePath: deleteTarget, agentId: AGENT }],
-    ['bridge_close_collaboration', { collaborationId: collab.id, agentId: AGENT }]
+    ['bridge_close_collaboration', { collaborationId: collab.id, agentId: AGENT }],
+    ['bridge_artifact_store', { agentId: AGENT, dataBase64: matrixPngBase64, mimeType: 'image/png', filename: 'matrix2.png' }],
+    ['bridge_artifact_get', { agentId: AGENT, artifactId: storedArtifact.artifact_id }],
+    ['bridge_artifact_read', { agentId: AGENT, artifactId: storedArtifact.artifact_id }],
+    ['bridge_artifact_cleanup', { agentId: AGENT }]
   ];
 
   const registry = new ToolRegistry();
