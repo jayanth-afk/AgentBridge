@@ -598,10 +598,6 @@ func sendPromptToClaude(name: String, text: String, requestId: String?) -> SendT
 
     _ = AXUIElementSetAttributeValue(input, kAXFocusedAttribute as CFString, kCFBooleanTrue)
 
-    var range = CFRange(location: 0, length: 1000)
-    if let rangeVal = AXValueCreate(.cfRange, &range) {
-        _ = AXUIElementSetAttributeValue(input, kAXSelectedTextRangeAttribute as CFString, rangeVal)
-    }
     _ = AXUIElementSetAttributeValue(input, "AXSelectedText" as CFString, promptText as CFTypeRef)
     let setErr = AXUIElementSetAttributeValue(input, kAXValueAttribute as CFString, promptText as CFTypeRef)
     guard setErr == .success else {
@@ -609,32 +605,52 @@ func sendPromptToClaude(name: String, text: String, requestId: String?) -> SendT
     }
 
     let marker = requestId.map { "[AB:\($0)]" } ?? String(text.prefix(24))
-    var submitted = false
-    var pressedSend = false
-    for attempt in 1...40 {
-        let curWin = resolveWindow(name, activate: false).1 ?? win
-        let curVal = findInput(curWin).map { axString($0, kAXValueAttribute).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
-        let composerCleared = curVal.isEmpty || curVal == "\n" || !curVal.contains(marker)
-        let generating = checkGenerating(curWin)
 
-        // Claude versions differ here: some clear the composer immediately,
-        // while others leave its AX value intact until the next layout pass.
-        // A previously enabled Send control becoming unavailable is the other
-        // reliable UI acknowledgement of a successful press. Completion is
-        // still gated by the separate correlated-response observer below.
-        let sendAvailable = findSendBtn(curWin) != nil
-        if pressedSend && (composerCleared || generating || !sendAvailable) {
+    // Wait for Chromium to process the text insertion and populate the composer
+    for _ in 1...25 {
+        let curVal = findInput(win).map { axString($0, kAXValueAttribute).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+        if curVal.contains(marker) {
+            break
+        }
+        usleep(100_000)
+    }
+
+    // Wait for the Send button to become enabled (up to 4 seconds)
+    var sendBtn: AXUIElement? = nil
+    for _ in 1...40 {
+        if let btn = findSendBtn(win) {
+            sendBtn = btn
+            break
+        }
+        usleep(100_000)
+    }
+
+    guard let btn = sendBtn else {
+        return SendTurnResponse(ok: false, status: "SEND_BUTTON_NOT_FOUND", requestId: requestId, error: "Send button did not become available")
+    }
+
+    _ = AXUIElementPerformAction(btn, kAXPressAction as CFString)
+
+    var submitted = false
+    for attempt in 1...40 {
+        usleep(250_000)
+        let curVal = findInput(win).map { axString($0, kAXValueAttribute).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+        let composerCleared = curVal.isEmpty || curVal == "\n" || !curVal.contains(marker)
+        let generating = checkGenerating(win)
+        let sendDisabled = findSendBtn(win) == nil
+
+        if composerCleared || generating || sendDisabled {
             submitted = true
             break
         }
 
-        if let btn = findSendBtn(curWin) {
-            let pErr = AXUIElementPerformAction(btn, kAXPressAction as CFString)
-            if pErr == .success {
-                pressedSend = true
+        // Chromium accessibility action retry: if still not submitted after 2 attempts (500ms),
+        // re-dispatch AXPress on the send button to ensure JavaScript event delivery.
+        if attempt == 2 || attempt == 6 {
+            if let freshBtn = findSendBtn(win) {
+                _ = AXUIElementPerformAction(freshBtn, kAXPressAction as CFString)
             }
         }
-        usleep(250_000)
     }
 
     guard submitted else {
@@ -688,10 +704,14 @@ func extractLatestClaudeResponse(_ raw: String, requestId: String?) -> String? {
     // node because that can silently return a stale turn.
     if let requestId {
         let marker = "[AB:\(requestId)]"
-        guard let markerRange = source.range(of: marker) else {
+        let markerClean = "[AB:\(requestId.replacingOccurrences(of: "_", with: ""))]"
+        if let markerRange = source.range(of: marker) {
+            source = String(source[markerRange.upperBound...])
+        } else if let markerRange = source.range(of: markerClean) {
+            source = String(source[markerRange.upperBound...])
+        } else {
             return nil
         }
-        source = String(source[markerRange.upperBound...])
     }
 
     guard let responseRange = source.range(of: "Claude responded:", options: .caseInsensitive) else {
@@ -1107,20 +1127,27 @@ func sendPromptToGemini(name: String = "Gemini", text: String, requestId: String
         return SendTurnResponse(ok: false, status: "INPUT_NOT_FOUND", requestId: requestId, error: "Prompt textarea not found in Gemini")
     }
 
+    let promptText: String
+    if let req = requestId, !req.isEmpty, !text.contains("[AB:\(req)]") {
+        promptText = "\(text)\n\n[AB:\(req)]"
+    } else {
+        promptText = text
+    }
+
     _ = AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
 
     var range = CFRange(location: 0, length: 1000)
     if let rangeVal = AXValueCreate(.cfRange, &range) {
         _ = AXUIElementSetAttributeValue(composer, kAXSelectedTextRangeAttribute as CFString, rangeVal)
     }
-    _ = AXUIElementSetAttributeValue(composer, "AXSelectedText" as CFString, text as CFTypeRef)
-    let setErr = AXUIElementSetAttributeValue(composer, kAXValueAttribute as CFString, text as CFTypeRef)
+    _ = AXUIElementSetAttributeValue(composer, "AXSelectedText" as CFString, promptText as CFTypeRef)
+    let setErr = AXUIElementSetAttributeValue(composer, kAXValueAttribute as CFString, promptText as CFTypeRef)
     guard setErr == .success else {
         return SendTurnResponse(ok: false, status: "VALUE_SET_FAILED", requestId: requestId, error: "AXError \(setErr.rawValue)")
     }
 
     var sendBtn: AXUIElement? = nil
-    for _ in 1...20 {
+    for _ in 1...25 {
         usleep(100_000) // 100ms
         if let btn = findGeminiSendButton(win) {
             sendBtn = btn
@@ -1135,6 +1162,28 @@ func sendPromptToGemini(name: String = "Gemini", text: String, requestId: String
     let pressErr = AXUIElementPerformAction(btn, kAXPressAction as CFString)
     guard pressErr == .success else {
         return SendTurnResponse(ok: false, status: "PRESS_FAILED", requestId: requestId, error: "AXError \(pressErr.rawValue)")
+    }
+
+    let marker = requestId.map { "[AB:\($0)]" } ?? String(text.prefix(24))
+    var submitted = false
+    for _ in 1...40 {
+        usleep(250_000)
+        let curVal = findGeminiComposer(win).map { axString($0, kAXValueAttribute).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+        let composerCleared = curVal.isEmpty || curVal == "\n" || !curVal.contains(marker)
+        let generating = checkGeminiGenerating(win)
+        let sendDisabled = findGeminiSendButton(win) == nil
+
+        let rows = findGeminiRows(win)
+        let markerInRows = rows.contains { extractTextFromGeminiRow($0).text.contains(marker) }
+
+        if composerCleared || generating || sendDisabled || markerInRows {
+            submitted = true
+            break
+        }
+    }
+
+    guard submitted else {
+        return SendTurnResponse(ok: false, status: "GEMINI_SUBMISSION_UNCONFIRMED", requestId: requestId, error: "Send button did not clear prompt input")
     }
 
     return SendTurnResponse(ok: true, status: "SUBMITTED", requestId: requestId, error: nil)
@@ -1196,13 +1245,13 @@ func extractTextFromGeminiRow(_ row: AXUIElement) -> (text: String, isComplete: 
         "expand_more", "search_activity", "build", "Agent Bridge",
         "check_circle", "Complete", "Approved", "Show all, expand_more",
         "Good response", "Bad response", "Copy response", "More actions",
-        "Gemini is AI and can make mistakes."
+        "Regenerate", "Gemini is AI and can make mistakes."
     ]
     func collect(_ el: AXUIElement) {
         var roleVal: AnyObject?
         AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleVal)
         let role = (roleVal as? String) ?? ""
-        if role == "AXStaticText" || role == "AXHeading" || role == "AXTextArea" || role == "AXButton" {
+        if role == "AXStaticText" || role == "AXHeading" || role == "AXTextArea" || role == "AXButton" || role == "AXImage" || role == "AXLink" {
             var valVal: AnyObject?
             AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &valVal)
             var descVal: AnyObject?
