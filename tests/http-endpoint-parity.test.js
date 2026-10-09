@@ -119,4 +119,40 @@ test('HTTP MCP: /mcp and /api/mcp/call share one authenticated path', async (t) 
       assert.equal(payload.status, 'OK');
     }
   });
+
+  await t.test('8. Unknown JSON-RPC method returns -32601 on both endpoints', async () => {
+    for (const ep of ['/mcp', '/api/mcp/call']) {
+      const r = await call(ep, { jsonrpc: '2.0', id: 42, method: 'unsupported/method' }, authed);
+      assert.equal(r.status, 200);
+      assert.ok(r.json.error);
+      assert.equal(r.json.error.code, -32601);
+      assert.match(r.json.error.message, /Method not found/);
+    }
+  });
+
+  await t.test('9. Missing tool name returns -32602 on both endpoints', async () => {
+    for (const ep of ['/mcp', '/api/mcp/call']) {
+      const r = await call(ep, { jsonrpc: '2.0', id: 43, method: 'tools/call', params: {} }, authed);
+      assert.equal(r.status, 200);
+      assert.ok(r.json.error);
+      assert.equal(r.json.error.code, -32602);
+      assert.match(r.json.error.message, /Invalid params/);
+    }
+  });
+
+  await t.test('10. Oversized request body (>5MB) yields 413', async () => {
+    const huge = JSON.stringify({ jsonrpc: '2.0', id: 44, method: 'tools/call', padding: 'X'.repeat(5 * 1024 * 1024 + 100) });
+    const r = await call('/mcp', huge, authed);
+    assert.equal(r.status, 413);
+  });
+
+  await t.test('11. Escalation to system over HTTP is denied', async () => {
+    const r = await call('/mcp', {
+      jsonrpc: '2.0', id: 45, method: 'tools/call',
+      params: { name: 'bridge_ping', arguments: { agentId: 'system' } }
+    }, authed);
+    assert.equal(r.status, 200);
+    assert.equal(r.json.result.isError, true);
+    assert.match(r.json.result.content[0].text, /Security Violation/);
+  });
 });

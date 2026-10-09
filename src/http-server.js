@@ -550,6 +550,18 @@ export class BridgeHttpServer {
 
             if (rpcMethod === 'tools/call') {
               const { name, arguments: args = {} } = params;
+              if (!name) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({
+                  jsonrpc: '2.0',
+                  id,
+                  error: {
+                    code: -32602,
+                    message: 'Invalid params: tool name is required'
+                  }
+                }));
+              }
+
               const toolContext = {
                 controller: this.controller,
                 mailbox: this.mailbox,
@@ -601,6 +613,17 @@ export class BridgeHttpServer {
                 }));
               }
             }
+
+            // Unknown JSON-RPC method on MCP endpoint
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({
+              jsonrpc: '2.0',
+              id,
+              error: {
+                code: -32601,
+                message: `Method not found: ${rpcMethod}`
+              }
+            }));
           }
 
           // 404 fallback

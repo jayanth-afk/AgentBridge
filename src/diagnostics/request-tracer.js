@@ -63,6 +63,7 @@ export class RequestTracer {
         meta TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_request_lifecycle_req ON request_lifecycle(request_id, id);
+      CREATE INDEX IF NOT EXISTS idx_request_lifecycle_wall ON request_lifecycle(wall_clock);
     `);
   }
 
@@ -153,4 +154,95 @@ export class RequestTracer {
     if (!from || !to) return null;
     return to.monotonicMs - from.monotonicMs;
   }
+
+  /**
+   * Conservative retention / pruning mechanism for request lifecycle records.
+   *
+   * Invariants:
+   *  1. Configurable retention period (default 7 days).
+   *  2. Bounded batch deletion (maxBatch, default 1000) to prevent lock contention.
+   *  3. Records belonging to incomplete requests (pending/in_progress in bridge_requests)
+   *     or incomplete tasks in tasks are NEVER pruned, ensuring crash recovery state is preserved.
+   *  4. Safe maintenance invocation returns detailed counts and continuation status.
+   *
+   * @param {object} options
+   * @param {number} [options.retentionMs=604800000] - Cutoff age in milliseconds (default 7 days)
+   * @param {number} [options.maxBatch=1000] - Maximum records to delete in one invocation
+   * @param {number} [options.now=Date.now()] - Current epoch timestamp in ms
+   * @returns {{pruned:number, hasMore:boolean, cutoff:string}}
+   */
+  prune({
+    retentionMs = 7 * 24 * 60 * 60 * 1000,
+    maxBatch = 1000,
+    now = Date.now()
+  } = {}) {
+    if (!this.enabled || !this.db) return { pruned: 0, hasMore: false, cutoff: null };
+
+    const cutoffIso = new Date(now - retentionMs).toISOString();
+    const batchLimit = Math.max(1, Number.isFinite(maxBatch) ? maxBatch : 1000);
+
+    try {
+      // Find candidate record IDs older than the cutoff whose request and task are
+      // terminal (or unlinked). Records needed for active/in-flight recovery are preserved.
+      const candidateRows = this.db.prepare(`
+        SELECT rl.id FROM request_lifecycle rl
+        WHERE rl.wall_clock < ?
+        AND NOT EXISTS (
+          SELECT 1 FROM bridge_requests br
+          WHERE br.request_id = rl.request_id
+          AND br.status NOT IN ('completed', 'failed', 'cancelled')
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM tasks t
+          WHERE t.id = rl.task_id
+          AND t.status NOT IN ('completed', 'failed', 'cancelled')
+        )
+        ORDER BY rl.id ASC
+        LIMIT ?
+      `).all(cutoffIso, batchLimit);
+
+      if (!candidateRows || candidateRows.length === 0) {
+        return { pruned: 0, hasMore: false, cutoff: cutoffIso };
+      }
+
+      const ids = candidateRows.map(r => r.id);
+      const placeholders = ids.map(() => '?').join(',');
+      const result = this.db.prepare(`
+        DELETE FROM request_lifecycle WHERE id IN (${placeholders})
+      `).run(...ids);
+
+      const pruned = result.changes || ids.length;
+      return {
+        pruned,
+        hasMore: ids.length === batchLimit,
+        cutoff: cutoffIso
+      };
+    } catch {
+      return { pruned: 0, hasMore: false, cutoff: cutoffIso };
+    }
+  }
+
+  /**
+   * Diagnostic statistics for request lifecycle records.
+   * @returns {{totalRecords:number, oldest:string|null, newest:string|null}}
+   */
+  getStats() {
+    if (!this.enabled || !this.db) {
+      return { totalRecords: 0, oldest: null, newest: null };
+    }
+    try {
+      const row = this.db.prepare(`
+        SELECT COUNT(*) as total, MIN(wall_clock) as oldest, MAX(wall_clock) as newest
+        FROM request_lifecycle
+      `).get();
+      return {
+        totalRecords: Number(row?.total || 0),
+        oldest: row?.oldest || null,
+        newest: row?.newest || null
+      };
+    } catch {
+      return { totalRecords: 0, oldest: null, newest: null };
+    }
+  }
 }
+

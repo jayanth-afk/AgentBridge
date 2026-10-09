@@ -42,6 +42,7 @@ export class EventBus extends EventEmitter {
   }
 
   ensureNotifyFile() {
+    if (!this.notifyFilePath || this.dbPath === ':memory:') return;
     try {
       const dir = path.dirname(this.notifyFilePath);
       if (!fs.existsSync(dir)) {
@@ -205,9 +206,11 @@ export class EventBus extends EventEmitter {
     };
 
     // Cross-process wakeup: touch notify file
-    try {
-      fs.writeFileSync(this.notifyFilePath, String(eventId));
-    } catch {}
+    if (this.dbPath !== ':memory:') {
+      try {
+        fs.writeFileSync(this.notifyFilePath, String(eventId));
+      } catch {}
+    }
 
     // In-process immediate dispatch (0ms)
     this.dispatchLocal(event);
@@ -313,7 +316,7 @@ export class EventBus extends EventEmitter {
   }
 
   ensureWatcherStarted() {
-    if (this.fileWatcher || this.isClosed) return;
+    if (this.fileWatcher || this.isClosed || this.dbPath === ':memory:') return;
 
     this.ensureNotifyFile();
 

@@ -339,4 +339,49 @@ test('Correlated result delivery: race-safety, recovery, and latency', async (t)
       env.eventBus._readTerminalRequest = original;
     }
   });
+
+  await t.test('14. Concurrent multi-agent delivery of 5,000+ character Unicode payloads with newlines', async () => {
+    const agents = ['gemini', 'chatgpt-desktop', 'claude-desktop', 'freebuff'];
+    const unicodeBase = '🚀 🌟 宇宙・銀河・プログラミング \n\t\r\n' +
+      'αβγδεζηθικλμνξοπρστυφχψω\n' +
+      'مرحبا بالعالم - أهلا وسهلا\n' +
+      '```json\n{"status": "ok", "nested": true}\n```\n';
+    const longPayload = (unicodeBase.repeat(Math.ceil(6000 / unicodeBase.length))).slice(0, 7500);
+
+    const promises = agents.map(async (agent, idx) => {
+      const rid = `req_unicode_${agent}_${idx}`;
+      insertPendingRequest(env.mailbox, rid, { from: 'antigravity-ide', to: agent });
+      const waiter = env.eventBus.waitForResponse({ requestId: rid, timeoutMs: 5000 });
+      const expected = `${longPayload}_[${agent}_${idx}]`;
+      completeAndPublish(env.mailbox, rid, expected);
+      const res = await waiter;
+      assert.equal(res.status, 'completed');
+      assert.equal(res.response, expected);
+      assert.equal(res.response.length, expected.length);
+      return res;
+    });
+
+    const results = await Promise.all(promises);
+    assert.equal(results.length, 4);
+  });
+
+  await t.test('15. Response arriving exactly around the timeout boundary is safely resolved or recoverable', async () => {
+    const requestId = 'req_timeout_boundary';
+    insertPendingRequest(env.mailbox, requestId);
+
+    // Set a very short timeout
+    const waiter = env.eventBus.waitForResponse({ requestId, timeoutMs: 15 });
+    await new Promise(r => setTimeout(r, 15));
+    completeAndPublish(env.mailbox, requestId, 'BOUNDARY_RESPONSE');
+
+    const outcome = await waiter;
+    if (outcome.status === 'completed') {
+      assert.equal(outcome.response, 'BOUNDARY_RESPONSE');
+    } else {
+      assert.equal(outcome.status, 'timeout');
+      assert.equal(outcome.recoverable, true);
+      const durable = env.mailbox.getRequest(requestId);
+      assert.equal(durable.response, 'BOUNDARY_RESPONSE');
+    }
+  });
 });

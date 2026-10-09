@@ -2,18 +2,18 @@
 
 **Refreshed:** 2026-10-09  
 **Repository:** `/Users/jayanthpranaykonada/agent-bridge`  
-**HEAD:** `be75a5d`  
+**HEAD:** `1d74b4db6eb36b2ecefa4fee8cf810e279da464a`  
 **Branch:** `main`  
-**Tree:** modified, uncommitted on `main` (delivery-reliability + binary-artifact work, plus the follow-up security audit: artifact caller-identity enforcement, artifact-store hardening, and HTTP endpoint parity tests). Nothing pushed.
+**Tree:** modified, uncommitted on `main` (delivery-reliability, binary-artifact transport, OS-level TOCTOU hardening, request tracer retention policy, HTTP MCP parity hardening, large-payload Unicode delivery verification, and in-memory notify file isolation). Nothing pushed.
 
 This is the implementation handoff for the current bridge. It supersedes older notes and should be updated whenever architecture changes.
 
 ## Verification
 
-Current `npm test` result:
+Current `npm test` result (`node --test --test-concurrency=1 tests/*.test.js`):
 
-- tests: **551**
-- pass: **543**
+- tests: **563**
+- pass: **555**
 - fail: **0**
 - skipped: **8**
 
@@ -268,23 +268,26 @@ integrity-verified transport for real binary artifacts:
 - exposed through tools `bridge_artifact_store`, `bridge_artifact_get`,
   `bridge_artifact_read`, `bridge_artifact_cleanup` (registry now 64 tools)
 
-Security hardening (follow-up audit):
+Security hardening (audit & hardening phase):
 
-- Caller identity for every artifact tool is resolved from the trusted,
-  server-side bound context (`AgentIdentityManager.resolveIdentity`), never from
-  the caller-supplied `agentId`; a bound connection can never act as another
-  agent. Regression coverage: `tests/artifact-identity-security.test.js`.
-- Base64 payloads are rejected by **encoded length before decoding** and must be
-  well-formed; the 8 MiB inline retrieval ceiling is enforced from stored
-  metadata before bytes are read into memory.
+- OS-level TOCTOU immunity: `ArtifactStore.read()` opens storage files with the OS-level `O_NOFOLLOW` flag via `fs.openSync(real, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)`, validates the opened descriptor with `fs.fstatSync(fd)` (ensuring file size matches and it is a regular file), and reads directly from the verified file descriptor with `fs.readFileSync(fd)` inside a `finally { fs.closeSync(fd) }` block. This eliminates filesystem race conditions and symlink substitution between path validation and read.
+- Caller identity for every artifact tool is resolved from the trusted, server-side bound context (`AgentIdentityManager.resolveIdentity`), never from the caller-supplied `agentId`; a bound connection can never act as another agent. Regression coverage: `tests/artifact-identity-security.test.js`.
+- Base64 payloads are rejected by **encoded length before decoding** and must be well-formed; the 8 MiB inline retrieval ceiling is enforced from stored metadata before bytes are read into memory.
 - A declared `image/*`/`video/*` MIME must be confirmed by content magic bytes.
-- `bridge_artifact_store` (non-idempotent) and `bridge_artifact_cleanup`
-  (idempotent) are now classified as effectful tools, so they are fenced and
-  audited like other mutations and no longer bypass the effects policy.
+- `bridge_artifact_store` (non-idempotent) and `bridge_artifact_cleanup` (idempotent) are classified as effectful tools, fenced and audited like other mutations under the effects policy.
 
-Provider limitation (unchanged): no desktop provider exposes a raw-byte export
-route today — the Ax helper has no screenshot/export op and all desktop sessions
-return text. The store refuses to fabricate bytes from a filename or UI element id.
+Provider limitation (truthfulness): no desktop provider exposes a raw-byte export route today — the Ax helper has no screenshot/export op and desktop sessions return text. The store refuses to fabricate bytes from a filename or UI element id.
+
+## Request tracer & retention policy
+
+`src/diagnostics/request-tracer.js` (`RequestTracer`) captures fine-grained request lifecycle events across all stages: `REQUEST_CREATED`, `TASK_CREATED`, `TASK_CLAIMED`, `WORKER_AWAKENED`, `PROVIDER_SUBMITTED`, `PROVIDER_RESPONSE_COMPLETED`, `RESULT_PERSISTED`, `WAITER_RESOLVED`, `RESPONSE_RETURNED`, `REQUEST_FAILED`, `REQUEST_TIMED_OUT`.
+
+Retention & memory safety:
+- Index `idx_request_lifecycle_wall` on `(wall_time_ms)` enables high-performance bounded pruning.
+- `prune({ retentionMs, maxBatch, now })` prunes old terminal records while strictly preserving records for active or pending requests (`bridge_requests.status NOT IN ('completed', 'failed', 'cancelled')`) and active tasks (`bridge_tasks.status NOT IN ('completed', 'failed', 'cancelled')`).
+- `getStats()` provides total count, oldest/newest timestamps, and active request count.
+- Exposed through `MailboxHub.pruneRequestLifecycle()` and `MailboxHub.getRequestLifecycleStats()`.
+- Verified in `tests/request-tracer-retention.test.js`.
 
 ## Durable storage
 

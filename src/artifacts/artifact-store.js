@@ -403,7 +403,33 @@ export class ArtifactStore {
     // Re-verify containment after resolving any symlinked root components.
     const real = this._assertContainedReal(fs.realpathSync(storagePath));
 
-    const bytes = fs.readFileSync(real);
+    // OS-level TOCTOU protection: open with O_NOFOLLOW to guarantee no symlink
+    // can be substituted between validation and open. All stat and read operations
+    // are then performed directly on the opened file descriptor in the kernel.
+    let fd = null;
+    let bytes;
+    try {
+      const openFlags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0);
+      fd = fs.openSync(real, openFlags);
+      const fdStat = fs.fstatSync(fd);
+      if (!fdStat.isFile()) {
+        throw new ArtifactError('Refusing to read a non-regular artifact file', 'ARTIFACT_NOT_REGULAR_FILE');
+      }
+      if (fdStat.size !== row.size_bytes) {
+        throw new ArtifactError('Artifact size changed since storage', 'ARTIFACT_INTEGRITY_FAILURE');
+      }
+      bytes = fs.readFileSync(fd);
+    } catch (err) {
+      if (err.code === 'ELOOP' || (err.message && err.message.includes('symlink'))) {
+        throw new ArtifactError('Refusing to read a symlinked artifact', 'ARTIFACT_SYMLINK');
+      }
+      throw err;
+    } finally {
+      if (fd !== null) {
+        try { fs.closeSync(fd); } catch {}
+      }
+    }
+
     if (bytes.length !== row.size_bytes) {
       throw new ArtifactError('Artifact size changed since storage', 'ARTIFACT_INTEGRITY_FAILURE');
     }

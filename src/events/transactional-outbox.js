@@ -216,7 +216,7 @@ export class TransactionalOutbox {
       } catch {}
 
       // Cross-process notify file touch
-      if (this.eventBus?.notifyFilePath) {
+      if (this.eventBus?.notifyFilePath && this.eventBus.dbPath !== ':memory:') {
         try {
           fs.writeFileSync(this.eventBus.notifyFilePath, String(event.eventId));
         } catch {}
@@ -263,7 +263,7 @@ export class TransactionalOutbox {
         UPDATE bridge_outbox SET published_at = ? WHERE outbox_id = ?
       `).run(now, r.outbox_id);
 
-      if (this.eventBus?.notifyFilePath) {
+      if (this.eventBus?.notifyFilePath && this.eventBus.dbPath !== ':memory:') {
         try {
           fs.writeFileSync(this.eventBus.notifyFilePath, String(r.event_id));
         } catch {}

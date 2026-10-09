@@ -35,6 +35,14 @@ export class MailboxHub {
     this.agentHandlers.set(agentId, handler);
   }
 
+  pruneRequestLifecycle(options) {
+    return this.tracer ? this.tracer.prune(options) : { pruned: 0, hasMore: false, cutoff: null };
+  }
+
+  getRequestLifecycleStats() {
+    return this.tracer ? this.tracer.getStats() : { totalRecords: 0, oldest: null, newest: null };
+  }
+
   sendMessage({
     fromAgent,
     toAgent,
