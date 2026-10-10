@@ -1,6 +1,14 @@
 import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
+export const KNOWLEDGE_STATUS = Object.freeze({
+  VERIFIED: 'verified',
+  HYPOTHESIS: 'hypothesis',
+  OBSOLETE: 'obsolete',
+  FAILED_EXPERIMENT: 'failed-experiment',
+  AGENT_CLAIMED: 'agent-claimed'
+});
+
 /**
  * KnowledgeStore
  *
@@ -13,6 +21,7 @@ import { DatabaseSync } from 'node:sqlite';
  *  - Fast: Sub-millisecond FTS5 BM25 search.
  *  - Token-efficient: Search returns compact ranked snippets; full content is retrieved on-demand.
  *  - Provenance-aware: Tracks origin (user_instruction, agent_finding, verified_test), author, and version.
+ *  - Validity windows & Lifecycle status: verified, hypothesis, obsolete, failed-experiment, agent-claimed.
  *  - Content-addressed: Every entry is indexed by SHA-256 for integrity and deduplication.
  */
 export class KnowledgeStore {
@@ -44,6 +53,10 @@ export class KnowledgeStore {
         provenance TEXT,
         tags TEXT,
         sha256 TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'verified',
+        valid_from TEXT,
+        valid_until TEXT,
+        source_file TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -51,6 +64,20 @@ export class KnowledgeStore {
       CREATE INDEX IF NOT EXISTS idx_bridge_knowledge_cat ON bridge_knowledge(category);
       CREATE INDEX IF NOT EXISTS idx_bridge_knowledge_hash ON bridge_knowledge(sha256);
     `);
+
+    // Migrations for existing schemas
+    for (const ddl of [
+      `ALTER TABLE bridge_knowledge ADD COLUMN status TEXT NOT NULL DEFAULT 'verified';`,
+      `ALTER TABLE bridge_knowledge ADD COLUMN valid_from TEXT;`,
+      `ALTER TABLE bridge_knowledge ADD COLUMN valid_until TEXT;`,
+      `ALTER TABLE bridge_knowledge ADD COLUMN source_file TEXT;`
+    ]) {
+      try { this.db.exec(ddl); } catch {}
+    }
+
+    try {
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_bridge_knowledge_status ON bridge_knowledge(status);`);
+    } catch {}
 
     // FTS5 Virtual Table for full-text lexical search with BM25 ranking
     try {
@@ -86,7 +113,11 @@ export class KnowledgeStore {
     content,
     authorAgent = 'system',
     provenance = null,
-    tags = []
+    tags = [],
+    status = 'verified',
+    validFrom = null,
+    validUntil = null,
+    sourceFile = null
   }) {
     const autoKey = key || (title ? title.toLowerCase().replace(/[^a-z0-9_]+/g, '_') : null) || `k_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
     const cleanKey = String(autoKey).trim().toLowerCase();
@@ -98,10 +129,17 @@ export class KnowledgeStore {
     const sha256 = this._computeHash(cleanContent);
     const now = new Date().toISOString();
 
+    const normStatus = (status || 'verified').trim().toLowerCase();
+    const finalStatus = Object.values(KNOWLEDGE_STATUS).includes(normStatus) ? normStatus : KNOWLEDGE_STATUS.VERIFIED;
+    const finalValidFrom = validFrom || now;
+    const finalValidUntil = validUntil || null;
+    const finalSourceFile = sourceFile ? String(sourceFile).trim() : null;
+
     const stmt = this.db.prepare(`
       INSERT INTO bridge_knowledge (
-        key, category, title, content, author_agent, provenance, tags, sha256, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        key, category, title, content, author_agent, provenance, tags, sha256,
+        status, valid_from, valid_until, source_file, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET
         category = excluded.category,
         title = excluded.title,
@@ -110,10 +148,15 @@ export class KnowledgeStore {
         provenance = excluded.provenance,
         tags = excluded.tags,
         sha256 = excluded.sha256,
+        status = excluded.status,
+        valid_from = excluded.valid_from,
+        valid_until = excluded.valid_until,
+        source_file = excluded.source_file,
         updated_at = excluded.updated_at
     `);
 
-    stmt.run(cleanKey, cleanCat, cleanTitle, cleanContent, authorAgent, provStr, tagsStr, sha256, now, now);
+    stmt.run(cleanKey, cleanCat, cleanTitle, cleanContent, authorAgent, provStr, tagsStr, sha256,
+      finalStatus, finalValidFrom, finalValidUntil, finalSourceFile, now, now);
 
     // Update FTS index
     try {
@@ -128,7 +171,7 @@ export class KnowledgeStore {
       agentId: authorAgent,
       action: 'knowledge_store',
       status: 'success',
-      details: { key: cleanKey, category: cleanCat, title: cleanTitle, sha256, bytes: cleanContent.length }
+      details: { key: cleanKey, category: cleanCat, title: cleanTitle, sha256, status: finalStatus, bytes: cleanContent.length }
     });
 
     return {
@@ -137,6 +180,10 @@ export class KnowledgeStore {
       key: cleanKey,
       category: cleanCat,
       title: cleanTitle,
+      status: finalStatus,
+      validFrom: finalValidFrom,
+      validUntil: finalValidUntil,
+      sourceFile: finalSourceFile,
       sha256,
       contentHash: `sha256:${sha256}`,
       provenance: provStr,
@@ -148,13 +195,14 @@ export class KnowledgeStore {
   /**
    * Search knowledge using FTS5 BM25 relevance ranking
    */
-  search({ query, category = null, limit = 10, snippetChars = 150 } = {}) {
+  search({ query, category = null, tag = null, status = null, includeExpired = false, validAt = null, limit = 10, snippetChars = 150 } = {}) {
     if (!query || typeof query !== 'string' || !query.trim()) {
       return [];
     }
 
     const cleanQuery = query.trim().replace(/['"/*]/g, ' ');
     const resolvedLimit = Math.max(1, Math.min(Number(limit) || 10, 50));
+    const nowIso = validAt || new Date().toISOString();
 
     // Sanitize query for FTS5 (tokenize into words joined by NEAR or AND)
     const words = cleanQuery.split(/\s+/).filter(w => w.length > 0);
@@ -171,6 +219,10 @@ export class KnowledgeStore {
         k.provenance,
         k.tags,
         k.sha256,
+        k.status,
+        k.valid_from,
+        k.valid_until,
+        k.source_file,
         k.updated_at,
         bm25(bridge_knowledge_fts) as rank
       FROM bridge_knowledge_fts f
@@ -183,6 +235,21 @@ export class KnowledgeStore {
       sql += ` AND k.category = ?`;
       params.push(String(category).trim().toLowerCase());
     }
+    if (tag) {
+      sql += ` AND k.tags LIKE ?`;
+      params.push(`%${tag.trim()}%`);
+    }
+    if (status && status !== 'all') {
+      sql += ` AND k.status = ?`;
+      params.push(String(status).trim().toLowerCase());
+    } else if (!status) {
+      // By default, exclude obsolete items when caller does not specify status
+      sql += ` AND k.status != 'obsolete'`;
+    }
+    if (!includeExpired) {
+      sql += ` AND (k.valid_until IS NULL OR k.valid_until >= ?)`;
+      params.push(nowIso);
+    }
     sql += ` ORDER BY rank ASC LIMIT ?`;
     params.push(resolvedLimit);
 
@@ -191,15 +258,31 @@ export class KnowledgeStore {
       rows = this.db.prepare(sql).all(...params);
     } catch (err) {
       // Fallback to LIKE if FTS query syntax error
-      const fallbackSql = `
+      let fallbackSql = `
         SELECT * FROM bridge_knowledge
         WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?)
-        ${category ? 'AND category = ?' : ''}
-        ORDER BY updated_at DESC LIMIT ?
       `;
       const likePattern = `%${cleanQuery}%`;
       const fallbackParams = [likePattern, likePattern, likePattern];
-      if (category) fallbackParams.push(String(category).trim().toLowerCase());
+      if (category) {
+        fallbackSql += ` AND category = ?`;
+        fallbackParams.push(String(category).trim().toLowerCase());
+      }
+      if (tag) {
+        fallbackSql += ` AND tags LIKE ?`;
+        fallbackParams.push(`%${tag.trim()}%`);
+      }
+      if (status && status !== 'all') {
+        fallbackSql += ` AND status = ?`;
+        fallbackParams.push(String(status).trim().toLowerCase());
+      } else if (!status) {
+        fallbackSql += ` AND status != 'obsolete'`;
+      }
+      if (!includeExpired) {
+        fallbackSql += ` AND (valid_until IS NULL OR valid_until >= ?)`;
+        fallbackParams.push(nowIso);
+      }
+      fallbackSql += ` ORDER BY updated_at DESC LIMIT ?`;
       fallbackParams.push(resolvedLimit);
       try {
         rows = this.db.prepare(fallbackSql).all(...fallbackParams);
@@ -217,6 +300,7 @@ export class KnowledgeStore {
       const snippet = fullText.length > snippetChars
         ? fullText.slice(0, snippetChars) + '... [truncated]'
         : fullText;
+      const isExpired = Boolean(r.valid_until && r.valid_until < nowIso);
 
       return {
         id: r.key,
@@ -228,6 +312,11 @@ export class KnowledgeStore {
         provenance: prov,
         tags: r.tags ? r.tags.split(' ') : [],
         sha256: r.sha256,
+        status: r.status || 'verified',
+        validFrom: r.valid_from || null,
+        validUntil: r.valid_until || null,
+        sourceFile: r.source_file || null,
+        isExpired,
         sizeBytes: Buffer.byteLength(fullText, 'utf8'),
         updatedAt: r.updated_at,
         rank: r.rank !== undefined ? Number(r.rank) : 0,
@@ -249,6 +338,8 @@ export class KnowledgeStore {
     if (row.provenance) {
       try { prov = JSON.parse(row.provenance); } catch { prov = row.provenance; }
     }
+    const nowIso = new Date().toISOString();
+    const isExpired = Boolean(row.valid_until && row.valid_until < nowIso);
 
     return {
       id: row.key,
@@ -260,6 +351,11 @@ export class KnowledgeStore {
       provenance: prov,
       tags: row.tags ? row.tags.split(' ') : [],
       sha256: row.sha256,
+      status: row.status || 'verified',
+      validFrom: row.valid_from || null,
+      validUntil: row.valid_until || null,
+      sourceFile: row.source_file || null,
+      isExpired,
       sizeBytes: Buffer.byteLength(row.content, 'utf8'),
       createdAt: row.created_at,
       updatedAt: row.updated_at
@@ -319,7 +415,11 @@ export class KnowledgeStore {
       content: args.content,
       authorAgent: args.agentId || args.authorAgent || 'system',
       provenance: args.provenance,
-      tags: args.tags
+      tags: args.tags,
+      status: args.status,
+      validFrom: args.validFrom,
+      validUntil: args.validUntil,
+      sourceFile: args.sourceFile
     });
   }
 

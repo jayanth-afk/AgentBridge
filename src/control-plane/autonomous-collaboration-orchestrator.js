@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
 import { ModelOrchestrator } from './model-orchestrator.js';
 import { DesktopInvisibilityMonitor } from './desktop-invisibility-monitor.js';
+import { detectResponseMode, ResponseMode } from '../artifacts/response-preserver.js';
 
 export const CollaborationStatus = Object.freeze({
   PENDING: 'pending',
@@ -65,7 +66,8 @@ export class AutonomousCollaborationOrchestrator extends EventEmitter {
     initiator = 'chatgpt',
     title = null,
     maxHops = null,
-    metadata = {}
+    metadata = {},
+    responseMode = null
   }) {
     if (!objective || typeof objective !== 'string' || !objective.trim()) {
       throw new Error('Objective is required for autonomous collaboration');
@@ -84,6 +86,7 @@ export class AutonomousCollaborationOrchestrator extends EventEmitter {
 
     const resolvedTitle = title || `Autonomous Collaboration: ${objective.slice(0, 40)}...`;
     const now = new Date().toISOString();
+    const resolvedMode = detectResponseMode({ objective, explicitMode: responseMode });
 
     const session = {
       id: collaborationId,
@@ -92,6 +95,7 @@ export class AutonomousCollaborationOrchestrator extends EventEmitter {
       initiator: initiator.toLowerCase(),
       authorizedAgents: normalizedAgents,
       maxHops: maxHops || this.defaultMaxHops,
+      responseMode: resolvedMode,
       turns: [],
       turnCount: 0,
       agentTurnCounts: new Map(),
@@ -99,7 +103,7 @@ export class AutonomousCollaborationOrchestrator extends EventEmitter {
       status: CollaborationStatus.ACTIVE,
       createdAt: now,
       updatedAt: now,
-      metadata: { ...metadata, autonomous: true },
+      metadata: { ...metadata, autonomous: true, responseMode: resolvedMode },
       finalResult: null
     };
 
@@ -391,13 +395,16 @@ export class AutonomousCollaborationOrchestrator extends EventEmitter {
     steps,
     initiator = 'chatgpt',
     authorizedAgents = ['chatgpt', 'gemini', 'claude'],
-    timeoutMs = null
+    timeoutMs = null,
+    responseMode = null
   }) {
+    const resolvedMode = detectResponseMode({ objective, explicitMode: responseMode });
     const session = this.createCollaboration({
       objective,
       initiator,
       authorizedAgents,
-      maxHops: steps.length + 2
+      maxHops: steps.length + 2,
+      responseMode: resolvedMode
     });
 
     const chainStartMs = Date.now();
@@ -437,6 +444,31 @@ export class AutonomousCollaborationOrchestrator extends EventEmitter {
       }
 
       previousTurnResult = turnOutcome.turn;
+
+      // ZERO-WASTE DIRECT RESPONSE OPTIMIZATION:
+      // If direct mode was requested and this step fulfilled the delegated task to another agent,
+      // and subsequent steps are merely synthesis / conversational wrappers by the initiator,
+      // terminate immediately and return the responding agent's original response!
+      const isSubsequentStepsInitiatorWrap = steps.slice(i + 1).length > 0 && steps.slice(i + 1).every(s => s.toAgent === initiator);
+      if (resolvedMode === ResponseMode.DIRECT && turnOutcome.turn.toAgent !== initiator && isSubsequentStepsInitiatorWrap) {
+        session.status = CollaborationStatus.COMPLETED;
+        session.finalResult = previousTurnResult.response;
+        session.updatedAt = new Date().toISOString();
+        return {
+          success: true,
+          collaborationId: session.id,
+          objective: session.objective,
+          responseMode: 'direct',
+          turnsCompleted: session.turns.length,
+          turns: session.turns,
+          finalResult: session.finalResult,
+          bridgeUnaltered: true,
+          untrustedData: true,
+          additionalModelCalls: 0,
+          modelRegenerationTokens: 0,
+          durationMs: Date.now() - chainStartMs
+        };
+      }
     }
 
     session.status = CollaborationStatus.COMPLETED;
@@ -447,9 +479,76 @@ export class AutonomousCollaborationOrchestrator extends EventEmitter {
       success: true,
       collaborationId: session.id,
       objective: session.objective,
+      responseMode: resolvedMode,
       turnsCompleted: session.turns.length,
       turns: session.turns,
       finalResult: session.finalResult,
+      bridgeUnaltered: resolvedMode === ResponseMode.DIRECT,
+      untrustedData: true,
+      additionalModelCalls: (resolvedMode === ResponseMode.DIRECT) ? 0 : Math.max(0, session.turns.length - 1),
+      modelRegenerationTokens: 0,
+      durationMs: Date.now() - chainStartMs
+    };
+  }
+
+  /**
+   * Direct delegation mode: Queries another agent and delivers the authentic
+   * response directly with ZERO post-processing or wrapper model calls.
+   */
+  async delegateDirect({
+    objective,
+    fromAgent = 'chatgpt',
+    toAgent = 'gemini',
+    context = {},
+    timeoutMs = null
+  }) {
+    const session = this.createCollaboration({
+      objective,
+      initiator: fromAgent,
+      authorizedAgents: [fromAgent, toAgent],
+      maxHops: 2,
+      responseMode: ResponseMode.DIRECT
+    });
+
+    const chainStartMs = Date.now();
+    const turnOutcome = await this.executeTurn({
+      collaborationId: session.id,
+      fromAgent,
+      toAgent,
+      instruction: objective,
+      context,
+      deadline: Date.now() + (timeoutMs || 120000)
+    });
+
+    if (!turnOutcome.success) {
+      session.status = CollaborationStatus.FAILED;
+      return {
+        success: false,
+        collaborationId: session.id,
+        error: turnOutcome.error,
+        responseMode: 'direct',
+        durationMs: Date.now() - chainStartMs
+      };
+    }
+
+    session.status = CollaborationStatus.COMPLETED;
+    session.finalResult = turnOutcome.turn.response;
+    session.updatedAt = new Date().toISOString();
+
+    return {
+      success: true,
+      collaborationId: session.id,
+      objective,
+      fromAgent,
+      toAgent,
+      responseMode: 'direct',
+      response: turnOutcome.turn.response,
+      finalResult: turnOutcome.turn.response,
+      turn: turnOutcome.turn,
+      bridgeUnaltered: true,
+      untrustedData: true,
+      additionalModelCalls: 0,
+      modelRegenerationTokens: 0,
       durationMs: Date.now() - chainStartMs
     };
   }
@@ -523,21 +622,80 @@ export class AutonomousCollaborationOrchestrator extends EventEmitter {
   }
 
   /**
-   * Single-agent bypass: Determines whether multi-agent collaboration is justified.
-   * If the task is simple, self-contained, or low-risk, avoids launching a multi-hop chain.
+   * Cost-Aware Workflow and Collaboration Selection:
+   * Selects the least expensive workflow satisfying user requirements.
+   * Workflows:
+   *  - 'single_agent': 1 model call, 0 multi-agent overhead
+   *  - 'direct_delegation': 1 model call, direct relay, 0 regeneration
+   *  - 'parallel_independent': N concurrent model calls, no sequential stall
+   *  - 'collaborative_synthesis': N+1 model calls (multi-agent + synthesis)
    */
-  shouldCollaborate({ task, complexity = 'normal', requiresIndependentReview = false } = {}) {
+  shouldCollaborate({ task, complexity = 'normal', requiresIndependentReview = false, responseMode = null } = {}) {
+    const taskStr = typeof task === 'string' ? task : '';
+    const resolvedMode = detectResponseMode({ question: taskStr, explicitMode: responseMode });
+    const taskLower = taskStr.toLowerCase();
+
     if (requiresIndependentReview) {
-      return { collaborate: true, reason: 'INDEPENDENT_REVIEW_REQUIRED' };
+      return {
+        collaborate: true,
+        workflow: 'collaborative_synthesis',
+        responseMode: 'assist',
+        estimatedCostTier: 'high',
+        expectedModelCalls: 2,
+        reason: 'INDEPENDENT_REVIEW_REQUIRED'
+      };
     }
+
+    const isDirectDelegationPrompt = [
+      'ask gemini', 'ask claude', 'ask chatgpt', 'query gemini', 'query claude',
+      'get gemini\'s answer', 'get claude\'s answer', 'relay', 'delegate to gemini', 'delegate to claude'
+    ].some(trigger => taskLower.includes(trigger));
+
+    const hasExplicitDirect = responseMode && responseMode.toLowerCase() === ResponseMode.DIRECT;
+
+    if (resolvedMode === ResponseMode.DIRECT && (hasExplicitDirect || isDirectDelegationPrompt)) {
+      return {
+        collaborate: true,
+        workflow: 'direct_delegation',
+        responseMode: 'direct',
+        estimatedCostTier: 'low',
+        expectedModelCalls: 1,
+        zeroRegenerationGuarantee: true,
+        reason: hasExplicitDirect ? 'EXPLICIT_DIRECT_MODE_REQUESTED' : 'DIRECT_DELEGATION_RELAY'
+      };
+    }
+
     if (complexity === 'high' || complexity === 'complex') {
-      return { collaborate: true, reason: 'HIGH_COMPLEXITY' };
+      return {
+        collaborate: true,
+        workflow: 'collaborative_synthesis',
+        responseMode: resolvedMode,
+        estimatedCostTier: 'high',
+        expectedModelCalls: 3,
+        reason: 'HIGH_COMPLEXITY'
+      };
     }
-    const taskLen = typeof task === 'string' ? task.length : 0;
-    if (taskLen < 150 && complexity !== 'high') {
-      return { collaborate: false, reason: 'SIMPLE_TASK_SINGLE_AGENT_SUFFICIENT', recommendedAgent: 'chatgpt' };
+
+    if (taskStr.length < 150 && complexity !== 'high' && !isDirectDelegationPrompt) {
+      return {
+        collaborate: false,
+        workflow: 'single_agent',
+        responseMode: 'direct',
+        estimatedCostTier: 'minimal',
+        expectedModelCalls: 1,
+        reason: 'SIMPLE_TASK_SINGLE_AGENT_SUFFICIENT',
+        recommendedAgent: 'chatgpt'
+      };
     }
-    return { collaborate: true, reason: 'MULTI_AGENT_BENEFIT' };
+
+    return {
+      collaborate: true,
+      workflow: resolvedMode === ResponseMode.DIRECT ? 'direct_delegation' : 'collaborative_synthesis',
+      responseMode: resolvedMode,
+      estimatedCostTier: resolvedMode === ResponseMode.DIRECT ? 'low' : 'medium',
+      expectedModelCalls: resolvedMode === ResponseMode.DIRECT ? 1 : 2,
+      reason: 'MULTI_AGENT_BENEFIT'
+    };
   }
 
   /**

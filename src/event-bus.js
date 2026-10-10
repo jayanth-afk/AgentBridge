@@ -98,9 +98,17 @@ export class EventBus extends EventEmitter {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS bridge_event_acks (
+        agent_id TEXT NOT NULL,
+        event_id INTEGER NOT NULL,
+        acked_at TEXT NOT NULL,
+        PRIMARY KEY (agent_id, event_id)
+      );
+
       CREATE INDEX IF NOT EXISTS idx_bridge_events_agent_id ON bridge_events(agent_id, event_id);
       CREATE INDEX IF NOT EXISTS idx_bridge_events_req_id ON bridge_events(request_id);
       CREATE INDEX IF NOT EXISTS idx_bridge_requests_to_status ON bridge_requests(to_agent, status);
+      CREATE INDEX IF NOT EXISTS idx_event_acks_agent ON bridge_event_acks(agent_id, event_id);
     `);
 
     try {
@@ -673,6 +681,125 @@ export class EventBus extends EventEmitter {
       status: r.status,
       payload: r.payload ? (() => { try { return JSON.parse(r.payload); } catch { return r.payload; } })() : null
     }));
+  }
+
+  /**
+   * Explicitly acknowledge processing of an event by an agent.
+   * Persists to bridge_event_acks and updates agent_event_cursors.
+   */
+  ackEvent(agentId, eventId) {
+    if (!agentId) throw new Error('agentId is required to ack event');
+    if (eventId === null || eventId === undefined) throw new Error('eventId is required to ack event');
+    const numId = Number(eventId);
+    const now = new Date().toISOString();
+    try {
+      this.db.prepare(`
+        INSERT INTO bridge_event_acks (agent_id, event_id, acked_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(agent_id, event_id) DO UPDATE SET acked_at = excluded.acked_at
+      `).run(agentId, numId, now);
+      this.updateCursor(agentId, numId);
+    } catch {}
+    return { agentId, eventId: numId, acked: true, ackedAt: now };
+  }
+
+  /**
+   * Batch acknowledge multiple events for an agent.
+   */
+  ackEvents(agentId, eventIds) {
+    if (!agentId) throw new Error('agentId is required to ack events');
+    if (!Array.isArray(eventIds)) throw new Error('eventIds array is required');
+    const now = new Date().toISOString();
+    let maxId = 0;
+    let ackedCount = 0;
+    const stmt = this.db.prepare(`
+      INSERT INTO bridge_event_acks (agent_id, event_id, acked_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(agent_id, event_id) DO UPDATE SET acked_at = excluded.acked_at
+    `);
+    for (const id of eventIds) {
+      const numId = Number(id);
+      try {
+        stmt.run(agentId, numId, now);
+        if (numId > maxId) maxId = numId;
+        ackedCount++;
+      } catch {}
+    }
+    if (maxId > 0) {
+      this.updateCursor(agentId, maxId);
+    }
+    return { agentId, ackedCount, latestEventId: maxId };
+  }
+
+  /**
+   * Check if a specific event has been acknowledged by an agent.
+   */
+  isEventAcked(agentId, eventId) {
+    if (!agentId || eventId === null || eventId === undefined) return false;
+    try {
+      const row = this.db.prepare(`
+        SELECT 1 FROM bridge_event_acks WHERE agent_id = ? AND event_id = ?
+      `).get(agentId, Number(eventId));
+      return Boolean(row);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Retrieve unacknowledged events directed to an agent (or broadcast '*').
+   */
+  getUnackedEvents({ agentId, limit = 50, afterEventId = 0 } = {}) {
+    if (!agentId) throw new Error('agentId is required to get unacked events');
+    try {
+      const rows = this.db.prepare(`
+        SELECT e.* FROM bridge_events e
+        LEFT JOIN bridge_event_acks a ON a.agent_id = ? AND a.event_id = e.event_id
+        WHERE e.event_id > ?
+          AND (e.agent_id = ? OR e.agent_id = '*')
+          AND a.event_id IS NULL
+        ORDER BY e.event_id ASC
+        LIMIT ?
+      `).all(agentId, afterEventId, agentId, limit);
+
+      return rows.map(r => ({
+        eventId: r.event_id,
+        timestamp: r.timestamp,
+        type: r.type,
+        agentId: r.agent_id,
+        fromAgent: r.from_agent,
+        conversationId: r.conversation_id,
+        requestId: r.request_id,
+        taskId: r.task_id,
+        status: r.status,
+        payload: r.payload ? (() => { try { return JSON.parse(r.payload); } catch { return r.payload; } })() : null
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Re-dispatch unacknowledged events for an agent to active subscribers.
+   */
+  retryUnackedEvents({ agentId, limit = 50 } = {}) {
+    if (!agentId) throw new Error('agentId is required to retry unacked events');
+    const unacked = this.getUnackedEvents({ agentId, limit });
+    let dispatched = 0;
+    const handlers = this.subscribers.get(agentId);
+    if (handlers && unacked.length > 0) {
+      for (const event of unacked) {
+        for (const handler of handlers) {
+          try {
+            handler(event);
+            dispatched++;
+          } catch (err) {
+            this.emit('error', err);
+          }
+        }
+      }
+    }
+    return { agentId, unackedCount: unacked.length, dispatched };
   }
 
   close() {

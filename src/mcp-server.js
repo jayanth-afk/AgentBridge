@@ -76,7 +76,7 @@ export class BridgeMcpServer {
     this.artifactStore = options.artifactStore || new ArtifactStore(this.logger);
 
     // Single unified source of truth for tools
-    this.registry = options.toolRegistry || new ToolRegistry();
+    this.registry = options.toolRegistry || new ToolRegistry({ profile: options.toolProfile || options.profile });
 
     // Start HTTP control plane server for Zia brain and local HTTP clients
     this.httpServer = new BridgeHttpServer({

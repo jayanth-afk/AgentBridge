@@ -11,13 +11,13 @@ This is the authoritative implementation handoff for Agent Bridge. It supersedes
 
 ## Verification
 
-Full regression suite (`npm test` → `node --test --test-concurrency=1 tests/*.test.js`), latest run after Mission 3 intelligence, ultra-low latency, token efficiency, and open-source tool ecosystem:
+Full regression suite (`npm test` → `node --test --test-concurrency=1 tests/*.test.js`), latest run after Phase 6 Vetted Skills Installation (`mcp-builder`):
 
-- tests: **630**
-- pass: **622**
+- tests: **687**
+- pass: **679**
 - fail: **0**
 - skipped: **8** (explicitly live-gated: live model quota/credentials requiring explicit opt-in)
-- duration: **22.10s**
+- duration: **23.52s**
 - exit code: **0**
 
 ## Runtime composition
@@ -69,15 +69,68 @@ automatic          → healthy headless engine if available, otherwise UI
 
 Transport adapters call the same registry rather than reimplementing tool behavior.
 
-As of Mission 3, **73 tools** are registered across 12 functional categories:
+As of Mission 3, **74 tools** are registered across 12 functional categories:
 - `discovery`: `bridge_discover_tools`, `bridge_tool_info`
 - `knowledge`: `bridge_store_knowledge`, `bridge_search_knowledge`, `bridge_get_knowledge`
 - `inspection`: `bridge_check_syntax`, `bridge_extract_data`, `bridge_inspect_project`, `bridge_project_snapshot`
 - `git`: `bridge_git_summary`, `bridge_git_blame`, plus 12 standard git branch/diff/commit/push/pull tools
 - `artifacts`: `bridge_artifact_store`, `bridge_artifact_get`, `bridge_artifact_read`, `bridge_artifact_cleanup`
-- `messaging`, `tasks`, `collaboration`, `filesystem`, `diagnostics`, `execution`
+- `messaging`: `bridge_send_message`, `bridge_broadcast_message`, `bridge_check_inbox`, `bridge_ask_agent`, `bridge_get_response`, `bridge_get_request_status`, `bridge_get_pending_requests`, `bridge_answer_request`
+- `tasks`, `collaboration`, `filesystem`, `diagnostics`, `execution`
 
-Current test coverage exercises the complete 73-tool matrix in `tests/tool-matrix.test.js`.
+Current test coverage exercises the complete 74-tool matrix in `tests/tool-matrix.test.js`.
+
+### Tool Surface Profiles & Prompt Token Optimization
+
+To eliminate prompt bloat for LLM hosts that load all MCP tool schemas eagerly (such as Claude Desktop and ChatGPT), `ToolRegistry` supports configurable tool profiles via constructor option `{ profile }` or `AGENT_BRIDGE_TOOL_PROFILE` environment variable:
+
+- **`all` (default)**: 74 tools, 26,676 bytes (~6,669 tokens at 4.0 chars/tok). Preserves 100% backward compatibility for existing tests and unconfigured connections.
+- **`developer`**: 32 tools, 11,733 bytes (56.02% byte reduction, ~2,934 tokens). Covers collaboration plus all inspection, filesystem, and git tools.
+- **`collaborator`**: 16 tools, 6,181 bytes (76.83% byte reduction, ~1,546 tokens). Covers minimal plus async tasks, mailboxes, and events.
+- **`minimal`**: 8 tools, 3,256 bytes (87.79% byte reduction, ~814 tokens). Covers discovery, ping/presence, and ask/response/answer tools.
+
+Key surface properties:
+1. **Dynamic Execution**: Tools omitted from an active profile's `tools/list` remain directly invocable via `executeTool(name, ...)` on-demand.
+2. **Global Discovery**: `bridge_discover_tools` (and alias `bridge_search_tools`) always queries the full 74-tool registry regardless of active profile.
+3. **Alias Resolution**: `bridge_search_tools` is aliased directly to `bridge_discover_tools` in `executeTool` and `bridge_tool_info` with 0 extra schema entries.
+
+### Response Storage Canonicalization
+
+Zero-waste inter-agent responses are canonicalized into `ArtifactStore` (`bridge_artifacts` table):
+- The complete text payload is persisted once in `bridge_artifacts` with SHA-256 content addressing and authorization boundaries.
+- The `bridge_response_artifacts` metadata row references `payload_artifact_id` and leaves `response_text` empty (`''`), avoiding data duplication.
+- `ResponsePreserver._resolveCanonicalText()` resolves the text on retrieval, falling back seamlessly to inline text if `ArtifactStore` is omitted (e.g. mock/in-memory use).
+- Credential quarantine remains strictly enforced: quarantined secrets are withheld regardless of backing store.
+- Authored by Freebuff; verified in `tests/response-canonicalization.test.js` (5/5 passed).
+
+### Memory with Provenance & Lifecycle Validity
+
+`KnowledgeStore` (`bridge_knowledge` and `bridge_knowledge_fts` FTS5 table) provides a 100% local, zero-cloud memory layer with BM25 ranking:
+- **Item Lifecycle Status**:
+  - `verified`: Ground truth fact validated by tests or verified source code.
+  - `hypothesis`: Working theory or proposed solution pending empirical confirmation.
+  - `obsolete`: Superseded approach; excluded from search by default to avoid stale context.
+  - `failed-experiment`: Documented negative result preventing repeated failure loops.
+  - `agent-claimed`: Unverified peer agent assertion.
+- **Validity Windows**:
+  - `valid_from` & `valid_until`: Time-bounded validity. Items past their expiration are excluded from default search and exposed with `isExpired: true` on explicit request.
+- **Structured Provenance**:
+  - Encodes `sourceType`, `filePath`, `lineRange`, `commitSha`, `verificationCommand`, `verifiedByAgent`, and `confidence`.
+- **Content Addressing**:
+  - Every knowledge item is indexed by SHA-256 for integrity verification and instant deduplication via `getByHash`.
+- Verified in `tests/memory-provenance.test.js` (9/9 passed).
+
+### Phase 6: Vetted Skills & Tool Ecosystem
+
+- **Selected Candidate:** `anthropics/skills@mcp-builder` (Tier 1 recommendation from Freebuff shortlist).
+- **Pinned Commit:** `dbd4588f9e1033efb41dad4bef2f7947c8993d44` from `https://github.com/anthropics/skills.git`.
+- **Location in Repository:** `.agents/skills/mcp-builder/` (with mirror at `agent-bridge-handoff/.scratch/skills-quarantine/vetted/mcp-builder/`).
+- **Security & Invariants Audit:**
+  - Zero autonomous git commands (`push`, `commit`, `checkout`, `reset`).
+  - Strict compliance with Agent Bridge protected-branch policies.
+  - Zero network telemetry or remote code execution hooks.
+  - Documented in `.agents/skills/mcp-builder/VETTING_AUDIT.md`.
+- **Suite Verification:** Full regression suite green (687 tests, 679 passed, 0 failed, 8 skipped).
 
 ## Agent lifecycle
 
@@ -635,6 +688,73 @@ Measured using `scripts/bench/benchmark-mission3.js` on macOS (Apple Silicon), N
 | **J. Multiple Connected Agents** | 4 agents connected | Notification Routing | **0.290** | **0.510** | **0.850** | **0** | Targeted routing: 1 delivery, 0 broadcast storms |
 | **K. Large Tool Output** | 34 KB raw tool output | CAS Storage & Compaction | **0.410** | **0.620** | **0.950** | **0** | Payload reduced 34KB -> 257B (~8,649 tokens saved) |
 | **L. Repeated Context Multi-Turn** | 5 collaboration turns | Context Deduplication | **0.180** | **0.320** | **0.490** | **0** | Payload reduced 76.6% (~1,610 tokens saved) |
+
+## Zero-Waste Inter-Agent Response Delivery & Token Efficiency
+
+### 1. Operational Verification & Boundaries
+- **Direct Response Delivery Works:** **YES, verified bridge-side**. When an agent delegates a task to another agent (e.g. ChatGPT delegates to Gemini), the responding agent's authentic answer is persisted and returned without intermediate LLM synthesis or re-generation calls inside the bridge.
+- **Bridge-Side Additional Model Calls:** **STRICTLY 0**. Integration tests verify that in `direct` delivery mode, Gemini is called once and the bridge initiates zero post-processing or rephrasing calls (`additionalModelCalls = 0`, `modelRegenerationTokens = 0`).
+- **Host-Boundary Distinction:**
+  - **Scripted SDK / Headless Consumers:** Achieve **0 additional model turns** end-to-end, receiving and displaying the result directly.
+  - **LLM Chat Hosts (Claude Desktop, Antigravity IDE, ChatGPT UI):** The host application's model reads the returned tool result JSON (consuming input tokens) and generates an assistant turn to render the response to the user. The bridge cannot eliminate host-side turns without client-native direct pass-through capabilities.
+- **Delivery Flag & Untrusted Data Markers:**
+  - Renamed from `isDirectDelivery` to `bridgeUnaltered: true` to indicate bridge-side unaltered delivery without claiming downstream client behavior.
+  - All delivered response envelopes carry `untrustedData: true` to tag foreign model output as untrusted external content and prevent treating artifact text as instructions.
+  - Envelopes carry correlation provenance metadata (`correlationTier`, `attemptEpoch`, `originRoute`).
+- **Response Modes Implemented:**
+  - `direct` (default): Verbatim delivery of responding agent's output with zero bridge post-processing.
+  - `assist`: The receiving agent may inspect, critique, or incorporate the response when requested.
+  - `structured`: Validates machine-readable output against schema (JSON, table).
+  - Explicit caller mode parameter takes absolute precedence over prompt heuristics.
+
+### 2. Supported Integrations vs Platform Constraints
+- **Direct Delivery Supported (Zero Bridge Regeneration):**
+  - **Bridge Client SDK (`AgentBridgeClient`):** Direct JSON-RPC caller receives verbatim artifact envelope without intermediate model mediation.
+  - **MCP Transports (`mcp-server.js` / stdio / HTTP):** Returns JSON-RPC tool result with verbatim response string and metadata envelope.
+  - **Autonomous Collaboration Orchestrator (`delegateDirect`, `runCollaborationChain`):** Terminates early upon delegated worker response without calling the initiating model for synthesis wrappers.
+- **Surrounding Platform Constraints (Host Boundary Turns):**
+  - **Claude Desktop & Antigravity IDE:** The host LLM receives `tool_result` and executes an assistant turn to display it.
+  - **ChatGPT Desktop Consumer UI (macOS Accessibility / GUI):** When driven via consumer chat bubbles, OpenAI's client framework generates an assistant chat bubble to display tool results.
+
+### 3. Credential Quarantine Policy
+- Responding agent outputs are scanned against sensitive credential patterns (AWS keys, GitHub tokens, private keys, JWTs).
+- If secrets are detected:
+  - Status is set to `'quarantined'` with error `'CREDENTIAL_DETECTED_IN_RESPONSE'`.
+  - The sensitive payload is **withheld** (`response: null`) from the receiving model.
+  - `bridgeUnaltered` is set to `false`.
+  - The raw artifact is preserved in the audit database for security investigation, ensuring neither silent redaction nor credential leakage occurs.
+
+### 4. Measured & Estimated Token Accounting
+- **Telemetry Honesty:** Uses provider-reported token metrics (`prompt_tokens`, `completion_tokens`) when telemetry headers exist. All calculations without provider telemetry are explicitly flagged `isEstimatedSavings: true` using character heuristics (`chars/4`).
+- **Per-Delegation Savings (ESTIMATED):** For a typical 250-token response, avoiding bridge synthesis prevents ~475 tokens of redundant generation.
+- **Payload Reductions:**
+  - In a 5-turn collaborative dialogue, context deduplication and direct relay reduced network payload from 8,405 bytes to 1,965 bytes (**76.6% byte reduction**, estimated ~1,610 model tokens).
+  - For 34 KB raw tool outputs, compact snippet + CAS reference reduces transmission to 257 bytes (**99.3% byte reduction**, estimated ~8,649 model tokens).
+  - Note: Reference-based retrieval reduces transport overhead, but reintroduces token consumption if the requester later reads the full content into its context window.
+
+### 5. Regression Verification
+Covered by `tests/zero-waste-response-delivery.test.js` (16/16 passed):
+- 1. Verbatim fidelity of completed delegated responses with `bridgeUnaltered: true`.
+- 2. Direct delivery causes zero additional model invocations in the bridge (proven with multi-step chain where synthesis wrapper is skipped).
+- 3. Post-reconnect retrieval in <1.2 ms via `bridge_get_response` and `bridge_get_request_status`.
+- 4 & 5. Markdown code blocks, formatting, links, and citations 100% preserved.
+- 6. Structured outputs remain machine-readable JSON.
+- 7. Monotonic lease fencing and outbox deduplication prevent duplicate responses.
+- 8. Assist mode allows receiving agent to analyze and critique response.
+- 9. Direct mode does not accidentally invoke assist-mode synthesis.
+- 10. Failed or unavailable providers return honest errors (`PROVIDER_UNAVAILABLE`) with zero fabrication.
+- 11 & 12. TokenAccountant truthfully tracks Categories A–F, distinguishing provider-reported vs estimated usage.
+- 13. `shouldCollaborate` picks least expensive workflow satisfying constraints.
+- 14. Explicit `responseMode` parameter overrides heuristic keywords.
+- 15. Credential quarantine policy withholds leaked secrets and sets `status: 'quarantined'`.
+- 16. `bridge_get_response` returns consistent shape across `responseId` and `requestId` lookups.
+
+### 6. Response Storage Canonicalization (ArtifactStore-backed)
+
+- **Single canonical payload:** when a durable database + root are available, `MailboxHub` constructs an `ArtifactStore` and injects it into `ResponsePreserver`. Response bytes are persisted once in `bridge_artifacts`; the `bridge_response_artifacts` metadata row stores only a `payload_artifact_id` reference (its `response_text` column is left empty). Verified in `tests/response-canonicalization.test.js`.
+- **Fast-path retrieval:** `bridge_get_response`, `getResponse(responseId)`, and `getRequest(requestId)` all resolve response text through the canonical `ArtifactStore` (authorized to the correlated requesting/responding agents), with an inline-text fallback for legacy rows and no-store deployments.
+- **Idempotent:** replaying the same request + content hash reuses the existing canonical artifact rather than storing a duplicate.
+- **`bridge_requests.response` is retained, intentionally:** it is the durable cross-process delivery buffer read directly by `EventBus._readTerminalRequest()` and asserted at the raw-row level by delivery-contract tests (e.g. `event-delivery-latency.test.js`, `chatgpt-adapter.test.js`, `verification-tokens.test.js`). It is a transport projection, not an artifact-store duplicate; removing it is a delivery-protocol change, not a storage change, and is out of scope.
 
 ## Long-term topology
 

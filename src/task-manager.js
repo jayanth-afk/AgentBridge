@@ -474,128 +474,166 @@ export class TaskManager extends EventEmitter {
 
     const now = new Date().toISOString();
     let task = null;
+    let quarantinePayload = null;
 
-    runInImmediateTx(this.db, () => {
-      task = this.db.prepare(`SELECT * FROM tasks WHERE id = ?`).get(taskId);
-      if (!task) {
-        throw new Error(`Task '${taskId}' not found.`);
-      }
-
-      // Terminal state protection: if the task is already completed, it cannot be
-      // mutated, downgraded to failed, or overwritten by a stale attempt.
-      if (task.status === 'completed') {
-        const serializedResult = (result !== null && typeof result === 'object') ? JSON.stringify(result) : result;
-        // If idempotent duplicate completion, return cleanly without changing terminal state
-        if (status === 'completed' && (task.result === serializedResult || serializedResult === null)) {
-          return;
+    try {
+      runInImmediateTx(this.db, () => {
+        task = this.db.prepare(`SELECT * FROM tasks WHERE id = ?`).get(taskId);
+        if (!task) {
+          throw new Error(`Task '${taskId}' not found.`);
         }
-        // Stale attempt or late failure/cancellation: quarantine payload if attempts ledger exists
-        if (this.attempts && (attemptId || result || error)) {
-          try {
-            this.attempts.quarantineLateResponse({
-              attemptId: attemptId || `stale_on_${taskId}`,
-              requestId: task.parent_task_id || taskId,
-              epoch: epoch || 0,
-              payload: result || error,
-              reason: `Stale ${status} submitted after task was already marked completed`
-            });
-          } catch {}
-        }
-        this.logger?.log({
-          agentId,
-          action: 'stale_completion_ignored',
-          status: 'ignored',
-          details: { taskId, currentStatus: task.status, submittedStatus: status }
-        });
-        return;
-      }
 
-      // If task is already failed and another failure is submitted, handle idempotently
-      if (task.status === 'failed' && status === 'failed') {
-        return;
-      }
-
-      // Fencing invariant: validate attempt if attemptId or epoch provided
-      if (attemptId && (epoch === null || epoch === undefined)) {
-        throw new Error(`Fencing Error: epoch token is required when attemptId is provided for task '${taskId}'.`);
-      }
-      if ((epoch !== null && epoch !== undefined) && this.attempts) {
-        if (attemptId) {
-          this.attempts.validateFencing({ taskId, attemptId, epoch, agentId });
-        } else {
-          const epochRow = this.db.prepare(`
-            SELECT current_epoch, active_attempt_id FROM task_epochs WHERE task_id = ?
-          `).get(taskId);
-          if (epochRow && epoch !== epochRow.current_epoch) {
-            const err = new Error(
-              `FENCED_ATTEMPT_ERROR: Stale epoch ${epoch} for task '${taskId}'. Current epoch is ${epochRow.current_epoch}. Execution blocked.`
-            );
-            err.code = 'FENCED_ATTEMPT_ERROR';
-            throw err;
+        // Terminal state protection: if the task is already completed, it cannot be
+        // mutated, downgraded to failed, or overwritten by a stale attempt.
+        if (task.status === 'completed') {
+          const serializedResult = (result !== null && typeof result === 'object') ? JSON.stringify(result) : result;
+          // If idempotent duplicate completion, return cleanly without changing terminal state
+          if (status === 'completed' && (task.result === serializedResult || serializedResult === null)) {
+            return;
           }
-        }
-      }
-
-      // Authorization: only the assignee (owner) or the creator may move a task
-      // into a terminal state. Prevents an unrelated agent from completing or
-      // failing someone else's task by guessing its id.
-      if (['completed', 'failed', 'cancelled'].includes(status)) {
-        const actor = agentId ? String(agentId).trim().toLowerCase() : null;
-        const owner = task.to_agent ? String(task.to_agent).trim().toLowerCase() : null;
-        const creator = task.from_agent ? String(task.from_agent).trim().toLowerCase() : null;
-        if (actor && owner && actor !== owner && actor !== creator) {
-          throw new Error(`Forbidden: task '${taskId}' is owned by '${task.to_agent}'; '${agentId}' may not mark it '${status}'.`);
-        }
-      }
-
-      let startedAt = task.started_at;
-      let completedAt = task.completed_at;
-
-      if (status === 'in_progress' && !startedAt) {
-        startedAt = now;
-      }
-      if (['completed', 'failed', 'cancelled'].includes(status)) {
-        completedAt = now;
-      }
-
-      const serializedResult = (result !== null && typeof result === 'object') ? JSON.stringify(result) : result;
-      const stmt = this.db.prepare(`
-        UPDATE tasks
-        SET status = ?, result = COALESCE(?, result), error = ?, updated_at = ?,
-            started_at = ?, completed_at = ?
-        WHERE id = ?
-      `);
-
-      stmt.run(status, serializedResult, error, now, startedAt, completedAt, taskId);
-
-      if (this.attempts) {
-        if (attemptId && epoch) {
-          if (status === 'completed') {
-            this.attempts.completeAttempt({ attemptId, epoch, result: serializedResult });
-          } else if (['failed', 'cancelled'].includes(status)) {
-            this.attempts.failAttempt({ attemptId, epoch, error: error || status });
-          }
-        } else {
-          const activeAtt = this.attempts.getActiveAttemptForTask(taskId);
-          if (activeAtt) {
+          // Stale attempt or late failure/cancellation: quarantine payload if attempts ledger exists
+          if (this.attempts && (attemptId || result || error)) {
             try {
-              if (status === 'completed') {
-                this.attempts.completeAttempt({ attemptId: activeAtt.attemptId, epoch: activeAtt.epoch, result: serializedResult });
-              } else if (['failed', 'cancelled'].includes(status)) {
-                this.attempts.failAttempt({ attemptId: activeAtt.attemptId, epoch: activeAtt.epoch, error: error || status });
-              }
+              this.attempts.quarantineLateResponse({
+                attemptId: attemptId || `stale_on_${taskId}`,
+                requestId: task.parent_task_id || taskId,
+                epoch: epoch || 0,
+                payload: result || error,
+                reason: `Stale ${status} submitted after task was already marked completed`
+              });
             } catch {}
           }
+          this.logger?.log({
+            agentId,
+            action: 'stale_completion_ignored',
+            status: 'ignored',
+            details: { taskId, currentStatus: task.status, submittedStatus: status }
+          });
+          return;
         }
-      }
 
-      this.logger?.log({
-        agentId,
-        action: 'update_task_status',
-        status: 'success',
-        details: { taskId, newStatus: status }
+        // If task is already failed and another failure is submitted, handle idempotently
+        if (task.status === 'failed' && status === 'failed') {
+          return;
+        }
+
+        // Fencing invariant: validate attempt if attemptId or epoch provided
+        if (attemptId && (epoch === null || epoch === undefined)) {
+          throw new Error(`Fencing Error: epoch token is required when attemptId is provided for task '${taskId}'.`);
+        }
+        if ((epoch !== null && epoch !== undefined) && this.attempts) {
+          if (attemptId) {
+            try {
+              this.attempts.validateFencing({ taskId, attemptId, epoch, agentId });
+            } catch (fencingErr) {
+              quarantinePayload = {
+                attemptId,
+                requestId: task.parent_task_id || taskId,
+                epoch: Number(epoch) || 0,
+                payload: result || error,
+                reason: fencingErr.message
+              };
+              throw fencingErr;
+            }
+          } else {
+            const epochRow = this.db.prepare(`
+              SELECT current_epoch, active_attempt_id FROM task_epochs WHERE task_id = ?
+            `).get(taskId);
+            if (epochRow && epoch !== epochRow.current_epoch) {
+              const err = new Error(
+                `FENCED_ATTEMPT_ERROR: Stale epoch ${epoch} for task '${taskId}'. Current epoch is ${epochRow.current_epoch}. Execution blocked.`
+              );
+              err.code = 'FENCED_ATTEMPT_ERROR';
+              quarantinePayload = {
+                attemptId: `stale_epoch_${epoch}`,
+                requestId: task.parent_task_id || taskId,
+                epoch: Number(epoch) || 0,
+                payload: result || error,
+                reason: err.message
+              };
+              throw err;
+            }
+          }
+        }
+
+        // Authorization: only the assignee (owner) or the creator may move a task
+        // into a terminal state. Prevents an unrelated agent from completing or
+        // failing someone else's task by guessing its id.
+        if (['completed', 'failed', 'cancelled'].includes(status)) {
+          const actor = agentId ? String(agentId).trim().toLowerCase() : null;
+          const owner = task.to_agent ? String(task.to_agent).trim().toLowerCase() : null;
+          const creator = task.from_agent ? String(task.from_agent).trim().toLowerCase() : null;
+          if (actor && owner && actor !== owner && actor !== creator) {
+            const errMsg = `Forbidden: task '${taskId}' is owned by '${task.to_agent}'; '${agentId}' may not mark it '${status}'.`;
+            if (this.attempts && (attemptId || result || error)) {
+              quarantinePayload = {
+                attemptId: attemptId || `unauth_${actor}`,
+                requestId: task.parent_task_id || taskId,
+                epoch: epoch || 0,
+                payload: result || error,
+                reason: errMsg
+              };
+            }
+            throw new Error(errMsg);
+          }
+        }
+
+        let startedAt = task.started_at;
+        let completedAt = task.completed_at;
+
+        if (status === 'in_progress' && !startedAt) {
+          startedAt = now;
+        }
+        if (['completed', 'failed', 'cancelled'].includes(status)) {
+          completedAt = now;
+        }
+
+        const serializedResult = (result !== null && typeof result === 'object') ? JSON.stringify(result) : result;
+        const stmt = this.db.prepare(`
+          UPDATE tasks
+          SET status = ?, result = COALESCE(?, result), error = ?, updated_at = ?,
+              started_at = ?, completed_at = ?
+          WHERE id = ?
+        `);
+
+        stmt.run(status, serializedResult, error, now, startedAt, completedAt, taskId);
+
+        if (this.attempts) {
+          if (attemptId && epoch) {
+            if (status === 'completed') {
+              this.attempts.completeAttempt({ attemptId, epoch, result: serializedResult });
+            } else if (['failed', 'cancelled'].includes(status)) {
+              this.attempts.failAttempt({ attemptId, epoch, error: error || status });
+            }
+          } else {
+            const activeAtt = this.attempts.getActiveAttemptForTask(taskId);
+            if (activeAtt) {
+              try {
+                if (status === 'completed') {
+                  this.attempts.completeAttempt({ attemptId: activeAtt.attemptId, epoch: activeAtt.epoch, result: serializedResult });
+                } else if (['failed', 'cancelled'].includes(status)) {
+                  this.attempts.failAttempt({ attemptId: activeAtt.attemptId, epoch: activeAtt.epoch, error: error || status });
+                }
+              } catch {}
+            }
+          }
+        }
+
+        this.logger?.log({
+          agentId,
+          action: 'update_task_status',
+          status: 'success',
+          details: { taskId, newStatus: status }
+        });
       });
-    });
+    } catch (err) {
+      if (quarantinePayload && this.attempts) {
+        try {
+          this.attempts.quarantineLateResponse(quarantinePayload);
+        } catch {}
+      }
+      throw err;
+    }
 
     const updated = this.getTask(taskId, false);
 

@@ -31,7 +31,7 @@ export class BridgeHttpServer {
     this.presence = options.presenceManager || (this.logger ? new PresenceManager(this.logger) : null);
     this.identity = options.identityManager || (this.logger ? new AgentIdentityManager(this.logger) : null);
     this.git = options.gitController || (this.guard && this.logger ? new GitController(this.guard, this.logger) : null);
-    this.registry = options.toolRegistry || new ToolRegistry();
+    this.registry = options.toolRegistry || new ToolRegistry({ profile: options.toolProfile || options.profile });
     this.taskManager = options.taskManager || this.mailbox?.tasks || (this.logger ? new TaskManager(this.logger) : null);
     this.effectsLedger = options.effectsLedger || (this.logger?.db ? new EffectsLedger(this.logger) : null);
     this.attemptLedger = options.attemptLedger || this.taskManager?.attempts || (this.logger?.db ? new AttemptLedger(this.logger) : null);

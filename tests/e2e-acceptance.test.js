@@ -95,11 +95,11 @@ test('Agent Bridge end-to-end acceptance (real HTTP stack)', async (t) => {
     assert.strictEqual(okHeader.status, 200);
   });
 
-  // 3. DISCOVER (73 = 60 core + 4 binary-artifact tools + 9 Mission 3 curated tools)
-  await t.test('DISCOVER: tools/list returns the full 73-tool registry', async () => {
+  // 3. DISCOVER (74 = 60 core + 4 binary-artifact tools + 9 Mission 3 curated tools + bridge_get_response)
+  await t.test('DISCOVER: tools/list returns the full 74-tool registry', async () => {
     const r = await post(PORT, 'tools/list', {});
     assert.strictEqual(r.status, 200);
-    assert.strictEqual(r.json.result.tools.length, 73);
+    assert.strictEqual(r.json.result.tools.length, 74);
   });
 
   // 4. PING

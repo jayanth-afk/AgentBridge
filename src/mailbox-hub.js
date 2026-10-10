@@ -8,6 +8,16 @@ import {
   getRegisteredVerificationToken,
   SECURITY_DENIAL_MESSAGE
 } from './security/verification-tokens.js';
+import { ResponsePreserver, detectResponseMode, ResponseMode } from './artifacts/response-preserver.js';
+import { ArtifactStore } from './artifacts/artifact-store.js';
+import { TokenAccountant } from './telemetry/token-accountant.js';
+
+export const TERMINAL_REQUEST_STATES = Object.freeze(new Set([
+  'completed',
+  'failed',
+  'cancelled',
+  'quarantined'
+]));
 
 export class MailboxHub {
   constructor(auditLogger, taskManager = null, eventBus = null) {
@@ -22,6 +32,16 @@ export class MailboxHub {
       }
     }
     this.agentHandlers = new Map(); // agentId -> async (question, context) => response
+
+    // Durable response preservation and token accounting.
+    // Response payloads are canonicalized into ArtifactStore (bridge_artifacts)
+    // when a durable database + root are available; otherwise ResponsePreserver
+    // falls back to inline text (in-memory/mock usage).
+    this.artifactStore = (this.db && auditLogger?.dbPath)
+      ? new ArtifactStore(auditLogger)
+      : null;
+    this.responsePreserver = new ResponsePreserver(this.db, { artifactStore: this.artifactStore });
+    this.tokenAccountant = new TokenAccountant();
 
     // Structured, correlated request lifecycle tracing (observability only;
     // never influences delivery semantics).
@@ -267,9 +287,11 @@ export class MailboxHub {
     // attached long enough to capture the real correlated response while still
     // allowing callers to override the timeout explicitly.
     timeoutMs = 90000,
-    asyncMode = false
+    asyncMode = false,
+    responseMode = null
   }) {
     const timestamp = new Date().toISOString();
+    const resolvedMode = detectResponseMode({ question, explicitMode: responseMode });
 
     // 1. If target agent has a registered local handler (e.g. test peer or in-memory mock), call synchronously
     const handler = this.agentHandlers.get(toAgent);
@@ -308,13 +330,81 @@ export class MailboxHub {
         subject: `[Direct Response] Re: ${question.slice(0, 40)}...`,
         content: typeof response === 'string' ? response : JSON.stringify(response)
       });
+
+      const respText = typeof response === 'string' ? response : JSON.stringify(response);
+      const reqIdSync = requestId || `req_sync_${Date.now()}`;
+      const nowSync = new Date().toISOString();
+      if (this.db) {
+        try {
+          this.db.prepare(`
+            INSERT OR REPLACE INTO bridge_requests (
+              request_id, conversation_id, from_agent, to_agent, question, context,
+              task_id, status, response, error, timeout_ms, created_at, updated_at, completed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, NULL, 'completed', ?, NULL, ?, ?, ?, ?)
+          `).run(
+            reqIdSync,
+            conversationId || `conv_sync_${Date.now()}`,
+            fromAgent,
+            toAgent,
+            question,
+            typeof context === 'object' && context !== null ? JSON.stringify(context) : context,
+            respText,
+            timeoutMs,
+            nowSync,
+            nowSync,
+            nowSync
+          );
+        } catch {}
+      }
+
+      let artifact = null;
+      let envelope = null;
+      let tokenMetrics = null;
+      try {
+        artifact = this.responsePreserver.preserveResponse({
+          requestId: reqIdSync,
+          respondingAgentId: toAgent,
+          requestingAgentId: fromAgent,
+          responseText: respText,
+          responseMode: resolvedMode,
+          executionMetadata: {
+            correlationTier: 'direct_session',
+            attemptEpoch: 1,
+            originRoute: 'sync_peer'
+          }
+        });
+        envelope = this.responsePreserver.createCompactEnvelope(artifact);
+        tokenMetrics = this.tokenAccountant.recordTurn({
+          requestId: reqIdSync,
+          responseMode: resolvedMode,
+          requestingAgent: fromAgent,
+          respondingAgent: toAgent,
+          promptText: question,
+          responseText: respText
+        });
+      } catch (err) {
+        this.logger?.debug?.('Failed to preserve synchronous peer response', err);
+      }
+
+      const isQuarantined = Boolean(artifact?.quarantined);
+
       return {
         mode: 'synchronous_peer_response',
         fromAgent,
         toAgent,
         question,
-        response,
-        status: 'completed',
+        response: isQuarantined ? null : response,
+        status: isQuarantined ? 'quarantined' : 'completed',
+        error: isQuarantined ? artifact.quarantineReason : null,
+        responseMode: resolvedMode,
+        responseId: artifact?.responseId || null,
+        envelope,
+        tokenMetrics,
+        bridgeUnaltered: !isQuarantined && (resolvedMode === ResponseMode.DIRECT),
+        untrustedData: true,
+        quarantined: isQuarantined,
+        additionalModelCalls: 0,
+        modelRegenerationTokens: 0,
         timestamp
       };
     }
@@ -342,6 +432,12 @@ export class MailboxHub {
           agentId: fromAgent,
           meta: { outcome: 'completed', reconnected: true }
         });
+        const artifact = this.responsePreserver.getByRequestId(existingReq.request_id);
+        const envelope = artifact ? this.responsePreserver.createCompactEnvelope(artifact) : null;
+        const tokenMetrics = this.tokenAccountant.getMetrics(existingReq.request_id);
+        const reqMode = artifact?.responseMode || resolvedMode;
+        const isQuarantined = Boolean(artifact?.quarantined);
+
         return {
           mode: 'autonomous_correlated_response',
           fromAgent: existingReq.from_agent,
@@ -350,8 +446,18 @@ export class MailboxHub {
           conversationId: existingReq.conversation_id,
           taskId: existingReq.task_id,
           question: existingReq.question,
-          response: existingReq.response,
-          status: 'completed',
+          response: isQuarantined ? null : existingReq.response,
+          status: isQuarantined ? 'quarantined' : 'completed',
+          error: isQuarantined ? artifact.quarantineReason : null,
+          responseMode: reqMode,
+          responseId: artifact?.responseId || null,
+          envelope,
+          tokenMetrics,
+          bridgeUnaltered: !isQuarantined && (reqMode === ResponseMode.DIRECT),
+          untrustedData: true,
+          quarantined: isQuarantined,
+          additionalModelCalls: 0,
+          modelRegenerationTokens: 0,
           timestamp: existingReq.completed_at || existingReq.updated_at
         };
       }
@@ -366,6 +472,37 @@ export class MailboxHub {
           question: existingReq.question,
           status: 'failed',
           error: existingReq.error || 'Request failed'
+        };
+      }
+      if (existingReq.status === 'quarantined') {
+        const artifact = this.responsePreserver.getByRequestId(existingReq.request_id);
+        return {
+          mode: 'request_quarantined',
+          fromAgent: existingReq.from_agent,
+          toAgent: existingReq.to_agent,
+          requestId: existingReq.request_id,
+          conversationId: existingReq.conversation_id,
+          taskId: existingReq.task_id,
+          question: existingReq.question,
+          status: 'quarantined',
+          response: null,
+          error: artifact?.quarantineReason || existingReq.error || 'Response quarantined',
+          quarantined: true,
+          untrustedData: true
+        };
+      }
+      if (existingReq.status === 'cancelled') {
+        return {
+          mode: 'request_cancelled',
+          fromAgent: existingReq.from_agent,
+          toAgent: existingReq.to_agent,
+          requestId: existingReq.request_id,
+          conversationId: existingReq.conversation_id,
+          taskId: existingReq.task_id,
+          question: existingReq.question,
+          status: 'cancelled',
+          response: null,
+          error: existingReq.error || 'Request cancelled'
         };
       }
       if (asyncMode) {
@@ -400,6 +537,13 @@ export class MailboxHub {
           const row = this.db.prepare('SELECT response FROM bridge_requests WHERE request_id = ?').get(existingReq.request_id);
           finalResponse = row?.response;
         }
+
+        const artifact = this.responsePreserver.getByRequestId(existingReq.request_id);
+        const envelope = artifact ? this.responsePreserver.createCompactEnvelope(artifact) : null;
+        const tokenMetrics = this.tokenAccountant.getMetrics(existingReq.request_id);
+        const reqMode = artifact?.responseMode || resolvedMode;
+        const isQuarantined = Boolean(artifact?.quarantined);
+
         return {
           mode: 'autonomous_correlated_response',
           fromAgent: existingReq.from_agent,
@@ -408,8 +552,18 @@ export class MailboxHub {
           conversationId: existingReq.conversation_id,
           taskId: existingReq.task_id,
           question: existingReq.question,
-          response: finalResponse,
-          status: 'completed',
+          response: isQuarantined ? null : finalResponse,
+          status: isQuarantined ? 'quarantined' : 'completed',
+          error: isQuarantined ? artifact.quarantineReason : null,
+          responseMode: reqMode,
+          responseId: artifact?.responseId || null,
+          envelope,
+          tokenMetrics,
+          bridgeUnaltered: !isQuarantined && (reqMode === ResponseMode.DIRECT),
+          untrustedData: true,
+          quarantined: isQuarantined,
+          additionalModelCalls: 0,
+          modelRegenerationTokens: 0,
           timestamp: outcome.completedAt || new Date().toISOString()
         };
       } else if (outcome.status === 'timeout') {
@@ -446,7 +600,8 @@ export class MailboxHub {
       requestId: reqId,
       conversationId: convId,
       originalContext: context,
-      question
+      question,
+      responseMode: resolvedMode
     };
 
     let task = null;
@@ -572,6 +727,11 @@ export class MailboxHub {
         finalResponse = row?.response;
       }
 
+      const artifact = this.responsePreserver.getByRequestId(reqId);
+      const envelope = artifact ? this.responsePreserver.createCompactEnvelope(artifact) : null;
+      const tokenMetrics = this.tokenAccountant.getMetrics(reqId);
+      const isQuarantined = Boolean(artifact?.quarantined);
+
       return {
         mode: 'autonomous_correlated_response',
         fromAgent,
@@ -580,8 +740,18 @@ export class MailboxHub {
         conversationId: convId,
         taskId: task.id,
         question,
-        response: finalResponse,
-        status: 'completed',
+        response: isQuarantined ? null : finalResponse,
+        status: isQuarantined ? 'quarantined' : 'completed',
+        error: isQuarantined ? artifact.quarantineReason : null,
+        responseMode: resolvedMode,
+        responseId: artifact?.responseId || null,
+        envelope,
+        tokenMetrics,
+        bridgeUnaltered: !isQuarantined && (resolvedMode === ResponseMode.DIRECT),
+        untrustedData: true,
+        quarantined: isQuarantined,
+        additionalModelCalls: 0,
+        modelRegenerationTokens: 0,
         timestamp: outcome.completedAt || new Date().toISOString()
       };
     } else if (outcome.status === 'timeout') {
@@ -681,9 +851,30 @@ export class MailboxHub {
       const resultStr = typeof result === 'string' ? result : (result ? JSON.stringify(result) : null);
 
       if (requestId) {
-        // If request is already terminal completed, do NOT downgrade or overwrite it with failure
-        const isAlreadyCompleted = reqRow?.status === 'completed';
-        if (!isAlreadyCompleted || status === 'completed') {
+        if (reqRow && TERMINAL_REQUEST_STATES.has(reqRow.status)) {
+          // Terminal state protection: terminal requests are immutable
+          const isIdempotentCompletion = reqRow.status === 'completed' && status === 'completed' && (reqRow.response === resultStr || resultStr === null);
+          if (!isIdempotentCompletion) {
+            // Conflicting result or late submission on terminal request: quarantine payload
+            if (this.tasks?.attempts && (result || error || attemptId)) {
+              try {
+                this.tasks.attempts.quarantineLateResponse({
+                  attemptId: attemptId || `late_on_${taskId}`,
+                  requestId,
+                  epoch: epoch || 0,
+                  payload: result || error,
+                  reason: `Late ${status} submitted after request was already terminal '${reqRow.status}'`
+                });
+              } catch {}
+            }
+            this.logger?.log({
+              agentId,
+              action: 'terminal_request_mutation_blocked',
+              status: 'quarantined',
+              details: { requestId, taskId, terminalStatus: reqRow.status, submittedStatus: status }
+            });
+          }
+        } else {
           try {
             targetDb.prepare(`
               UPDATE bridge_requests
@@ -691,6 +882,44 @@ export class MailboxHub {
               WHERE request_id = ?
             `).run(status, resultStr, error, now, now, requestId);
           } catch {}
+        }
+      }
+
+      if (status === 'completed' && resultStr && (!reqRow || !TERMINAL_REQUEST_STATES.has(reqRow.status) || reqRow.response === resultStr)) {
+        try {
+          const recipientAgent = task ? task.creator : (reqRow ? reqRow.from_agent : '*');
+          const reqMode = reqRow?.context ? (() => {
+            try {
+              const parsed = JSON.parse(reqRow.context);
+              return parsed?.responseMode || 'direct';
+            } catch { return 'direct'; }
+          })() : 'direct';
+
+          const artifact = this.responsePreserver.preserveResponse({
+            requestId: requestId || `req_task_${taskId}`,
+            taskId,
+            respondingAgentId: agentId,
+            requestingAgentId: recipientAgent,
+            responseText: resultStr,
+            responseMode: reqMode,
+            executionMetadata: {
+              attemptEpoch: epoch || 1,
+              correlationTier: attemptId ? 'crypto_nonce' : 'direct_session',
+              originRoute: 'task_mailbox'
+            }
+          });
+
+          this.tokenAccountant.recordTurn({
+            requestId: requestId || `req_task_${taskId}`,
+            taskId,
+            responseMode: reqMode,
+            requestingAgent: recipientAgent,
+            respondingAgent: agentId,
+            promptText: task?.instructions || reqRow?.question || '',
+            responseText: resultStr
+          });
+        } catch (err) {
+          this.logger?.debug?.('Failed to preserve response artifact in submitTaskResult', err);
         }
       }
 
@@ -827,6 +1056,11 @@ export class MailboxHub {
     }
     const row = this.db.prepare('SELECT * FROM bridge_requests WHERE request_id = ?').get(requestId);
     if (!row) return null;
+
+    const art = this.responsePreserver?.getByRequestId(requestId) || null;
+    const isQuarantined = Boolean(art?.quarantined);
+    const respMode = art?.responseMode || 'direct';
+
     return {
       requestId: row.request_id,
       conversationId: row.conversation_id,
@@ -835,13 +1069,45 @@ export class MailboxHub {
       question: row.question,
       context: row.context ? (() => { try { return JSON.parse(row.context); } catch { return row.context; } })() : null,
       taskId: row.task_id,
-      status: row.status,
-      response: row.response,
-      error: row.error,
+      status: isQuarantined ? 'quarantined' : row.status,
+      response: isQuarantined ? null : row.response,
+      error: isQuarantined ? art.quarantineReason : row.error,
       timeoutMs: row.timeout_ms,
+      responseMode: respMode,
+      responseId: art?.responseId || null,
+      artifact: art,
+      envelope: art ? this.responsePreserver.createCompactEnvelope(art) : null,
+      tokenMetrics: this.tokenAccountant?.getMetrics(requestId) || null,
+      bridgeUnaltered: !isQuarantined && (respMode === 'direct'),
+      untrustedData: true,
+      quarantined: isQuarantined,
+      quarantineReason: art?.quarantineReason || null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       completedAt: row.completed_at
+    };
+  }
+
+  getResponse(responseId) {
+    if (!responseId) throw new Error('responseId is required');
+    const art = this.responsePreserver ? this.responsePreserver.getByResponseId(responseId) : null;
+    if (!art) return null;
+    if (art.quarantined) {
+      return {
+        ...art,
+        responseText: null,
+        response: null,
+        status: 'quarantined',
+        error: art.quarantineReason,
+        bridgeUnaltered: false,
+        untrustedData: true
+      };
+    }
+    return {
+      ...art,
+      response: art.responseText,
+      bridgeUnaltered: art.responseMode === 'direct',
+      untrustedData: true
     };
   }
 
@@ -883,6 +1149,61 @@ export class MailboxHub {
       throw new Error(`Request not found: ${requestId}`);
     }
 
+    // 1. Authorization check: recipient agent matching
+    if (reqRow.to_agent && reqRow.to_agent !== '*' && agentId.toLowerCase() !== reqRow.to_agent.toLowerCase()) {
+      const errMsg = `Unauthorized: agent '${agentId}' cannot answer request intended for '${reqRow.to_agent}'`;
+      if (this.tasks?.attempts) {
+        try {
+          this.tasks.attempts.quarantineLateResponse({
+            attemptId: attemptId || `unauth_${agentId}`,
+            requestId,
+            epoch: epoch || 0,
+            payload: response || error,
+            reason: errMsg
+          });
+        } catch {}
+      }
+      return {
+        status: 'quarantined',
+        quarantined: true,
+        requestId,
+        answeredBy: agentId,
+        error: errMsg
+      };
+    }
+
+    // 2. Terminal request protection: terminal requests are immutable
+    const resultStr = typeof response === 'string' ? response : (response ? JSON.stringify(response) : null);
+    if (TERMINAL_REQUEST_STATES.has(reqRow.status)) {
+      if (reqRow.status === 'completed' && status === 'completed' && (reqRow.response === resultStr || resultStr === null)) {
+        return {
+          status: 'completed',
+          requestId,
+          answeredBy: reqRow.to_agent,
+          result: reqRow.response
+        };
+      }
+      // Late submission on already terminal request: quarantine payload
+      if (this.tasks?.attempts) {
+        try {
+          this.tasks.attempts.quarantineLateResponse({
+            attemptId: attemptId || `late_on_${requestId}`,
+            requestId,
+            epoch: epoch || 0,
+            payload: response || error,
+            reason: `Late submission on already terminal request (${reqRow.status})`
+          });
+        } catch {}
+      }
+      return {
+        status: 'quarantined',
+        quarantined: true,
+        requestId,
+        answeredBy: agentId,
+        error: `Request '${requestId}' is already terminal ('${reqRow.status}'); late response quarantined.`
+      };
+    }
+
     if (reqRow.task_id) {
       return this.submitTaskResult({
         taskId: reqRow.task_id,
@@ -895,19 +1216,35 @@ export class MailboxHub {
       });
     }
 
-    // Direct request without backing task
-    if (reqRow.status === 'completed' && status !== 'completed') {
-      return {
-        status: 'completed',
-        requestId,
-        answeredBy: reqRow.to_agent,
-        result: reqRow.response
-      };
+    // 3. Fencing validation if attemptId provided
+    if (attemptId && (epoch === null || epoch === undefined)) {
+      throw new Error(`Fencing Error: epoch token is required when attemptId is provided for request '${requestId}'.`);
+    }
+    if (attemptId && (epoch !== null && epoch !== undefined) && this.tasks?.attempts) {
+      try {
+        this.tasks.attempts.validateFencing({ taskId: reqRow.task_id || requestId, attemptId, epoch: Number(epoch), agentId });
+      } catch (fencingErr) {
+        try {
+          this.tasks.attempts.quarantineLateResponse({
+            attemptId,
+            requestId,
+            epoch: Number(epoch) || 0,
+            payload: response || error,
+            reason: fencingErr.message
+          });
+        } catch {}
+        return {
+          status: 'quarantined',
+          quarantined: true,
+          requestId,
+          attemptId,
+          epoch,
+          error: fencingErr.message
+        };
+      }
     }
 
-    // Direct request without backing task
     const now = new Date().toISOString();
-    const resultStr = typeof response === 'string' ? response : (response ? JSON.stringify(response) : null);
 
     const directWork = (targetDb, stageEventFn = null) => {
       targetDb.prepare(`
@@ -915,6 +1252,43 @@ export class MailboxHub {
         SET status = ?, response = ?, error = ?, updated_at = ?, completed_at = ?
         WHERE request_id = ?
       `).run(status, resultStr, error, now, now, requestId);
+
+      if (status === 'completed' && resultStr) {
+        try {
+          const reqMode = reqRow?.context ? (() => {
+            try {
+              const parsed = JSON.parse(reqRow.context);
+              return parsed?.responseMode || 'direct';
+            } catch { return 'direct'; }
+          })() : 'direct';
+
+          this.responsePreserver.preserveResponse({
+            requestId,
+            taskId: null,
+            respondingAgentId: agentId,
+            requestingAgentId: reqRow?.from_agent || '*',
+            responseText: resultStr,
+            responseMode: reqMode,
+            executionMetadata: {
+              attemptEpoch: epoch || 1,
+              correlationTier: attemptId ? 'crypto_nonce' : 'direct_session',
+              originRoute: 'direct_answer'
+            }
+          });
+
+          this.tokenAccountant.recordTurn({
+            requestId,
+            taskId: null,
+            responseMode: reqMode,
+            requestingAgent: reqRow?.from_agent || '*',
+            respondingAgent: agentId,
+            promptText: reqRow?.question || '',
+            responseText: resultStr
+          });
+        } catch (err) {
+          this.logger?.debug?.('Failed to preserve response artifact in answerRequest', err);
+        }
+      }
 
       if (stageEventFn) {
         stageEventFn({

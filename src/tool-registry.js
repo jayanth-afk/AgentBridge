@@ -32,13 +32,87 @@ function resolveKnowledgeStore(ctx) {
   return store;
 }
 
+export const TOOL_PROFILES = Object.freeze({
+  ALL: 'all',
+  MINIMAL: 'minimal',
+  COLLABORATOR: 'collaborator',
+  DEVELOPER: 'developer'
+});
+
+export const PROFILE_TOOLS = Object.freeze({
+  minimal: Object.freeze([
+    'bridge_ping',
+    'bridge_discover_agents',
+    'bridge_agent_presence',
+    'bridge_discover_tools',
+    'bridge_tool_info',
+    'bridge_ask_agent',
+    'bridge_get_response',
+    'bridge_answer_request'
+  ]),
+  collaborator: Object.freeze([
+    'bridge_ping',
+    'bridge_discover_agents',
+    'bridge_agent_presence',
+    'bridge_discover_tools',
+    'bridge_tool_info',
+    'bridge_ask_agent',
+    'bridge_get_response',
+    'bridge_answer_request',
+    'bridge_send_message',
+    'bridge_check_inbox',
+    'bridge_delegate_task',
+    'bridge_claim_task',
+    'bridge_submit_task_result',
+    'bridge_get_task_status',
+    'bridge_get_pending_requests',
+    'bridge_get_events'
+  ]),
+  developer: Object.freeze([
+    'bridge_ping',
+    'bridge_discover_agents',
+    'bridge_agent_presence',
+    'bridge_discover_tools',
+    'bridge_tool_info',
+    'bridge_ask_agent',
+    'bridge_get_response',
+    'bridge_answer_request',
+    'bridge_send_message',
+    'bridge_check_inbox',
+    'bridge_delegate_task',
+    'bridge_claim_task',
+    'bridge_submit_task_result',
+    'bridge_get_task_status',
+    'bridge_get_pending_requests',
+    'bridge_get_events',
+    'bridge_inspect_project',
+    'bridge_project_snapshot',
+    'bridge_check_syntax',
+    'bridge_read_file',
+    'bridge_create_file',
+    'bridge_edit_file',
+    'bridge_delete_file',
+    'bridge_search_files',
+    'bridge_git_status',
+    'bridge_git_diff',
+    'bridge_git_commit',
+    'bridge_git_branches',
+    'bridge_git_switch_branch',
+    'bridge_git_summary',
+    'bridge_execute_command',
+    'bridge_diagnostics'
+  ]),
+  all: null
+});
+
 /**
  * Unified Tool Registry: Single Source of Truth for all Bridge tools across
  * stdio MCP, HTTP MCP, SSE, and plugins.
  */
 export class ToolRegistry {
-  constructor() {
+  constructor(options = {}) {
     this.tools = new Map();
+    this.profile = (options.profile || process.env.AGENT_BRIDGE_TOOL_PROFILE || 'all').toLowerCase();
     this.registerCoreTools();
   }
 
@@ -49,17 +123,29 @@ export class ToolRegistry {
     this.tools.set(definition.name, definition);
   }
 
-  getToolDefinitions() {
-    return Array.from(this.tools.values()).map(t => ({
+  getToolDefinitions(profile = this.profile) {
+    const norm = (profile || 'all').toLowerCase();
+    const allowed = PROFILE_TOOLS[norm] ?? null;
+
+    const all = Array.from(this.tools.values()).map(t => ({
       name: t.name,
       description: t.description,
       inputSchema: t.inputSchema
     }));
+
+    if (!allowed) {
+      return all;
+    }
+
+    const allowedSet = new Set(allowed);
+    return all.filter(t => allowedSet.has(t.name));
   }
 
   async executeTool(name, rawArgs = {}, context = {}) {
-    let tool = this.tools.get(name);
-    if (!tool && name === 'bridge_explain_request') {
+    // Alias bridge_search_tools -> bridge_discover_tools
+    const resolvedName = name === 'bridge_search_tools' ? 'bridge_discover_tools' : name;
+    let tool = this.tools.get(resolvedName);
+    if (!tool && resolvedName === 'bridge_explain_request') {
       tool = {
         name: 'bridge_explain_request',
         handler: async (args, ctx) => {
@@ -1023,7 +1109,7 @@ export class ToolRegistry {
 
     this.registerTool({
       name: 'bridge_ask_agent',
-      description: 'Directly query another connected agent and await correlated response over cross-process event bus.',
+      description: 'Directly query another connected agent and await correlated response over cross-process event bus. Supports direct mode (zero post-processing model calls), assist mode (critique), and structured mode.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1034,7 +1120,13 @@ export class ToolRegistry {
           conversationId: { type: 'string' },
           requestId: { type: 'string' },
           timeoutMs: { type: 'number' },
-          asyncMode: { type: 'boolean' }
+          asyncMode: { type: 'boolean' },
+          responseMode: {
+            type: 'string',
+            enum: ['direct', 'assist', 'structured'],
+            default: 'direct',
+            description: 'Delivery mode: direct (zero model post-processing calls), assist (critique/review), or structured (JSON output)'
+          }
         },
         required: ['fromAgent', 'toAgent', 'question']
       },
@@ -1052,6 +1144,43 @@ export class ToolRegistry {
         required: ['requestId']
       },
       handler: async (args, ctx) => ctx.mailbox.getRequest(args.requestId)
+    });
+
+    this.registerTool({
+      name: 'bridge_get_response',
+      description: 'Retrieve a preserved authentic response artifact, compact envelope, and token accounting metrics by responseId or requestId.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          responseId: { type: 'string', description: 'Unique response artifact ID' },
+          requestId: { type: 'string', description: 'Correlated request ID' }
+        }
+      },
+      handler: async (args, ctx) => {
+        if (!args.responseId && !args.requestId) {
+          throw new Error('Either responseId or requestId must be provided');
+        }
+        if (args.responseId) {
+          const resp = ctx.mailbox.getResponse ? ctx.mailbox.getResponse(args.responseId) : null;
+          if (!resp) throw new Error(`Response not found: ${args.responseId}`);
+          return resp;
+        }
+        const req = ctx.mailbox.getRequest ? ctx.mailbox.getRequest(args.requestId) : null;
+        if (!req) throw new Error(`Request not found: ${args.requestId}`);
+        if (req.artifact) {
+          return {
+            ...req.artifact,
+            response: req.quarantined ? null : req.artifact.responseText,
+            status: req.status,
+            envelope: req.envelope,
+            tokenMetrics: req.tokenMetrics,
+            bridgeUnaltered: req.bridgeUnaltered,
+            untrustedData: true,
+            quarantined: req.quarantined
+          };
+        }
+        return req;
+      }
     });
 
     this.registerTool({
@@ -1461,7 +1590,7 @@ export class ToolRegistry {
     this.registerTool({
       name: 'bridge_discover_tools',
       category: 'discovery',
-      description: 'Discover available tools filtered by category or query to eliminate prompt bloat.',
+      description: 'Discover available tools filtered by category or query to eliminate prompt bloat (alias: bridge_search_tools).',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1470,7 +1599,8 @@ export class ToolRegistry {
         }
       },
       handler: async (args, ctx) => {
-        const all = this.getToolDefinitions();
+        // Always search across the full registry regardless of active surface profile
+        const all = this.getToolDefinitions('all');
         const results = [];
         const q = args.query ? args.query.toLowerCase() : null;
         const cat = args.category ? args.category.toLowerCase() : null;
@@ -1504,12 +1634,13 @@ export class ToolRegistry {
       inputSchema: {
         type: 'object',
         properties: {
-          toolName: { type: 'string', description: 'Tool name to inspect' }
+          toolName: { type: 'string', description: 'Tool name to inspect (supports bridge_search_tools alias)' }
         },
         required: ['toolName']
       },
       handler: async (args, ctx) => {
-        const tool = this.tools.get(args.toolName);
+        const lookup = args.toolName === 'bridge_search_tools' ? 'bridge_discover_tools' : args.toolName;
+        const tool = this.tools.get(lookup);
         if (!tool) throw new Error(`Unknown tool: '${args.toolName}'`);
         return {
           name: tool.name,
@@ -1535,6 +1666,14 @@ export class ToolRegistry {
           content: { type: 'string', description: 'Finding or documentation' },
           category: { type: 'string', description: 'architecture, decision, finding, constraint, test_result, or general' },
           tags: { type: 'array', items: { type: 'string' } },
+          status: {
+            type: 'string',
+            enum: ['verified', 'hypothesis', 'obsolete', 'failed-experiment', 'agent-claimed'],
+            default: 'verified',
+            description: 'Item lifecycle status: verified, hypothesis, obsolete, failed-experiment, agent-claimed'
+          },
+          validFrom: { type: 'string', description: 'ISO start validity timestamp' },
+          validUntil: { type: 'string', description: 'ISO expiration timestamp' },
           provenance: { type: 'string', description: 'user_instruction, agent_finding, verified_test, or external_doc' },
           sourceFile: { type: 'string', description: 'Related source file path' }
         },
@@ -1548,6 +1687,9 @@ export class ToolRegistry {
           content: args.content,
           category: args.category || 'general',
           tags: args.tags || [],
+          status: args.status || 'verified',
+          validFrom: args.validFrom || null,
+          validUntil: args.validUntil || null,
           provenance: args.provenance || 'agent_finding',
           sourceFile: args.sourceFile || null
         });
@@ -1555,7 +1697,7 @@ export class ToolRegistry {
           agentId: args.agentId,
           action: 'store_knowledge',
           status: 'success',
-          details: { id: item.id, title: item.title, category: item.category }
+          details: { id: item.id, title: item.title, category: item.category, status: item.status }
         });
         return {
           success: true,
@@ -1563,6 +1705,10 @@ export class ToolRegistry {
           contentHash: item.contentHash,
           title: item.title,
           category: item.category,
+          status: item.status,
+          validFrom: item.validFrom,
+          validUntil: item.validUntil,
+          sourceFile: item.sourceFile,
           provenance: item.provenance
         };
       }
@@ -1578,6 +1724,8 @@ export class ToolRegistry {
           query: { type: 'string', description: 'Search term or question' },
           category: { type: 'string', description: 'Filter by category' },
           tag: { type: 'string', description: 'Filter by tag' },
+          status: { type: 'string', description: 'Filter by status: verified, hypothesis, obsolete, failed-experiment, agent-claimed, or all' },
+          includeExpired: { type: 'boolean', description: 'Whether to include expired items (default false)' },
           limit: { type: 'number', description: 'Max results (default 5, max 20)' }
         },
         required: ['query']
@@ -1587,6 +1735,8 @@ export class ToolRegistry {
         const results = store.searchKnowledge(args.query, {
           category: args.category,
           tag: args.tag,
+          status: args.status,
+          includeExpired: args.includeExpired,
           limit: Math.min(args.limit || 5, 20)
         });
         return {

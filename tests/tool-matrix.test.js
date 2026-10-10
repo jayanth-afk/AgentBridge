@@ -159,6 +159,7 @@ test('Agent Bridge Tool Matrix — all registered tools exercised', async (t) =>
     ['bridge_submit_task_result', { taskId: task.id, agentId: 'chatgpt-desktop', status: 'completed', result: 'done' }],
     ['bridge_ask_agent', { fromAgent: AGENT, toAgent: 'chatgpt-desktop', question: 'matrix sync question' }],
     ['bridge_get_request_status', { requestId: pending.requestId }],
+    ['bridge_get_response', { requestId: pending.requestId }],
     ['bridge_get_pending_requests', { agentId: AGENT }],
     ['bridge_answer_request', { requestId: pending.requestId, agentId: AGENT, response: 'answered' }],
     ['bridge_get_events', { agentId: AGENT, limit: 5 }],
