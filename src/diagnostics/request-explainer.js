@@ -88,7 +88,17 @@ export class RequestExplainer {
       `).all(requestId);
     } catch {}
 
-    // 7. Synthesize Chronological Causal Timeline
+    // 7. Fetch Granular Lifecycle Trace
+    let lifecycleStages = [];
+    try {
+      lifecycleStages = this.db.prepare(`
+        SELECT * FROM request_lifecycle
+        WHERE request_id = ?
+        ORDER BY id ASC
+      `).all(requestId);
+    } catch {}
+
+    // 8. Synthesize Chronological Causal Timeline
     const timeline = [];
 
     // Request creation
@@ -158,6 +168,18 @@ export class RequestExplainer {
         epoch: q.epoch,
         reason: q.reason,
         details: `Late/fenced response safely quarantined: ${q.reason}`
+      });
+    }
+
+    // Granular lifecycle stages from RequestTracer
+    for (const lc of lifecycleStages) {
+      timeline.push({
+        timestamp: lc.timestamp,
+        phase: `STAGE_${lc.stage}`,
+        actor: lc.agent_id || 'system',
+        taskId: lc.task_id,
+        attemptId: lc.attempt_id,
+        details: lc.meta ? `Lifecycle stage: ${lc.stage} (${lc.meta})` : `Lifecycle stage: ${lc.stage}`
       });
     }
 

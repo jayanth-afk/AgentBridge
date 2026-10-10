@@ -122,6 +122,20 @@ export class DesktopControlPlane extends EventEmitter {
       return { handled: false, reason: 'TARGET_MISMATCH', requestId };
     }
 
+    // Verify correlation: partial or uncorrelated response cannot become terminal
+    if (status === 'completed' && this.correlator && this.correlator.activeNonces?.has(requestId)) {
+      const active = this.correlator.activeNonces.get(requestId);
+      const expectedNonce = typeof active === 'object' && active !== null ? active.nonce : active;
+      const correlation = this.correlator.correlate({
+        requestId,
+        expectedNonce,
+        rawResponse: response
+      });
+      if (!correlation.isAcceptableForSuccess()) {
+        return { handled: false, reason: 'CORRELATION_NOT_VERIFIED', requestId };
+      }
+    }
+
     try {
       if (request.taskId) {
         this.mailbox.submitTaskResult({
@@ -281,7 +295,11 @@ export class DesktopControlPlane extends EventEmitter {
           requestId: env.requestId
         });
         if (sendRes.success) {
-          this.observer.startObservation({ targetApp: appName, requestId: env.requestId });
+          this.observer.startObservation({
+            targetApp: appName,
+            requestId: env.requestId,
+            timeoutMs: env.timeoutMs || ctx.timeoutMs || 90000
+          });
           return new TransportResult({
             outcome: TransportOutcome.SENT_UNCONFIRMED,
             routeId: 'accessibility',

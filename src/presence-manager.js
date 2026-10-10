@@ -314,6 +314,20 @@ export class PresenceManager {
     };
   }
 
+  isAgentOnline(agentId, ttlMs = this.ttlMs) {
+    if (!agentId) return false;
+    const norm = (CONFIG.AGENT_IDENTITIES || []).find(id => id.toLowerCase() === agentId.toLowerCase()) || agentId;
+    const stmt = this.db.prepare(`SELECT * FROM agent_presence WHERE agent_id = ?`);
+    const rows = stmt.all(norm);
+    const now = Date.now();
+    for (const r of rows) {
+      const isRecent = (now - Date.parse(r.last_heartbeat)) <= ttlMs;
+      const processAlive = r.pid ? this.isProcessAlive(r.pid) : true;
+      if (r.connected === 1 && isRecent && processAlive) return true;
+    }
+    return false;
+  }
+
   listAgents(ttlMs = this.ttlMs) {
     const stmt = this.db.prepare(`SELECT * FROM agent_presence ORDER BY last_heartbeat DESC`);
     const rows = stmt.all();

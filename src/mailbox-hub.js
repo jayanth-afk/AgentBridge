@@ -22,10 +22,11 @@ export const TERMINAL_REQUEST_STATES = Object.freeze(new Set([
 ]));
 
 export class MailboxHub {
-  constructor(auditLogger, taskManager = null, eventBus = null) {
+  constructor(auditLogger, taskManager = null, eventBus = null, presenceManager = null) {
     this.logger = auditLogger;
     this.db = auditLogger?.db;
     this.eventBus = eventBus || new EventBus(auditLogger);
+    this.presence = presenceManager || null;
     this.tasks = taskManager || new TaskManager(auditLogger, null, this.eventBus);
     if (!this.tasks.eventBus && this.eventBus) {
       this.tasks.eventBus = this.eventBus;
@@ -51,6 +52,14 @@ export class MailboxHub {
     if (this.eventBus && !this.eventBus.tracer) {
       this.eventBus.tracer = this.tracer;
     }
+  }
+
+  async askAgentAsync(options) {
+    return this.askAgent({ ...options, asyncMode: true });
+  }
+
+  async waitForResponse(requestId, timeoutMs = 90000) {
+    return this.eventBus.waitForResponse({ requestId, timeoutMs });
   }
 
   registerAgentHandler(agentId, handler) {
@@ -647,6 +656,23 @@ export class MailboxHub {
           timestamp: outcome.completedAt || new Date().toISOString()
         };
       } else if (outcome.status === 'timeout') {
+        const isAgentOnline = this.presence && typeof this.presence.isAgentOnline === 'function'
+          ? this.presence.isAgentOnline(existingReq.to_agent)
+          : true;
+        let timeoutReason = 'REMOTE_EXECUTION_TIMEOUT';
+        if (!isAgentOnline) {
+          timeoutReason = 'REMOTE_AGENT_OFFLINE';
+        } else {
+          const curTask = this.tasks ? this.tasks.getTask(existingReq.task_id, false) : null;
+          if (curTask?.status === 'completed') {
+            timeoutReason = 'DELIVERY_PENDING';
+          } else if (curTask?.status === 'in_progress' || curTask?.status === 'claimed') {
+            timeoutReason = 'REMOTE_STILL_EXECUTING';
+          } else if (curTask?.status === 'pending') {
+            timeoutReason = 'DISPATCH_PENDING_UNCLAIMED';
+          }
+        }
+
         return {
           mode: 'request_timeout',
           fromAgent: existingReq.from_agent,
@@ -657,6 +683,8 @@ export class MailboxHub {
           question: existingReq.question,
           status: 'timeout',
           error: outcome.error || `Timed out after ${timeoutMs}ms waiting for response from ${existingReq.to_agent}`,
+          timeoutReason,
+          remoteAgentOnline: isAgentOnline,
           recoverable: true
         };
       } else {
@@ -835,11 +863,22 @@ export class MailboxHub {
         timestamp: outcome.completedAt || new Date().toISOString()
       };
     } else if (outcome.status === 'timeout') {
-      // A caller's wait deadline is not the task's execution deadline.  In
-      // particular, native desktop turns may keep generating after this
-      // waiter returns.  Do not overwrite the durable request state here:
-      // doing so made a still-deliverable request look terminal to readers
-      // and obscured its eventual correlated result.
+      const isAgentOnline = this.presence && typeof this.presence.isAgentOnline === 'function'
+        ? this.presence.isAgentOnline(normTo)
+        : true;
+      let timeoutReason = 'REMOTE_EXECUTION_TIMEOUT';
+      if (!isAgentOnline) {
+        timeoutReason = 'REMOTE_AGENT_OFFLINE';
+      } else {
+        const curTask = this.tasks ? this.tasks.getTask(task.id, false) : null;
+        if (curTask?.status === 'completed') {
+          timeoutReason = 'DELIVERY_PENDING';
+        } else if (curTask?.status === 'in_progress' || curTask?.status === 'claimed') {
+          timeoutReason = 'REMOTE_STILL_EXECUTING';
+        } else if (curTask?.status === 'pending') {
+          timeoutReason = 'DISPATCH_PENDING_UNCLAIMED';
+        }
+      }
 
       return {
         mode: 'request_timeout',
@@ -851,6 +890,8 @@ export class MailboxHub {
         question,
         status: 'timeout',
         error: outcome.error || `Timed out after ${timeoutMs}ms waiting for response from ${normTo}`,
+        timeoutReason,
+        remoteAgentOnline: isAgentOnline,
         recoverable: true
       };
     } else {
@@ -961,7 +1002,7 @@ export class MailboxHub {
             targetDb.prepare(`
               UPDATE bridge_requests
               SET status = ?, response = ?, error = ?, updated_at = ?, completed_at = ?
-              WHERE request_id = ?
+              WHERE request_id = ? AND status NOT IN ('completed', 'failed', 'cancelled')
             `).run(status, resultStr, error, now, now, requestId);
           } catch (updErr) {
             this.logger?.debug?.('Failed to update bridge_requests in submitTaskResult', updErr);
@@ -1028,6 +1069,22 @@ export class MailboxHub {
 
       if (stageEventFn) {
         if (requestId) {
+          const eventType = status === 'completed' ? 'response_ready' : 'response_failed';
+          stageEventFn({
+            type: eventType,
+            agentId: recipient,
+            fromAgent: agentId,
+            conversationId: conversationId || `conv_task_${taskId}`,
+            requestId,
+            taskId,
+            status,
+            payload: {
+              snippet,
+              status,
+              error: error ? (error.length > 80 ? error.slice(0, 80) + '...' : error) : null
+            },
+            dedupKey: `resp_ready_${requestId}_${status}`
+          });
           stageEventFn({
             type: 'response_delivered',
             agentId: recipient,
@@ -1127,6 +1184,55 @@ export class MailboxHub {
     return res;
   }
 
+  acknowledgeDelivery({ requestId, agentId = null, clientTimestamp = null }) {
+    if (!requestId || typeof requestId !== 'string') {
+      throw new Error('requestId is required to acknowledge delivery.');
+    }
+    const row = this.db.prepare('SELECT * FROM bridge_requests WHERE request_id = ?').get(requestId);
+    if (!row) {
+      throw new Error(`Request '${requestId}' not found.`);
+    }
+
+    const normCaller = agentId ? (normalizeAgentId(agentId) || agentId) : null;
+    const now = new Date().toISOString();
+
+    if (this.tracer) {
+      this.tracer.mark({
+        requestId,
+        stage: LifecycleStage.DELIVERY_ACKNOWLEDGED,
+        taskId: row.task_id,
+        agentId: normCaller || row.from_agent,
+        meta: {
+          acknowledgedBy: normCaller || row.from_agent,
+          clientTimestamp,
+          status: row.status
+        }
+      });
+    }
+
+    try {
+      this.db.prepare(`
+        UPDATE bridge_requests
+        SET delivery_acknowledged_at = ?, updated_at = ?
+        WHERE request_id = ?
+      `).run(now, now, requestId);
+    } catch {}
+
+    this.logger?.log?.({
+      agentId: normCaller || row.from_agent,
+      action: 'delivery_acknowledged',
+      status: 'success',
+      details: { requestId, taskId: row.task_id, clientTimestamp }
+    });
+
+    return {
+      requestId,
+      status: 'acknowledged',
+      acknowledgedAt: now,
+      acknowledgedBy: normCaller || row.from_agent
+    };
+  }
+
   _isAuthorizedParty(fromAgent, toAgent, caller) {
     if (!caller) return true; // Direct internal / unauthenticated library call
     if (typeof caller === 'object' && (caller.isPrivileged === true || caller.isInternal === true)) {
@@ -1187,7 +1293,8 @@ export class MailboxHub {
       quarantineReason: art?.quarantineReason || null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
-      completedAt: row.completed_at
+      completedAt: row.completed_at,
+      deliveryAcknowledgedAt: row.delivery_acknowledged_at || null
     };
   }
 
@@ -1358,14 +1465,35 @@ export class MailboxHub {
       }
     }
 
+    let raceLost = false;
+    let winnerRow = null;
     const now = new Date().toISOString();
 
     const directWork = (targetDb, stageEventFn = null) => {
-      targetDb.prepare(`
+      const updateResult = targetDb.prepare(`
         UPDATE bridge_requests
         SET status = ?, response = ?, error = ?, updated_at = ?, completed_at = ?
-        WHERE request_id = ?
+        WHERE request_id = ? AND status NOT IN ('completed', 'failed', 'cancelled')
       `).run(status, resultStr, error, now, now, requestId);
+
+      if (updateResult.changes === 0) {
+        raceLost = true;
+        winnerRow = targetDb.prepare('SELECT * FROM bridge_requests WHERE request_id = ?').get(requestId);
+        if (this.tasks?.attempts) {
+          try {
+            this.tasks.attempts.quarantineLateResponse({
+              attemptId: attemptId || `late_race_${requestId}_${agentId}`,
+              requestId,
+              epoch: epoch || 0,
+              payload: response || error,
+              reason: `Concurrent answer race lost: request '${requestId}' was already terminal ('${winnerRow?.status}')`
+            });
+          } catch (qErr) {
+            this.logger?.debug?.('Failed to quarantine concurrent losing response', qErr);
+          }
+        }
+        return;
+      }
 
       if (status === 'completed' && resultStr) {
         try {
@@ -1429,7 +1557,7 @@ export class MailboxHub {
       });
     } else {
       directWork(this.db, null);
-      if (this.eventBus) {
+      if (!raceLost && this.eventBus) {
         this.eventBus.publish({
           type: 'response_delivered',
           agentId: reqRow.from_agent,
@@ -1446,6 +1574,17 @@ export class MailboxHub {
           dedupKey: `direct_resp_${requestId}_${status}`
         });
       }
+    }
+
+    if (raceLost) {
+      return {
+        status: 'quarantined',
+        quarantined: true,
+        requestId,
+        answeredBy: agentId,
+        error: `Request '${requestId}' is already terminal ('${winnerRow?.status || 'completed'}'); concurrent response quarantined.`,
+        authoritativeResult: winnerRow?.response ?? null
+      };
     }
 
     return {

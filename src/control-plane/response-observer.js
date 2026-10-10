@@ -33,7 +33,7 @@ export class ResponseObserver extends EventEmitter {
   /**
    * Begin observing target application for a response to requestId.
    */
-  startObservation({ targetApp, requestId, timeoutMs = 25000 }) {
+  startObservation({ targetApp, requestId, timeoutMs = 90000 }) {
     if (this.activeObservations.has(requestId)) {
       return this.activeObservations.get(requestId);
     }
@@ -43,8 +43,9 @@ export class ResponseObserver extends EventEmitter {
       targetApp,
       state: ObserverState.REQUEST_SENT,
       startTime: Date.now(),
-      timeoutMs,
+      timeoutMs: timeoutMs || this.options.timeoutMs || 90000,
       lastText: '',
+      stableTicks: 0,
       timer: null,
       completed: false
     };
@@ -82,6 +83,7 @@ export class ResponseObserver extends EventEmitter {
       // Any text regions appearing after marker belong to assistant response
       const followingRegions = probe.textRegions.slice(markerIdx + 1);
       const currentFullText = followingRegions.map(r => r.snippet).join('\n').trim();
+      const isGenerating = Boolean(probe.isGenerating || probe.hasStopButton || probe.streaming);
 
       if (currentFullText.length > 0 && obs.state === ObserverState.REQUEST_SENT) {
         obs.state = ObserverState.ASSISTANT_STARTED;
@@ -93,6 +95,7 @@ export class ResponseObserver extends EventEmitter {
         const delta = currentFullText.slice(obs.lastText.length);
         obs.state = ObserverState.ASSISTANT_STREAMING;
         obs.lastText = currentFullText;
+        obs.stableTicks = 0;
 
         // Emit aggregated delta
         if (delta.length >= this.deltaAggregationThreshold || followingRegions.length > 1) {
@@ -103,11 +106,19 @@ export class ResponseObserver extends EventEmitter {
           });
         }
       } else if (currentFullText.length > 0 && currentFullText === obs.lastText && obs.state === ObserverState.ASSISTANT_STREAMING) {
-        // Text has stabilized across ticks -> assistant has completed generation
-        this._finish(obs, ObserverState.ASSISTANT_COMPLETED, {
-          response: currentFullText,
-          durationMs: Date.now() - obs.startTime
-        });
+        if (isGenerating) {
+          obs.stableTicks = 0;
+        } else {
+          obs.stableTicks = (obs.stableTicks || 0) + 1;
+          const minStableTicks = this.options.minStableTicks !== undefined ? this.options.minStableTicks : 2;
+          if (obs.stableTicks >= minStableTicks) {
+            // Text has stabilized across required ticks -> assistant has completed generation
+            this._finish(obs, ObserverState.ASSISTANT_COMPLETED, {
+              response: currentFullText,
+              durationMs: Date.now() - obs.startTime
+            });
+          }
+        }
       }
     } catch (err) {
       // Non-fatal error during tick, continue polling until timeout

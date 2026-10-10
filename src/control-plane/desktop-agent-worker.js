@@ -72,6 +72,15 @@ export class DesktopAgentWorker extends EventEmitter {
     this._turnChain = Promise.resolve();
   }
 
+  _recordDelivered(requestId) {
+    if (!requestId) return;
+    this.delivered.add(requestId);
+    if (this.delivered.size > 2000) {
+      const oldest = this.delivered.values().next().value;
+      this.delivered.delete(oldest);
+    }
+  }
+
   registerHandler(name, handler) {
     this.customHandlers.set(name, handler);
   }
@@ -181,7 +190,7 @@ export class DesktopAgentWorker extends EventEmitter {
     }
     if (!request) return { handled: false, requestId, error: 'REQUEST_NOT_FOUND' };
     if (['completed', 'failed', 'cancelled'].includes(request.status)) {
-      this.delivered.add(requestId);
+      this._recordDelivered(requestId);
       return { handled: false, requestId, error: 'REQUEST_ALREADY_TERMINAL', status: request.status };
     }
     if (request.toAgent && request.toAgent !== this.agentId) {
@@ -216,7 +225,7 @@ export class DesktopAgentWorker extends EventEmitter {
       if (sensitiveCheck.sensitive) {
         const errorMsg = sensitiveCheck.reason || SECURITY_DENIAL_MESSAGE;
         this._settle(request, { status: 'failed', error: errorMsg });
-        this.delivered.add(requestId);
+        this._recordDelivered(requestId);
         this.stats.failed++;
         const payload = {
           requestId,
@@ -244,7 +253,7 @@ export class DesktopAgentWorker extends EventEmitter {
       if (isVerificationTokenRequest(qText)) {
         const token = getRegisteredVerificationToken(this.agentId);
         this._settle(request, { status: 'completed', result: token });
-        this.delivered.add(requestId);
+        this._recordDelivered(requestId);
         this.stats.delivered++;
         const payload = {
           requestId,
@@ -276,7 +285,7 @@ export class DesktopAgentWorker extends EventEmitter {
             const result = await handler(request);
             const responseText = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
             this._settle(request, { status: 'completed', result: responseText });
-            this.delivered.add(requestId);
+            this._recordDelivered(requestId);
             this.stats.delivered++;
             const payload = { requestId, response: responseText, latencyMs: Date.now() - t0, status: 'COMPLETED' };
             this.emit('delivered', payload);
@@ -292,7 +301,7 @@ export class DesktopAgentWorker extends EventEmitter {
       if (hasResponse) {
         this._trace(requestId, LifecycleStage.PROVIDER_RESPONSE_COMPLETED, { status: result.status, latencyMs: result.latencyMs }, request.taskId);
         this._settle(request, { status: 'completed', result: result.response });
-        this.delivered.add(requestId);
+        this._recordDelivered(requestId);
         this.stats.delivered++;
         const payload = { requestId, response: result.response, latencyMs: Date.now() - t0, status: result.status };
         this.emit('delivered', payload);

@@ -62,7 +62,8 @@ test('Agent Bridge Tool Matrix — all registered tools exercised', async (t) =>
 
   const ctx = {
     controller, mailbox, taskManager, collaboration, fileActivity, logger, git,
-    presence, identity, diagnostics, cache, eventBus, requestExplainer, boundAgentId: AGENT
+    presence, identity, diagnostics, cache, eventBus, requestExplainer, boundAgentId: AGENT,
+    allowAuditRead: true
   };
 
   // ---- fixtures -----------------------------------------------------------

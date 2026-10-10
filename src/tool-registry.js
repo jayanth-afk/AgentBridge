@@ -145,6 +145,18 @@ export class ToolRegistry {
     // Alias bridge_search_tools -> bridge_discover_tools
     const resolvedName = name === 'bridge_search_tools' ? 'bridge_discover_tools' : name;
     let tool = this.tools.get(resolvedName);
+    if (!tool && resolvedName === 'bridge_acknowledge_delivery') {
+      tool = {
+        name: 'bridge_acknowledge_delivery',
+        handler: async (args, ctx) => {
+          const callerAgentId = ctx.agentId || ctx.boundAgentId || args.agentId || 'anonymous';
+          return ctx.mailbox.acknowledgeDelivery({
+            requestId: args.requestId,
+            agentId: callerAgentId
+          });
+        }
+      };
+    }
     if (!tool && resolvedName === 'bridge_explain_request') {
       tool = {
         name: 'bridge_explain_request',
@@ -170,21 +182,39 @@ export class ToolRegistry {
     // Resolve caller identity through AgentIdentityManager. The resolved
     // identity is authoritative for authorization; a caller cannot substitute
     // an arbitrary agentId/fromAgent for a different identity.
-    let callerAgentId = rawArgs.agentId || rawArgs.fromAgent || context.agentId || null;
+    let callerAgentId = null;
     if (context.identity) {
-      const resolved = context.identity.resolveIdentity(callerAgentId, {
+      const candidate = rawArgs.agentId || rawArgs.fromAgent || context.agentId || null;
+      const resolved = context.identity.resolveIdentity(candidate, {
         token: rawArgs.token,
         allowCompatibility: context.allowIdentityCompatibility
       });
       const isAuthenticated = context.isPrivileged === true ||
-        (Boolean(context.agentId) && context.agentId.toLowerCase() === (callerAgentId || '').toLowerCase()) ||
+        (Boolean(context.agentId) && context.agentId.toLowerCase() === (resolved.agentId || '').toLowerCase()) ||
         resolved.authenticated === true;
       if (context.requireAuthentication === true && !isAuthenticated) {
         throw new Error(`Unauthorized: caller for tool '${name}' could not be authenticated.`);
       }
+      if (context.agentId && !context.isPrivileged && rawArgs.agentId && String(rawArgs.agentId).trim().toLowerCase() !== String(context.agentId).trim().toLowerCase()) {
+        throw new Error(`Unauthorized: caller '${context.agentId}' cannot impersonate or act as '${rawArgs.agentId}'.`);
+      }
       callerAgentId = resolved.agentId;
-    } else if (!callerAgentId) {
-      callerAgentId = 'freebuff';
+    } else if (context.agentId) {
+      // Bound/authenticated identity from transport
+      const boundId = String(context.agentId).trim().toLowerCase();
+      if (!context.isPrivileged) {
+        if (rawArgs.agentId && String(rawArgs.agentId).trim().toLowerCase() !== boundId) {
+          throw new Error(`Unauthorized: caller '${context.agentId}' cannot impersonate or act as '${rawArgs.agentId}'.`);
+        }
+        if (rawArgs.fromAgent && String(rawArgs.fromAgent).trim().toLowerCase() !== boundId) {
+          throw new Error(`Unauthorized: caller '${context.agentId}' cannot send as '${rawArgs.fromAgent}'.`);
+        }
+      }
+      callerAgentId = context.agentId;
+    } else if (context.isPrivileged === true) {
+      callerAgentId = rawArgs.agentId || rawArgs.fromAgent || 'system';
+    } else {
+      callerAgentId = rawArgs.agentId || rawArgs.fromAgent || 'freebuff';
     }
 
     // Attach resolved agentId to arguments
@@ -1480,6 +1510,14 @@ export class ToolRegistry {
         }
       },
       handler: async (args, ctx) => {
+        const callerAgentId = args.agentId || ctx.agentId;
+        const isPrivileged = Boolean(ctx.isPrivileged) || callerAgentId === 'system' || Boolean(ctx.allowAuditRead);
+        if (!isPrivileged) {
+          const err = new Error('Forbidden: audit logs require privileged administrative access.');
+          err.code = 'UNAUTHORIZED_AUDIT_ACCESS';
+          err.statusCode = 403;
+          throw err;
+        }
         const limit = args.limit || 20;
         const logs = ctx.logger.getRecentLogs(limit);
         if (args.compact !== false) {
@@ -1551,22 +1589,47 @@ export class ToolRegistry {
 
     this.registerTool({
       name: 'bridge_artifact_read',
-      description: 'Authorized retrieval of an artifact\'s REAL bytes as base64, with SHA-256 integrity verification. Restricted to the storing agent and explicitly authorized agents.',
+      description: 'Authorized retrieval of an artifact\'s REAL bytes as base64, with SHA-256 integrity verification. Supports chunked reads for large files (> 8 MiB) via offset/length.',
       inputSchema: {
         type: 'object',
         properties: {
           agentId: { type: 'string' },
           artifactId: { type: 'string' },
-          expectedSha256: { type: 'string', description: 'Optional hash to assert the retrieved bytes against' }
+          expectedSha256: { type: 'string', description: 'Optional hash to assert the retrieved bytes against' },
+          offset: { type: 'number', description: 'Byte offset for chunked reading (0-indexed)' },
+          length: { type: 'number', description: 'Chunk length in bytes (max 8 MiB)' }
         },
         required: ['artifactId']
       },
       handler: async (args, ctx) => {
         const store = await resolveArtifactStore(ctx);
-        // The 8 MiB inline ceiling is enforced from metadata inside `read` so the
-        // bytes are never loaded into memory only to be rejected afterwards.
+        const callerAgent = args.agentId || ctx.agentId;
+        const isChunked = args.offset !== undefined || args.length !== undefined;
+
+        if (isChunked) {
+          const chunk = store.readChunk(args.artifactId, {
+            agentId: callerAgent,
+            offset: args.offset || 0,
+            length: args.length || ArtifactStore.maxInlineBytes
+          });
+          const hashMatches = args.expectedSha256 ? chunk.overallSha256 === args.expectedSha256 : true;
+          return {
+            ...chunk.metadata,
+            offset: chunk.offset,
+            bytesRead: chunk.length,
+            totalBytes: chunk.totalBytes,
+            eof: chunk.eof,
+            chunkSha256: chunk.chunkSha256,
+            overallSha256: chunk.overallSha256,
+            integrityVerified: chunk.integrityVerified && hashMatches,
+            expectedSha256Matches: hashMatches,
+            encoding: 'base64',
+            dataBase64: chunk.bytes.toString('base64')
+          };
+        }
+
         const { bytes, metadata, integrityVerified } = store.read(args.artifactId, {
-          agentId: args.agentId,
+          agentId: callerAgent,
           maxBytes: ArtifactStore.maxInlineBytes
         });
         const hashMatches = args.expectedSha256 ? metadata.sha256 === args.expectedSha256 : true;
@@ -1582,13 +1645,15 @@ export class ToolRegistry {
 
     this.registerTool({
       name: 'bridge_artifact_cleanup',
-      description: 'Delete expired artifact bytes and mark their metadata expired.',
+      description: 'Delete expired artifact bytes and mark their metadata expired. Non-privileged callers may only clean up their own artifacts.',
       inputSchema: { type: 'object', properties: { agentId: { type: 'string' } } },
       handler: async (args, ctx) => {
         const store = await resolveArtifactStore(ctx);
-        const result = store.cleanupExpired();
+        const callerAgent = args.agentId || ctx.agentId;
+        const isPrivileged = Boolean(ctx.isPrivileged || callerAgent === 'system');
+        const result = store.cleanupExpired(Date.now(), { agentId: callerAgent, isPrivileged });
         ctx.logger?.log?.({
-          agentId: args.agentId,
+          agentId: callerAgent,
           action: 'artifact_cleanup',
           status: 'success',
           details: result

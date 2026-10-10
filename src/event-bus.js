@@ -89,7 +89,8 @@ export class EventBus extends EventEmitter {
         timeout_ms INTEGER DEFAULT 30000,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        completed_at TEXT
+        completed_at TEXT,
+        delivery_acknowledged_at TEXT
       );
 
       CREATE TABLE IF NOT EXISTS agent_event_cursors (
@@ -118,6 +119,10 @@ export class EventBus extends EventEmitter {
         this.db.exec(`ALTER TABLE bridge_events ADD COLUMN dedup_key TEXT;`);
         this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_bridge_events_dedup ON bridge_events(dedup_key);`);
       }
+    } catch {}
+
+    try {
+      this.db.exec(`ALTER TABLE bridge_requests ADD COLUMN delivery_acknowledged_at TEXT;`);
     } catch {}
   }
 
@@ -187,18 +192,42 @@ export class EventBus extends EventEmitter {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    const insertInfo = stmt.run(
-      timestamp,
-      type,
-      agentId,
-      fromAgent,
-      convId,
-      requestId,
-      taskId,
-      status,
-      payloadStr,
-      dedupKey
-    );
+    let insertInfo;
+    try {
+      insertInfo = stmt.run(
+        timestamp,
+        type,
+        agentId,
+        fromAgent,
+        convId,
+        requestId,
+        taskId,
+        status,
+        payloadStr,
+        dedupKey
+      );
+    } catch (err) {
+      if (dedupKey && (err.message?.includes('UNIQUE constraint failed') || err.code === 'SQLITE_CONSTRAINT_UNIQUE')) {
+        const existing = this.db.prepare('SELECT * FROM bridge_events WHERE dedup_key = ?').get(dedupKey);
+        if (existing) {
+          return {
+            eventId: existing.event_id,
+            type: existing.type,
+            agentId: existing.agent_id,
+            fromAgent: existing.from_agent,
+            conversationId: existing.conversation_id,
+            requestId: existing.request_id,
+            taskId: existing.task_id,
+            status: existing.status,
+            payload: existing.payload ? (() => { try { return JSON.parse(existing.payload); } catch { return existing.payload; } })() : null,
+            timestamp: existing.timestamp,
+            dedupKey: existing.dedup_key,
+            isDuplicate: true
+          };
+        }
+      }
+      throw err;
+    }
 
     // The SQLite driver already returns the generated monotonically increasing
     // event_id from run(); a second `SELECT last_insert_rowid()` round trip per
@@ -386,7 +415,7 @@ export class EventBus extends EventEmitter {
 
   drainEventsForAgent(agentId) {
     if (this.isClosed) return;
-    const currentCursor = this.cursorCache.get(agentId) ?? this.getCursor(agentId);
+    let currentCursor = this.cursorCache.get(agentId) ?? this.getCursor(agentId);
 
     const query = `
       SELECT * FROM bridge_events
@@ -395,55 +424,64 @@ export class EventBus extends EventEmitter {
       LIMIT 100
     `;
 
-    let rows = [];
-    try {
-      rows = this.db.prepare(query).all(currentCursor, agentId);
-    } catch (err) {
-      return;
-    }
-
-    if (!rows || rows.length === 0) return;
-
-    let maxId = currentCursor;
+    const stmt = this.db.prepare(query);
     const handlers = this.subscribers.get(agentId);
+    let iterations = 0;
+    const maxIterations = 100; // Cap at 10,000 events per drain invocation
 
-    for (const r of rows) {
-      const event = {
-        eventId: r.event_id,
-        type: r.type,
-        agentId: r.agent_id,
-        fromAgent: r.from_agent,
-        conversationId: r.conversation_id,
-        requestId: r.request_id,
-        taskId: r.task_id,
-        status: r.status,
-        payload: r.payload ? (() => { try { return JSON.parse(r.payload); } catch { return r.payload; } })() : null,
-        timestamp: r.timestamp
-      };
-
-      if (r.event_id > maxId) {
-        maxId = r.event_id;
+    while (!this.isClosed && iterations < maxIterations) {
+      iterations++;
+      let rows = [];
+      try {
+        rows = stmt.all(currentCursor, agentId);
+      } catch (err) {
+        return;
       }
 
-      // Also wake any correlated waiter for this request (durable row decides).
-      if (event.requestId) {
-        this._settleWaiter(event.requestId, 'event');
-      }
+      if (!rows || rows.length === 0) break;
 
-      if (handlers) {
-        for (const handler of handlers) {
-          try {
-            handler(event);
-          } catch (err) {
-            this.emit('error', err);
+      let maxId = currentCursor;
+      for (const r of rows) {
+        const event = {
+          eventId: r.event_id,
+          type: r.type,
+          agentId: r.agent_id,
+          fromAgent: r.from_agent,
+          conversationId: r.conversation_id,
+          requestId: r.request_id,
+          taskId: r.task_id,
+          status: r.status,
+          payload: r.payload ? (() => { try { return JSON.parse(r.payload); } catch { return r.payload; } })() : null,
+          timestamp: r.timestamp
+        };
+
+        if (r.event_id > maxId) {
+          maxId = r.event_id;
+        }
+
+        // Also wake any correlated waiter for this request (durable row decides).
+        if (event.requestId) {
+          this._settleWaiter(event.requestId, 'event');
+        }
+
+        if (handlers) {
+          for (const handler of handlers) {
+            try {
+              handler(event);
+            } catch (err) {
+              this.emit('error', err);
+            }
           }
         }
       }
-    }
 
-    if (maxId > currentCursor) {
-      this.cursorCache.set(agentId, maxId);
-      this.updateCursor(agentId, maxId);
+      if (maxId > currentCursor) {
+        this.cursorCache.set(agentId, maxId);
+        this.updateCursor(agentId, maxId);
+        currentCursor = maxId;
+      }
+
+      if (rows.length < 100) break;
     }
   }
 
@@ -519,7 +557,11 @@ export class EventBus extends EventEmitter {
    * Correlated Request/Response Waiter:
    * Keeps caller attached to correlated response channel without manual polling.
    */
-  async waitForResponse({ requestId, agentId = null, taskId = null, attemptId = null, routeId = null, timeoutMs = 30000 }) {
+  async waitForResponse(reqIdOrOpts, maybeOpts = {}) {
+    const opts = (typeof reqIdOrOpts === 'string')
+      ? { requestId: reqIdOrOpts, ...maybeOpts }
+      : (reqIdOrOpts || {});
+    const { requestId, agentId = null, taskId = null, attemptId = null, routeId = null, timeoutMs = 30000 } = opts;
     if (!requestId) throw new Error('requestId is required to wait for response');
 
     this.ensureWatcherStarted();
@@ -542,7 +584,8 @@ export class EventBus extends EventEmitter {
             requestId,
             status: 'failed',
             response: null,
-            error: err.message
+            error: err.message,
+            code: err.code || 'EVENT_BUS_CLOSED'
           });
         },
         timer: null,
@@ -810,9 +853,23 @@ export class EventBus extends EventEmitter {
   close() {
     this.isClosed = true;
     this.stopWatcher();
+    const closeErr = new Error('EVENT_BUS_CLOSED: Event bus was closed before response was received');
+    closeErr.code = 'EVENT_BUS_CLOSED';
     for (const waiters of this.responseWaiters.values()) {
       for (const waiter of waiters) {
         if (waiter.timer) clearTimeout(waiter.timer);
+        try {
+          if (typeof waiter.reject === 'function') {
+            waiter.reject(closeErr);
+          } else if (typeof waiter.resolve === 'function') {
+            waiter.resolve({
+              requestId: waiter.requestId,
+              status: 'failed',
+              response: null,
+              error: closeErr.message
+            });
+          }
+        } catch {}
       }
     }
     this.responseWaiters.clear();

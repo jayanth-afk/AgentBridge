@@ -64,10 +64,21 @@ export class TransactionalOutbox {
       started = true;
     } catch (err) {
       if (err.message && err.message.includes('cannot start a transaction')) {
-        return workFn(this._currentTxContext || {
+        if (this._currentTxContext) {
+          return workFn(this._currentTxContext);
+        }
+        const fallbackStaged = [];
+        const fallbackContext = {
           db: this.db,
-          stageEvent: (eventParams) => this._stageEventInTransaction(eventParams)
-        });
+          stageEvent: (eventParams) => {
+            const staged = this._stageEventInTransaction(eventParams);
+            if (staged) fallbackStaged.push(staged);
+            return staged;
+          }
+        };
+        const res = workFn(fallbackContext);
+        this._flushStagedEvents(fallbackStaged);
+        return res;
       }
       throw err;
     }

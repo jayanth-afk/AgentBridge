@@ -81,16 +81,21 @@ export const CONFIG = {
     // `control_plane.api_key` accepts a literal value or an `env:NAME`
     // indirection. A present but unresolvable reference throws here at startup.
     const isPlaceholder = (k) => typeof k === 'string' && (/^YOUR_API_KEY/i.test(k.trim()) || k.trim() === '<api-key>');
-    let rawKey = process.env.CONTROL_PLANE_API_KEY_CONFIG ?? process.env.CONTROL_PLANE_API_KEY;
+    const envKey = process.env.CONTROL_PLANE_API_KEY_CONFIG ?? process.env.CONTROL_PLANE_API_KEY;
+    const hasEnvKey = Boolean(envKey && !isPlaceholder(envKey));
+    let rawKey = envKey;
     if (isPlaceholder(rawKey)) rawKey = null;
     if (!rawKey && process.platform === 'darwin') {
       const keychainSecret = loadKeychainSecret('agent-bridge', 'control_plane_api_key');
       if (keychainSecret) rawKey = keychainSecret;
     }
     const requireFlag = process.env.CONTROL_PLANE_REQUIRE_API_KEY;
+    const requireApiKey = requireFlag !== undefined
+      ? (requireFlag === '1' || requireFlag === 'true')
+      : hasEnvKey;
     return {
       API_KEY: resolveSecret(rawKey, { name: 'control_plane.api_key' }),
-      REQUIRE_API_KEY: requireFlag === '1' || requireFlag === 'true'
+      REQUIRE_API_KEY: requireApiKey
     };
   })(),
 

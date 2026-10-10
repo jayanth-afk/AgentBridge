@@ -117,12 +117,38 @@ export class GeminiDesktopSession extends ModelExecutionAdapter {
     }
 
     const hasResponse = Boolean(inner && inner.response && String(inner.response).trim());
+    let isCorrelated = false;
+    let cleanedResponse = null;
+
+    if (hasResponse) {
+      const respStr = String(inner.response);
+      const foundMarker = this.correlator?.extractMarker ? this.correlator.extractMarker(respStr) : null;
+      const hasExactMarker = this.correlator?.hasMarker ? this.correlator.hasMarker(respStr, resolvedId) : false;
+      const mentionsBareId = Boolean(resolvedId && respStr.includes(resolvedId) && !hasExactMarker);
+
+      if (foundMarker && foundMarker !== resolvedId) {
+        // Marker for a different request
+        isCorrelated = false;
+      } else if (mentionsBareId) {
+        // Un-bracketed bare requestId mention: reject per Section 11 / Finding 4.1-4.3
+        isCorrelated = false;
+      } else if (hasExactMarker) {
+        isCorrelated = true;
+        cleanedResponse = typeof this.correlator?.cleanResponse === 'function'
+          ? this.correlator.cleanResponse(respStr)
+          : respStr;
+      } else if (inner.status !== 'CORRELATION_FAILED' && Boolean(inner.success ?? inner.ok)) {
+        isCorrelated = true;
+        cleanedResponse = respStr;
+      }
+    }
+
     const result = {
-      success: Boolean(inner?.success && hasResponse),
-      status: inner?.status || (hasResponse ? 'COMPLETED' : 'UNKNOWN'),
-      response: hasResponse ? inner.response : null,
-      error: hasResponse ? null : (inner?.error || inner?.status || 'GEMINI_RESPONSE_FAILED'),
-      modelTurnConfirmed: hasResponse,
+      success: Boolean(inner?.success && isCorrelated),
+      status: !hasResponse ? (inner?.status || 'UNKNOWN') : (!isCorrelated ? 'CORRELATION_FAILED' : (inner?.status || 'COMPLETED')),
+      response: isCorrelated ? (cleanedResponse ?? inner.response) : null,
+      error: isCorrelated ? null : (hasResponse ? 'CORRELATION_FAILED: Response failed correlation verification' : (inner?.error || inner?.status || 'GEMINI_RESPONSE_FAILED')),
+      modelTurnConfirmed: isCorrelated,
       requestId: resolvedId,
       transport: 'gemini-desktop-accessibility',
       uiSubmitted: !['APP_NOT_RUNNING', 'NO_WINDOW', 'INPUT_NOT_FOUND', 'APP_NOT_AVAILABLE'].includes(inner?.status),

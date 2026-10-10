@@ -161,7 +161,8 @@ test('Autonomous Multi-Agent Consumption & Execution Suite', async (t) => {
       presenceManager: presence,
       projectController: controller,
       pollIntervalMinMs: 50,
-      pollIntervalMaxMs: 200
+      pollIntervalMaxMs: 200,
+      allowSmokeTests: true
     });
 
     runner.start();
@@ -172,7 +173,8 @@ test('Autonomous Multi-Agent Consumption & Execution Suite', async (t) => {
       fromAgent: 'chatgpt-desktop',
       toAgent: 'antigravity-ide',
       title: 'Autonomous Smoke Test Request',
-      instructions: 'Please run autonomous-test in test workspace: create autonomous-test.txt with AUTONOMOUS_OK, read it back, and report completion.'
+      instructions: 'Please run autonomous-test in test workspace: create autonomous-test.txt with AUTONOMOUS_OK, read it back, and report completion.',
+      context: { testMode: true, smokeTest: true }
     });
 
     assert.ok(delegated.id);

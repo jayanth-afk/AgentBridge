@@ -147,21 +147,21 @@ test('End-to-End Autonomous Multi-Agent Collaboration & Lifecycle Suite', async 
         send: async ({ text, requestId }) => ({
           success: true,
           status: 'COMPLETED',
-          response: `[ChatGPT Model Turn]: Coordinated objective decomposition and requirements synthesis for turn ${requestId}.`
+          response: `[AB:${requestId}] [ChatGPT Model Turn]: Coordinated objective decomposition and requirements synthesis for turn ${requestId}.`
         })
       },
       geminiSession: {
         send: async ({ text, requestId }) => ({
           success: true,
           status: 'COMPLETED',
-          response: `[Gemini Model Turn]: Multimodal context ingestion and data layout completed for turn ${requestId}.`
+          response: `[AB:${requestId}] [Gemini Model Turn]: Multimodal context ingestion and data layout completed for turn ${requestId}.`
         })
       },
       claudeSession: {
         send: async ({ text, requestId }) => ({
           success: true,
           status: 'COMPLETED',
-          response: `[Claude Model Turn]: Formal invariant verification and security boundary audit verified for turn ${requestId}.`
+          response: `[AB:${requestId}] [Claude Model Turn]: Formal invariant verification and security boundary audit verified for turn ${requestId}.`
         })
       },
       mailboxHub: mailbox

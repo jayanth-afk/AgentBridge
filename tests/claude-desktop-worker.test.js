@@ -75,7 +75,7 @@ test('Claude Desktop Autonomous Delivery Suite', async (t) => {
       swiftBridge: makeFakeBridge(),
       innerSession: {
         async send({ requestId }) {
-          return { success: true, status: 'COMPLETED', response: `CLAUDE_ANSWER ${requestId}`, latencyMs: 2 };
+          return { success: true, status: 'COMPLETED', response: `[AB:${requestId}]\nCLAUDE_ANSWER ${requestId}`, latencyMs: 2 };
         }
       }
     });

@@ -20,10 +20,12 @@ export class AgentRunner extends EventEmitter {
     eventBus = null,
     pollIntervalMinMs = 50,
     pollIntervalMaxMs = 3000,
-    autoStart = false
+    autoStart = false,
+    allowSmokeTests = false
   }) {
     super();
     this.agentId = agentId;
+    this.allowSmokeTests = Boolean(allowSmokeTests);
     this.mailbox = mailboxHub;
     this.presence = presenceManager;
     this.controller = projectController;
@@ -280,6 +282,13 @@ export class AgentRunner extends EventEmitter {
   }
 
   /**
+   * Alias for executeTaskLogic for task dispatchers
+   */
+  async handleTask(task) {
+    return this.executeTaskLogic(task);
+  }
+
+  /**
    * Autonomous Task Execution Engine.
    */
   async executeTaskLogic(task) {
@@ -495,6 +504,16 @@ export class AgentRunner extends EventEmitter {
 
     // 5. Harmless Smoke Test (autonomous-test or linkage-test)
     if (lower.includes('linkage-test') || lower.includes('autonomous-test') || lower.includes('smoke test')) {
+      const isSmokeTestAuthorized = (
+        isExplicitlyAuthorized ||
+        (this.allowSmokeTests && Boolean(ctx?.smokeTest || ctx?.testMode || task.isSmokeTest))
+      );
+      if (!isSmokeTestAuthorized) {
+        const err = new Error('SECURITY_DENIAL: Natural-language task text cannot activate autonomous smoke-test without explicit test-mode authorization.');
+        err.code = 'UNAUTHORIZED_SMOKE_TEST';
+        throw err;
+      }
+
       const workspace = CONFIG.TEST_WORKSPACE;
       if (!fs.existsSync(workspace)) {
         fs.mkdirSync(workspace, { recursive: true });

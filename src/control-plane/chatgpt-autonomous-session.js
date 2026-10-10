@@ -374,12 +374,37 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
       if (typeof onChunk === 'function' && turn.ok && turn.response) {
         try { onChunk(turn.response); } catch {}
       }
+      const hasResponseBg = Boolean(turn && turn.response && String(turn.response).trim());
+      let isCorrelatedBg = false;
+      let cleanedResponseBg = null;
+
+      if (hasResponseBg) {
+        const respStr = String(turn.response);
+        const foundMarker = this.correlator?.extractMarker ? this.correlator.extractMarker(respStr) : null;
+        const hasExactMarker = this.correlator?.hasMarker ? this.correlator.hasMarker(respStr, resolvedId) : false;
+        const mentionsBareId = Boolean(resolvedId && respStr.includes(resolvedId) && !hasExactMarker);
+
+        if (foundMarker && foundMarker !== resolvedId) {
+          isCorrelatedBg = false;
+        } else if (mentionsBareId) {
+          isCorrelatedBg = false;
+        } else if (hasExactMarker) {
+          isCorrelatedBg = true;
+          cleanedResponseBg = typeof this.correlator?.cleanResponse === 'function'
+            ? this.correlator.cleanResponse(respStr)
+            : respStr;
+        } else if (turn.status !== 'CORRELATION_FAILED' && Boolean(turn.ok)) {
+          isCorrelatedBg = true;
+          cleanedResponseBg = respStr;
+        }
+      }
+
       const result = {
-        success: Boolean(turn.ok && turn.response),
-        status: turn.status || (turn.ok ? 'COMPLETED' : 'UNKNOWN'),
-        response: turn.response || null,
-        error: turn.error || null,
-        modelTurnConfirmed: Boolean(turn.ok && turn.response),
+        success: Boolean(turn.ok && isCorrelatedBg),
+        status: !hasResponseBg ? (turn.status || 'UNKNOWN') : (!isCorrelatedBg ? 'CORRELATION_FAILED' : (turn.status || 'COMPLETED')),
+        response: isCorrelatedBg ? (cleanedResponseBg ?? turn.response) : null,
+        error: isCorrelatedBg ? null : (hasResponseBg ? 'CORRELATION_FAILED: Response failed correlation verification' : (turn.error || 'CHATGPT_RESPONSE_FAILED')),
+        modelTurnConfirmed: isCorrelatedBg,
         requestId: resolvedId,
         transport: 'chatgpt-desktop-background-ax',
         uiSubmitted: !['APP_NOT_RUNNING', 'NO_WINDOW', 'CHATGPT_COMPOSER_NOT_FOUND'].includes(turn.status),
@@ -409,13 +434,38 @@ export class ChatGptAutonomousSession extends ModelExecutionAdapter {
       { activate: shouldActivate }
     );
 
+    const hasResponseFg = Boolean(turn && turn.response && String(turn.response).trim());
+    let isCorrelatedFg = false;
+    let cleanedResponseFg = null;
+
+    if (hasResponseFg) {
+      const respStr = String(turn.response);
+      const foundMarker = this.correlator?.extractMarker ? this.correlator.extractMarker(respStr) : null;
+      const hasExactMarker = this.correlator?.hasMarker ? this.correlator.hasMarker(respStr, resolvedId) : false;
+      const mentionsBareId = Boolean(resolvedId && respStr.includes(resolvedId) && !hasExactMarker);
+
+      if (foundMarker && foundMarker !== resolvedId) {
+        isCorrelatedFg = false;
+      } else if (mentionsBareId) {
+        isCorrelatedFg = false;
+      } else if (hasExactMarker) {
+        isCorrelatedFg = true;
+        cleanedResponseFg = typeof this.correlator?.cleanResponse === 'function'
+          ? this.correlator.cleanResponse(respStr)
+          : respStr;
+      } else if (turn.status !== 'CORRELATION_FAILED' && Boolean(turn.ok)) {
+        isCorrelatedFg = true;
+        cleanedResponseFg = respStr;
+      }
+    }
+
     const result = {
-      success: Boolean(turn.ok && turn.response),
-      status: turn.status || (turn.ok ? 'COMPLETED' : 'UNKNOWN'),
-      response: turn.response || null,
-      error: turn.error || null,
+      success: Boolean(turn.ok && isCorrelatedFg),
+      status: !hasResponseFg ? (turn.status || 'UNKNOWN') : (!isCorrelatedFg ? 'CORRELATION_FAILED' : (turn.status || 'COMPLETED')),
+      response: isCorrelatedFg ? (cleanedResponseFg ?? turn.response) : null,
+      error: isCorrelatedFg ? null : (hasResponseFg ? 'CORRELATION_FAILED: Response failed correlation verification' : (turn.error || 'CHATGPT_RESPONSE_FAILED')),
       // Only true when a correlated response was actually observed.
-      modelTurnConfirmed: Boolean(turn.ok && turn.response),
+      modelTurnConfirmed: isCorrelatedFg,
       requestId: resolvedId,
       transport: 'chatgpt-desktop-accessibility',
       uiSubmitted: !['APP_NOT_RUNNING', 'NO_WINDOW', 'CHATGPT_COMPOSER_NOT_FOUND'].includes(turn.status),

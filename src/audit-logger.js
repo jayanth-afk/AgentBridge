@@ -87,7 +87,8 @@ export class AuditLogger {
         timeout_ms INTEGER DEFAULT 30000,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        completed_at TEXT
+        completed_at TEXT,
+        delivery_acknowledged_at TEXT
       );
 
       CREATE TABLE IF NOT EXISTS agent_event_cursors (
@@ -100,6 +101,10 @@ export class AuditLogger {
       CREATE INDEX IF NOT EXISTS idx_bridge_events_req_id ON bridge_events(request_id);
       CREATE INDEX IF NOT EXISTS idx_bridge_requests_to_status ON bridge_requests(to_agent, status);
     `);
+
+    try {
+      this.db.exec("ALTER TABLE bridge_requests ADD COLUMN delivery_acknowledged_at TEXT;");
+    } catch {}
   }
 
   log({ agentId, action, targetPath = null, command = null, status, details = null, executionMs = 0 }) {

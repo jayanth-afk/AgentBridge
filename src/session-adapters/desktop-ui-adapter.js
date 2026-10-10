@@ -70,6 +70,9 @@ export class DesktopUIAdapter extends AgentSessionAdapter {
   }
 
   async inspectApp() {
+    if (typeof this.options.probe === 'function') {
+      return this.options.probe(this.targetApp);
+    }
     return probeApplicationUI(this.targetApp);
   }
 
@@ -288,11 +291,37 @@ export class DesktopUIAdapter extends AgentSessionAdapter {
       const matchIndex = probe.textRegions.findIndex(r => r.snippet && r.snippet.includes(requestId));
       if (matchIndex >= 0 && matchIndex + 1 < probe.textRegions.length) {
         const nextTexts = probe.textRegions.slice(matchIndex + 1).map(r => r.snippet);
-        return {
-          status: 'completed',
-          requestId,
-          response: nextTexts.join('\n')
-        };
+        const fullText = nextTexts.join('\n').trim();
+
+        if (!this._readState) this._readState = new Map();
+        const prev = this._readState.get(requestId) || { text: '', stableCount: 0 };
+        const isGenerating = Boolean(probe.isGenerating || probe.hasStopButton || probe.streaming);
+
+        if (fullText.length > 0 && fullText === prev.text && !isGenerating) {
+          prev.stableCount++;
+          this._readState.set(requestId, prev);
+          const minStable = this.options.minStableReads !== undefined ? this.options.minStableReads : 2;
+          if (prev.stableCount >= minStable) {
+            return {
+              status: 'completed',
+              requestId,
+              response: fullText
+            };
+          }
+          return {
+            status: 'streaming',
+            requestId,
+            response: fullText,
+            stableCount: prev.stableCount
+          };
+        } else {
+          this._readState.set(requestId, { text: fullText, stableCount: 0 });
+          return {
+            status: 'streaming',
+            requestId,
+            response: fullText
+          };
+        }
       }
     }
 

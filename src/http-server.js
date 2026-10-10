@@ -13,7 +13,7 @@ import { GitController } from './git-controller.js';
 import { ZiABackgroundGPT } from './control-plane/zia-background-gpt.js';
 import { ChatGptLocalEngineAdapter } from './control-plane/chatgpt-local-engine.js';
 import { AdapterHealth } from './control-plane/desktop-control-adapter.js';
-import { EffectsLedger } from './effects/effects-ledger.js';
+import { EffectsLedger, isEffectfulTool } from './effects/effects-ledger.js';
 import { AttemptLedger } from './attempts/attempt-ledger.js';
 import { ArtifactStore } from './artifacts/artifact-store.js';
 
@@ -21,7 +21,7 @@ export class BridgeHttpServer {
   constructor(options = {}) {
     this.port = options.port !== undefined ? options.port : 8765;
     this.host = options.host || '127.0.0.1';
-    this.logger = options.auditLogger;
+    this.logger = options.auditLogger || options.logger;
     this.guard = options.permissionGuard;
     this.mailbox = options.mailboxHub;
     this.controller = options.projectController;
@@ -57,11 +57,24 @@ export class BridgeHttpServer {
     // `apiKey` is supplied. When required without a usable key, startup fails
     // loudly rather than running unauthenticated. Local desktop usage defaults
     // to no network auth because no HTTP listener is started by default.
-    this.requireApiKey = options.requireApiKey !== undefined
-      ? options.requireApiKey
-      : CONFIG.CONTROL_PLANE.REQUIRE_API_KEY;
-    const configKey = this.requireApiKey ? CONFIG.CONTROL_PLANE.API_KEY : null;
-    this.apiKey = options.apiKey !== undefined ? options.apiKey : configKey;
+    const defaultGatewayPort = Number(process.env.AGENT_BRIDGE_HTTP_PORT || 8765);
+    const isGatewayServer = options.port === defaultGatewayPort || (!options.port && !options.host);
+
+    if (options.apiKey !== undefined) {
+      this.apiKey = options.apiKey;
+      this.requireApiKey = options.requireApiKey !== undefined
+        ? Boolean(options.requireApiKey)
+        : Boolean(options.apiKey);
+    } else if (options.requireApiKey !== undefined) {
+      this.requireApiKey = Boolean(options.requireApiKey);
+      this.apiKey = this.requireApiKey ? (CONFIG.CONTROL_PLANE?.API_KEY || null) : null;
+    } else if (isGatewayServer && CONFIG.CONTROL_PLANE?.API_KEY) {
+      this.apiKey = CONFIG.CONTROL_PLANE.API_KEY;
+      this.requireApiKey = true;
+    } else {
+      this.apiKey = null;
+      this.requireApiKey = false;
+    }
     this.allowUnauthenticatedLocal = Boolean(options.allowUnauthenticatedLocal);
     // The ChatGPT brain endpoints (/api/chatgpt/*) ALWAYS require a key, so the
     // configured key is resolved independently of the general `requireApiKey`
@@ -126,23 +139,47 @@ export class BridgeHttpServer {
 
   resolveAuth(req) {
     const presented = this.extractApiKey(req);
+    const claimedHeaderAgent = req.headers ? (req.headers['x-agent-id'] || null) : null;
+
     if (this.apiKey && presented && timingSafeEqualString(presented, this.apiKey)) {
-      return { authorized: true, isPrivileged: true, agentId: 'system' };
+      const agentId = claimedHeaderAgent ? String(claimedHeaderAgent).trim().toLowerCase() : 'system';
+      return { authorized: true, isPrivileged: true, agentId };
     }
     if (presented && this.identity) {
       const tokenAgent = this.identity.verifyToken(presented);
       if (tokenAgent) {
-        return { authorized: true, isPrivileged: tokenAgent === 'system', agentId: tokenAgent };
+        const normTokenAgent = tokenAgent.toLowerCase();
+        if (claimedHeaderAgent && claimedHeaderAgent.trim().toLowerCase() !== normTokenAgent && normTokenAgent !== 'system') {
+          return { authorized: false, error: `Unauthorized: spoofed x-agent-id '${claimedHeaderAgent}' does not match authenticated token identity '${tokenAgent}'.` };
+        }
+        return { authorized: true, isPrivileged: normTokenAgent === 'system', agentId: tokenAgent };
       }
+      return { authorized: false, error: 'Unauthorized: invalid credentials provided.' };
     }
-    // Fail-closed by default: unauthenticated access is rejected unless explicitly opted in
-    if (!this.apiKey && this.allowUnauthenticatedLocal) {
-      const remote = req.socket ? req.socket.remoteAddress : '';
-      const isLoopback = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remote);
-      if (isLoopback) {
-        return { authorized: true, isPrivileged: false, agentId: null, unauthenticatedLocal: true };
+    if (presented && !this.identity) {
+      return { authorized: false, error: 'Unauthorized: invalid API key.' };
+    }
+
+    // When an API key is required/configured, reject missing credentials
+    if (this.requireApiKey || this.apiKey) {
+      return { authorized: false, error: 'Unauthorized: missing API key or token.' };
+    }
+
+    // Loopback clients without credentials when requireApiKey is false
+    const remote = req.socket ? req.socket.remoteAddress : '';
+    const isLoopback = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remote);
+    if (isLoopback) {
+      if (claimedHeaderAgent && claimedHeaderAgent.trim().toLowerCase() === 'system') {
+        return { authorized: false, error: "Unauthorized: unauthenticated caller cannot claim agent identity 'system' via x-agent-id." };
       }
+      return {
+        authorized: true,
+        isPrivileged: false,
+        agentId: claimedHeaderAgent ? String(claimedHeaderAgent).trim().toLowerCase() : null,
+        unauthenticatedLocal: true
+      };
     }
+
     return { authorized: false, error: 'Unauthorized: missing or invalid API key.' };
   }
 
@@ -261,7 +298,11 @@ export class BridgeHttpServer {
 
         // Enforce the authentication boundary
         const auth = this.resolveAuth(req);
-        if ((this.apiKey || this.requireApiKey) && !auth.authorized) {
+        if (this.requireApiKey && !auth.authorized) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: auth.error || 'Unauthorized: missing or invalid API key.' }));
+        }
+        if (!auth.authorized) {
           res.writeHead(401, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ error: auth.error || 'Unauthorized: missing or invalid API key.' }));
         }
@@ -275,11 +316,8 @@ export class BridgeHttpServer {
           pathname === '/api/audit'
         );
         if (isProtectedRestRoute && (!auth.authorized || auth.unauthenticatedLocal || !auth.agentId)) {
-          if (pathname === '/api/audit' && (!auth.authorized || !auth.isPrivileged)) {
-            res.writeHead(auth.authorized ? 403 : 401, { 'Content-Type': 'application/json' });
-            return res.end(JSON.stringify({ error: 'Forbidden: audit logs require privileged administrative access.' }));
-          }
           res.writeHead(401, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'Unauthorized: valid credentials required' }));
         }
 
         const readBody = () => new Promise((resBody, rejBody) => {
@@ -336,11 +374,15 @@ export class BridgeHttpServer {
           }
 
           if (pathname === '/api/agents' && method === 'GET') {
+            if ((this.apiKey || this.requireApiKey) && (!auth.authorized || auth.unauthenticatedLocal)) {
+              res.writeHead(401, { 'Content-Type': 'application/json' });
+              return res.end(JSON.stringify({ error: 'Unauthorized: authentication required to access agent metadata.' }));
+            }
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify({
-              agents: this.guard.config.AGENT_IDENTITIES,
-              liveAgents: this.presence ? this.presence.listAgents() : [],
-              policies: this.guard.agentPolicies
+              agents: this.guard?.config?.AGENT_IDENTITIES ?? CONFIG.AGENT_IDENTITIES,
+              liveAgents: auth.isPrivileged ? (this.presence ? this.presence.listAgents() : []) : undefined,
+              policies: auth.isPrivileged ? (this.guard?.agentPolicies ?? {}) : undefined
             }));
           }
 
@@ -797,6 +839,10 @@ export class BridgeHttpServer {
               }
 
               const isPublicTool = ['bridge_ping', 'bridge_discover_agents', 'bridge_agent_presence', 'bridge_diagnostics'].includes(name);
+              if (auth.unauthenticatedLocal && (isEffectfulTool(name) || name === 'bridge_get_audit_log')) {
+                res.writeHead(401, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ error: `Unauthorized: valid credentials required for tool '${name}'.` }));
+              }
               const toolContext = {
                 controller: this.controller,
                 mailbox: this.mailbox,
@@ -812,9 +858,9 @@ export class BridgeHttpServer {
                 effectsLedger: this.effectsLedger,
                 attemptLedger: this.attemptLedger,
                 artifactStore: this.artifactStore,
-                requireAuthentication: Boolean(this.apiKey || this.requireApiKey) && !isPublicTool && !auth.isPrivileged,
+                requireAuthentication: (Boolean(this.requireApiKey) || isEffectfulTool(name)) && !isPublicTool && !auth.isPrivileged,
                 isPrivileged: Boolean(auth.isPrivileged),
-                agentId: auth.agentId || (typeof req.headers['x-agent-id'] === 'string' ? req.headers['x-agent-id'].trim() : null)
+                agentId: auth.agentId || null
               };
 
               try {

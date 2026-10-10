@@ -35,13 +35,10 @@ export class ResponseCorrelator {
    */
   hasMarker(text, requestId) {
     if (!text || !requestId) return false;
-    if (text.includes(`[${this.markerPrefix}:${requestId}]`)) return true;
-    if (text.includes(`${this.markerPrefix}:${requestId}`)) return true;
-    const found = this.extractMarker(text);
-    if (found && found !== requestId) return false;
-    const escaped = requestId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const regex = new RegExp(`(?:^|[^a-zA-Z0-9_-])${escaped}(?:[^a-zA-Z0-9_-]|$)`);
-    return regex.test(text);
+    const escapedPrefix = this.markerPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const escapedId = requestId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const exactRegex = new RegExp(`\\[${escapedPrefix}:${escapedId}\\]`, 'i');
+    return exactRegex.test(text);
   }
 
   /**
@@ -67,8 +64,12 @@ export class ResponseCorrelator {
     // Cleaned output text
     const cleaned = this.cleanResponse(rawResponse);
 
+    // If expectedRequestId is specified, the exact marker is strictly required.
+    // An ordinary text mention of the request ID does NOT correlate.
+    const correlated = expectedRequestId ? hasExpected : (!foundMarker && Boolean(cleaned));
+
     return {
-      correlated: hasExpected || (!expectedRequestId && !foundMarker && Boolean(cleaned)),
+      correlated,
       foundMarker,
       expectedRequestId,
       cleanedText: cleaned,

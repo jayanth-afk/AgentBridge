@@ -33,7 +33,11 @@ export class CorrelatedResponse {
     confidence,
     rawResponse,
     cleanedResponse,
-    evidence
+    evidence,
+    isDuplicate = false,
+    isReplayed = false,
+    isExpired = false,
+    agentMismatch = false
   }) {
     this.requestId = requestId;
     this.attemptId = attemptId;
@@ -44,15 +48,19 @@ export class CorrelatedResponse {
     this.rawResponse = rawResponse;
     this.cleanedResponse = cleanedResponse;
     this.evidence = evidence;
+    this.isDuplicate = isDuplicate;
+    this.isReplayed = isReplayed;
+    this.isExpired = isExpired;
+    this.agentMismatch = agentMismatch;
     this.timestamp = new Date().toISOString();
   }
 
   /**
    * Hard Invariant 2 & 10:
-   * An ambiguous response or no-evidence response must NEVER satisfy terminal success.
+   * An ambiguous response, replayed response, or no-evidence response must NEVER satisfy terminal success.
    */
   isAcceptableForSuccess() {
-    return this.confidence === CorrelationConfidence.VERIFIED;
+    return this.confidence === CorrelationConfidence.VERIFIED && !this.isReplayed && !this.isExpired && !this.agentMismatch;
   }
 }
 
@@ -60,6 +68,8 @@ export class ResponseCorrelatorV2 {
   constructor(options = {}) {
     this.options = options;
     this.activeNonces = new Map();
+    this.consumedNonces = new Map();
+    this.nonceTtlMs = options.nonceTtlMs || (10 * 60 * 1000);
   }
 
   /**
@@ -105,27 +115,35 @@ export class ResponseCorrelatorV2 {
     return this.cleanResponseText(text);
   }
 
-  tagMessage(text, requestId, nonce = null) {
-    if (nonce) {
-      if (requestId) this.activeNonces.set(requestId, nonce);
-      return this.embedNonceInPrompt(text, nonce);
-    }
+  tagMessage(text, requestId, nonce = null, metadata = {}) {
+    const randNonce = nonce || `ABN-${crypto.randomBytes(8).toString('hex')}`;
     if (requestId) {
-      // Unpredictable cryptographically secure random nonce
-      const randNonce = `ABN-${crypto.randomBytes(8).toString('hex')}`;
-      this.activeNonces.set(requestId, randNonce);
-      return this.embedNonceInPrompt(text, randNonce);
+      this.activeNonces.set(requestId, {
+        nonce: randNonce,
+        createdAt: Date.now(),
+        attemptId: metadata.attemptId || null,
+        epoch: metadata.epoch || null,
+        agentId: metadata.agentId || null,
+        routeId: metadata.routeId || null
+      });
     }
-    return text;
+    return this.embedNonceInPrompt(text, randNonce);
   }
 
-  correlateTurn({ rawResponse, expectedRequestId, nonce = null }) {
+  correlateTurn({ rawResponse, expectedRequestId, nonce = null, agentId = null, attemptId = null, epoch = null }) {
     if (!rawResponse) {
       return { correlated: false, error: 'EMPTY_RESPONSE', confidence: CorrelationConfidence.NO_RESPONSE };
     }
-    const resolvedNonce = nonce || (expectedRequestId ? this.activeNonces.get(expectedRequestId) : null);
+    const activeEntry = expectedRequestId ? this.activeNonces.get(expectedRequestId) : null;
+    const resolvedNonce = nonce || (typeof activeEntry === 'object' && activeEntry !== null ? activeEntry.nonce : activeEntry);
+    const resolvedAttemptId = attemptId || (typeof activeEntry === 'object' && activeEntry !== null ? activeEntry.attemptId : null);
+    const resolvedEpoch = epoch !== null && epoch !== undefined ? epoch : (typeof activeEntry === 'object' && activeEntry !== null ? activeEntry.epoch : null);
+
     const result = this.correlate({
       requestId: expectedRequestId,
+      attemptId: resolvedAttemptId,
+      epoch: resolvedEpoch,
+      agentId,
       expectedNonce: resolvedNonce,
       rawResponse
     });
@@ -135,7 +153,10 @@ export class ResponseCorrelatorV2 {
       tier: result.tier,
       cleanedText: result.cleanedResponse || this.cleanResponseText(rawResponse),
       rawResponse,
-      evidence: result.evidence
+      evidence: result.evidence,
+      isDuplicate: result.isDuplicate,
+      isReplayed: result.isReplayed,
+      isExpired: result.isExpired
     };
   }
 
@@ -150,7 +171,8 @@ export class ResponseCorrelatorV2 {
     rawResponse = null,
     isAuthenticatedToolCall = false,
     isStructuredStream = false,
-    uiDeltaSnapshot = null
+    uiDeltaSnapshot = null,
+    agentId = null
   }) {
     if (rawResponse === null || rawResponse === undefined) {
       return new CorrelatedResponse({
@@ -200,8 +222,91 @@ export class ResponseCorrelatorV2 {
 
     // 3. Tier 3: Cryptographic Nonce Echo
     if (expectedNonce) {
+      // Replay detection: check if nonce was already consumed
+      if (this.consumedNonces.has(expectedNonce)) {
+        const record = this.consumedNonces.get(expectedNonce);
+        const respHash = crypto.createHash('sha256').update(rawStr).digest('hex');
+        if (record.responseHash === respHash) {
+          // Idempotent duplicate response delivered
+          return new CorrelatedResponse({
+            requestId,
+            attemptId: attemptId || record.attemptId,
+            epoch: epoch || record.epoch,
+            nonce: expectedNonce,
+            tier: CorrelationTier.TIER_3_NONCE_TOKEN_ECHO,
+            confidence: CorrelationConfidence.VERIFIED,
+            rawResponse: rawStr,
+            cleanedResponse: this.cleanResponseText(rawStr),
+            evidence: `Idempotent duplicate response delivered for already-consumed nonce ${expectedNonce}`,
+            isDuplicate: true
+          });
+        }
+        return new CorrelatedResponse({
+          requestId,
+          attemptId,
+          epoch,
+          nonce: expectedNonce,
+          tier: CorrelationTier.TIER_6_NO_EVIDENCE,
+          confidence: CorrelationConfidence.AMBIGUOUS,
+          rawResponse: rawStr,
+          cleanedResponse: null,
+          evidence: `REPLAY_REJECTED: Nonce ${expectedNonce} was already consumed`,
+          isReplayed: true
+        });
+      }
+
+      // Check active entry for expiry or agent mismatch
+      const activeEntry = requestId ? this.activeNonces.get(requestId) : null;
+      if (activeEntry && typeof activeEntry === 'object') {
+        if (activeEntry.createdAt && (Date.now() - activeEntry.createdAt > this.nonceTtlMs)) {
+          return new CorrelatedResponse({
+            requestId,
+            attemptId,
+            epoch,
+            nonce: expectedNonce,
+            tier: CorrelationTier.TIER_6_NO_EVIDENCE,
+            confidence: CorrelationConfidence.NO_RESPONSE,
+            rawResponse: rawStr,
+            cleanedResponse: null,
+            evidence: `EXPIRED_REJECTED: Nonce ${expectedNonce} has expired`,
+            isExpired: true
+          });
+        }
+        if (agentId && activeEntry.agentId && agentId !== activeEntry.agentId) {
+          return new CorrelatedResponse({
+            requestId,
+            attemptId,
+            epoch,
+            nonce: expectedNonce,
+            tier: CorrelationTier.TIER_6_NO_EVIDENCE,
+            confidence: CorrelationConfidence.NO_RESPONSE,
+            rawResponse: rawStr,
+            cleanedResponse: null,
+            evidence: `AGENT_MISMATCH_REJECTED: Agent '${agentId}' does not match expected '${activeEntry.agentId}'`,
+            agentMismatch: true
+          });
+        }
+      }
+
       const foundNonce = this.extractNonce(rawStr);
-      if (foundNonce && foundNonce.toLowerCase() === expectedNonce.toLowerCase()) {
+      const markerMatch = rawStr.match(/\[AB:([a-zA-Z0-9_-]+)\]/i);
+      const foundMarkerId = markerMatch ? markerMatch[1] : null;
+      const markerMatches = Boolean(requestId && foundMarkerId && foundMarkerId.toLowerCase() === requestId.toLowerCase());
+
+      if ((foundNonce && foundNonce.toLowerCase() === expectedNonce.toLowerCase()) || markerMatches) {
+        // Atomic single-use consumption
+        const respHash = crypto.createHash('sha256').update(rawStr).digest('hex');
+        this.consumedNonces.set(expectedNonce, {
+          consumedAt: Date.now(),
+          requestId,
+          attemptId,
+          epoch,
+          responseHash: respHash
+        });
+        if (requestId) {
+          this.activeNonces.delete(requestId);
+        }
+
         return new CorrelatedResponse({
           requestId,
           attemptId,
@@ -211,7 +316,9 @@ export class ResponseCorrelatorV2 {
           confidence: CorrelationConfidence.VERIFIED,
           rawResponse: rawStr,
           cleanedResponse: this.cleanResponseText(rawStr),
-          evidence: `Model response echoed exact cryptographic nonce ${expectedNonce}`
+          evidence: markerMatches
+            ? `Model response echoed exact request marker [AB:${requestId}]`
+            : `Model response echoed exact cryptographic nonce ${expectedNonce}`
         });
       }
     }

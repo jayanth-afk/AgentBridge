@@ -269,7 +269,7 @@ test('Agent Bridge Recovery Verification Suite (18 Points)', async (t) => {
     const logsRes = await bridge.registry.executeTool('bridge_get_audit_log', {
       limit: 10,
       agentId: 'chatgpt-desktop'
-    }, toolContext);
+    }, { ...toolContext, isPrivileged: true });
     assert.ok(Array.isArray(logsRes));
     assert.ok(logsRes.length > 0);
   });

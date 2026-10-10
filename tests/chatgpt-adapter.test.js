@@ -244,7 +244,7 @@ test('ChatGPT Autonomous Desktop Delivery Suite', async (t) => {
     const fakeBridge = makeFakeBridge({
       sendAndObserve: async (app, text, requestId) => {
         fakeBridge.calls.push({ app, text, requestId });
-        return { ok: true, status: 'COMPLETED', response: `ChatGPT_REAL_ANSWER for ${requestId}`, latencyMs: 3 };
+        return { ok: true, status: 'COMPLETED', response: `[AB:${requestId}]\nChatGPT_REAL_ANSWER for ${requestId}`, latencyMs: 3 };
       }
     });
     const workerSession = new ChatGptAutonomousSession({ swiftBridge: fakeBridge });

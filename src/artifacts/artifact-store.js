@@ -227,18 +227,24 @@ export class ArtifactStore {
   /**
    * Persist bytes and return a compact, retrievable artifact reference.
    */
-  put({
-    bytes = null,
-    base64 = null,
-    mimeType = null,
-    filename = null,
-    taskId = null,
-    attemptId = null,
-    agentId,
-    ttlMs = undefined,
-    authorizedAgents = [],
-    metadata = null
-  } = {}) {
+  put(optionsOrBytes = {}, maybeOptions = {}) {
+    let opts = optionsOrBytes;
+    if (Buffer.isBuffer(optionsOrBytes) || typeof optionsOrBytes === 'string') {
+      opts = { bytes: optionsOrBytes, ...maybeOptions };
+    }
+    const {
+      bytes = null,
+      base64 = null,
+      mimeType = null,
+      filename = null,
+      taskId = null,
+      attemptId = null,
+      agentId,
+      ttlMs = undefined,
+      authorizedAgents = [],
+      metadata = null,
+      requestId = null
+    } = opts;
     if (!agentId) throw new ArtifactError('agentId is required to store an artifact', 'ARTIFACT_NO_AGENT');
 
     const buffer = this._toBuffer({ bytes, base64 });
@@ -279,7 +285,30 @@ export class ArtifactStore {
     // O_EXCL: never clobber, never follow a pre-existing symlink.
     fs.writeFileSync(storagePath, buffer, { flag: 'wx', mode: 0o600 });
 
-    const authorized = Array.from(new Set([agentId, ...(Array.isArray(authorizedAgents) ? authorizedAgents : [])].filter(Boolean)));
+    let verifiedStakeholders = [agentId];
+    if (taskId) {
+      try {
+        const tRow = this.db.prepare('SELECT creator, from_agent FROM tasks WHERE id = ?').get(taskId);
+        if (tRow) {
+          const req = tRow.creator || tRow.from_agent;
+          if (req) verifiedStakeholders.push(req);
+        }
+        const rRow = this.db.prepare('SELECT from_agent FROM bridge_requests WHERE task_id = ? OR request_id = ?').get(taskId, taskId);
+        if (rRow?.from_agent) verifiedStakeholders.push(rRow.from_agent);
+      } catch {}
+    }
+    const effectiveRequestId = requestId || (metadata && typeof metadata === 'object' ? metadata.requestId : null);
+    if (effectiveRequestId) {
+      try {
+        const rRow = this.db.prepare('SELECT from_agent FROM bridge_requests WHERE request_id = ?').get(effectiveRequestId);
+        if (rRow?.from_agent) verifiedStakeholders.push(rRow.from_agent);
+      } catch {}
+    }
+    const finalMeta = effectiveRequestId ? { ...(metadata || {}), requestId: effectiveRequestId } : metadata;
+    const authorized = Array.from(new Set([
+      ...verifiedStakeholders,
+      ...(Array.isArray(authorizedAgents) ? authorizedAgents : [])
+    ].filter(Boolean)));
 
     this.db.prepare(`
       INSERT INTO bridge_artifacts (
@@ -304,7 +333,7 @@ export class ArtifactStore {
       ArtifactTransferStatus.STORED,
       now.toISOString(),
       expiresAt,
-      metadata ? JSON.stringify(metadata) : null
+      finalMeta ? JSON.stringify(finalMeta) : null
     );
 
     this.logger?.log?.({
@@ -333,7 +362,34 @@ export class ArtifactStore {
     let authorized = [];
     try { authorized = JSON.parse(row.authorized_agents || '[]'); } catch { authorized = []; }
     if (!authorized.includes(agentId) && row.agent_id !== agentId) {
-      throw new ArtifactError(`Agent '${agentId}' is not authorized for artifact '${row.artifact_id}'`, 'ARTIFACT_UNAUTHORIZED');
+      // Dynamic verification of request / task ownership
+      let isVerifiedStakeholder = false;
+      if (row.task_id) {
+        try {
+          const tRow = this.db.prepare('SELECT creator, from_agent, assignee FROM tasks WHERE id = ?').get(row.task_id);
+          if (tRow && (tRow.creator === agentId || tRow.from_agent === agentId || tRow.assignee === agentId)) {
+            isVerifiedStakeholder = true;
+          }
+          const rRow = this.db.prepare('SELECT from_agent, to_agent FROM bridge_requests WHERE task_id = ? OR request_id = ?').get(row.task_id, row.task_id);
+          if (rRow && (rRow.from_agent === agentId || rRow.to_agent === agentId)) {
+            isVerifiedStakeholder = true;
+          }
+        } catch {}
+      }
+      if (!isVerifiedStakeholder && row.metadata) {
+        try {
+          const meta = JSON.parse(row.metadata);
+          if (meta?.requestId) {
+            const rRow = this.db.prepare('SELECT from_agent, to_agent FROM bridge_requests WHERE request_id = ?').get(meta.requestId);
+            if (rRow && (rRow.from_agent === agentId || rRow.to_agent === agentId)) {
+              isVerifiedStakeholder = true;
+            }
+          }
+        } catch {}
+      }
+      if (!isVerifiedStakeholder) {
+        throw new ArtifactError(`Agent '${agentId}' is not authorized for artifact '${row.artifact_id}'`, 'ARTIFACT_UNAUTHORIZED');
+      }
     }
   }
 
@@ -347,13 +403,20 @@ export class ArtifactStore {
   _public(row) {
     return {
       artifact_id: row.artifact_id,
+      artifactId: row.artifact_id,
       task_id: row.task_id,
+      taskId: row.task_id,
       attempt_id: row.attempt_id,
+      attemptId: row.attempt_id,
       agent_id: row.agent_id,
+      agentId: row.agent_id,
       mime_type: row.mime_type,
+      mimeType: row.mime_type,
       media_type: row.media_type,
+      mediaType: row.media_type,
       filename: row.filename,
       size_bytes: row.size_bytes,
+      sizeBytes: row.size_bytes,
       sha256: row.sha256,
       storage_backend: row.storage_backend,
       retrieval_method: row.retrieval_method,
@@ -373,10 +436,86 @@ export class ArtifactStore {
   }
 
   /**
+   * Bounded chunked retrieval for large artifacts (supporting up to maxBytes in <= 8 MiB chunks).
+   */
+  readChunk(artifactId, { agentId, offset = 0, length = MAX_INLINE_BYTES } = {}) {
+    const row = this._row(artifactId);
+    this._authorize(row, agentId);
+    if (this._expired(row)) {
+      throw new ArtifactError(`Artifact '${artifactId}' has expired`, 'ARTIFACT_EXPIRED', ArtifactTransferStatus.EXPIRED);
+    }
+    const safeOffset = Math.max(0, parseInt(offset, 10) || 0);
+    if (safeOffset > row.size_bytes) {
+      throw new ArtifactError(`Offset (${safeOffset}) exceeds total size (${row.size_bytes})`, 'ARTIFACT_OFFSET_OUT_OF_BOUNDS');
+    }
+    if (safeOffset === row.size_bytes) {
+      return {
+        bytes: Buffer.alloc(0),
+        offset: safeOffset,
+        length: 0,
+        totalBytes: row.size_bytes,
+        eof: true,
+        overallSha256: row.sha256,
+        chunkSha256: crypto.createHash('sha256').update(Buffer.alloc(0)).digest('hex'),
+        metadata: this._public(row),
+        integrityVerified: true
+      };
+    }
+
+    const maxAllowed = Math.min(length || MAX_INLINE_BYTES, MAX_INLINE_BYTES);
+    const boundedLength = Math.min(maxAllowed, row.size_bytes - safeOffset);
+
+    const storagePath = this._assertContained(path.join(this.root, row.storage_path));
+    if (!fs.existsSync(storagePath)) {
+      throw new ArtifactError(`Artifact '${artifactId}' bytes are missing`, 'ARTIFACT_BYTES_MISSING', ArtifactTransferStatus.MISSING);
+    }
+    const real = this._assertContainedReal(fs.realpathSync(storagePath));
+
+    let fd = null;
+    let chunkBuf = Buffer.alloc(boundedLength);
+    let bytesRead = 0;
+    try {
+      const openFlags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0);
+      fd = fs.openSync(real, openFlags);
+      const fdStat = fs.fstatSync(fd);
+      if (!fdStat.isFile()) {
+        throw new ArtifactError('Refusing to read a non-regular artifact file', 'ARTIFACT_NOT_REGULAR_FILE');
+      }
+      if (fdStat.size !== row.size_bytes) {
+        throw new ArtifactError('Artifact size changed since storage', 'ARTIFACT_INTEGRITY_FAILURE');
+      }
+      bytesRead = fs.readSync(fd, chunkBuf, 0, boundedLength, safeOffset);
+    } finally {
+      if (fd !== null) {
+        try { fs.closeSync(fd); } catch {}
+      }
+    }
+
+    const slice = chunkBuf.subarray(0, bytesRead);
+    const chunkSha256 = crypto.createHash('sha256').update(slice).digest('hex');
+    const isEof = safeOffset + bytesRead >= row.size_bytes;
+
+    return {
+      bytes: slice,
+      offset: safeOffset,
+      length: bytesRead,
+      totalBytes: row.size_bytes,
+      eof: isEof,
+      overallSha256: row.sha256,
+      chunkSha256,
+      metadata: this._public(row),
+      integrityVerified: true
+    };
+  }
+
+  /**
    * Read and integrity-verify the actual bytes.
    * @returns {Promise<{bytes:Buffer, metadata:object, integrityVerified:boolean}>}
    */
-  read(artifactId, { agentId, maxBytes = null } = {}) {
+  read(artifactId, { agentId, maxBytes = null, offset = null, length = null } = {}) {
+    if (offset !== null || length !== null) {
+      return this.readChunk(artifactId, { agentId, offset: offset || 0, length: length || MAX_INLINE_BYTES });
+    }
     const row = this._row(artifactId);
     this._authorize(row, agentId);
     if (this._expired(row)) {
@@ -387,7 +526,7 @@ export class ArtifactStore {
     // the full artifact just to be rejected afterwards.
     if (maxBytes && row.size_bytes > maxBytes) {
       throw new ArtifactError(
-        `Artifact '${artifactId}' (${row.size_bytes} bytes) exceeds the ${maxBytes}-byte limit`,
+        `Artifact '${artifactId}' (${row.size_bytes} bytes) exceeds the ${maxBytes}-byte limit. Use chunked retrieval via readChunk.`,
         'ARTIFACT_TOO_LARGE_INLINE'
       );
     }
@@ -454,13 +593,20 @@ export class ArtifactStore {
   }
 
   /** Delete expired artifact bytes and mark their metadata expired. */
-  cleanupExpired(now = Date.now()) {
+  cleanupExpired(now = Date.now(), { agentId = null, isPrivileged = false } = {}) {
     let rows = [];
     try {
-      rows = this.db.prepare(`
-        SELECT * FROM bridge_artifacts
-        WHERE transfer_status = 'STORED' AND expires_at IS NOT NULL AND expires_at <= ?
-      `).all(new Date(now).toISOString());
+      if (agentId && !isPrivileged && agentId !== 'system') {
+        rows = this.db.prepare(`
+          SELECT * FROM bridge_artifacts
+          WHERE transfer_status = 'STORED' AND expires_at IS NOT NULL AND expires_at <= ? AND agent_id = ?
+        `).all(new Date(now).toISOString(), agentId);
+      } else {
+        rows = this.db.prepare(`
+          SELECT * FROM bridge_artifacts
+          WHERE transfer_status = 'STORED' AND expires_at IS NOT NULL AND expires_at <= ?
+        `).all(new Date(now).toISOString());
+      }
     } catch (err) {
       this.logger?.debug?.('Failed to query expired artifacts', err);
       return { cleaned: 0 };

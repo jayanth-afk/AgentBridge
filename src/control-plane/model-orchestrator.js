@@ -5,6 +5,7 @@ import { ChatGptAutonomousSession } from './chatgpt-autonomous-session.js';
 import { ClaudeAutonomousSession } from './claude-autonomous-session.js';
 import { GeminiAutonomousSession } from './gemini-autonomous-session.js';
 import { ConversationRegistry } from './conversation-registry.js';
+import { ResponseCorrelatorV2 } from '../correlation/response-correlator-v2.js';
 import { ResponseCorrelator } from './response-correlator.js';
 import { RequestEnvelope, RequestState } from '../protocol/envelope.js';
 import { SwiftAXBridge } from './swift-ax-bridge.js';
@@ -24,7 +25,7 @@ export class ModelOrchestrator extends EventEmitter {
     this.claudeSession = options.claudeSession || new ClaudeAutonomousSession(options.claude || { timeoutMs: 90000 });
     this.geminiSession = options.geminiSession || new GeminiAutonomousSession(options.gemini || {});
     this.conversations = options.conversations || new ConversationRegistry(options);
-    this.correlator = options.correlator || new ResponseCorrelator(options);
+    this.correlator = options.correlator || new ResponseCorrelatorV2(options);
     this.mailbox = options.mailboxHub || null;
     this.eventBus = options.eventBus || null;
 
