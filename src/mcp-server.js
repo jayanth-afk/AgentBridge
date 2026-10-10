@@ -5,6 +5,7 @@ import {
   ListToolsRequestSchema
 } from '@modelcontextprotocol/sdk/types.js';
 
+import { execSync } from 'node:child_process';
 import { CONFIG } from './config.js';
 import { AuditLogger } from './audit-logger.js';
 import { PermissionGuard } from './permission-guard.js';
@@ -78,6 +79,19 @@ export class BridgeMcpServer {
     // Single unified source of truth for tools
     this.registry = options.toolRegistry || new ToolRegistry({ profile: options.toolProfile || options.profile });
 
+    // Startup stamp for observability, version tracking, and staleness detection
+    let gitHead = 'unknown';
+    try {
+      gitHead = execSync('git rev-parse HEAD', { cwd: CONFIG.BRIDGE_ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    } catch {}
+    this.diagnostics.setStartupStamp({
+      gitHead,
+      toolCount: this.registry.getToolDefinitions().length,
+      profile: this.registry.profile || 'all',
+      startedAt: this.startedAt,
+      pid: process.pid
+    });
+
     // Start HTTP control plane server for Zia brain and local HTTP clients
     this.httpServer = new BridgeHttpServer({
       port: Number(process.env.AGENT_BRIDGE_HTTP_PORT || 8765),
@@ -110,7 +124,9 @@ export class BridgeMcpServer {
       },
       {
         capabilities: {
-          tools: {}
+          tools: {
+            listChanged: true
+          }
         }
       }
     );
@@ -211,6 +227,20 @@ export class BridgeMcpServer {
     };
     process.on('SIGINT', cleanup);
     process.on('SIGTERM', cleanup);
+  }
+
+  /**
+   * Broadcast tool list changed notification across active transports.
+   */
+  async notifyToolsListChanged() {
+    try {
+      await this.server.sendToolListChanged();
+    } catch {}
+    if (this.httpServer && typeof this.httpServer.broadcastToolListChanged === 'function') {
+      try {
+        this.httpServer.broadcastToolListChanged();
+      } catch {}
+    }
   }
 }
 

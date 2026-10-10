@@ -2,6 +2,27 @@ import crypto from 'node:crypto';
 import { CONFIG } from './config.js';
 import { isRegisteredVerificationToken } from './security/verification-tokens.js';
 
+export const AGENT_ALIASES = Object.freeze({
+  'claude': 'claude-desktop',
+  'claude-desktop': 'claude-desktop',
+  'chatgpt': 'chatgpt-desktop',
+  'chatgpt-desktop': 'chatgpt-desktop',
+  'antigravity': 'antigravity-ide',
+  'antigravity-ide': 'antigravity-ide',
+  'gemini': 'gemini',
+  'gemini-desktop': 'gemini',
+  'google-gemini': 'gemini',
+  'freebuff': 'freebuff',
+  'zia': 'zia',
+  'system': 'system'
+});
+
+export function normalizeAgentId(agentId) {
+  if (!agentId || typeof agentId !== 'string') return null;
+  const lower = agentId.trim().toLowerCase();
+  return AGENT_ALIASES[lower] || lower;
+}
+
 export class AgentIdentityManager {
   constructor(auditLogger, boundAgentId = null) {
     this.logger = auditLogger;
@@ -71,20 +92,30 @@ export class AgentIdentityManager {
       }
     }
 
+    const rawSupplied = suppliedAgentId ? String(suppliedAgentId).trim() : null;
+    const normalizedSupplied = rawSupplied ? normalizeAgentId(rawSupplied) : null;
+
+    if (rawSupplied && normalizedSupplied && rawSupplied.toLowerCase() !== normalizedSupplied) {
+      this.logger?.log?.({
+        agentId: normalizedSupplied,
+        action: 'agent_alias_normalized',
+        status: 'info',
+        details: { raw: rawSupplied, normalized: normalizedSupplied }
+      });
+    }
+
     // 2. If the current bridge instance is bound to a specific agent (e.g. via launch config env)
     if (this.boundAgentId) {
-      const normalizedBound = this.boundAgentId.trim().toLowerCase();
+      const normalizedBound = normalizeAgentId(this.boundAgentId);
 
       // If caller supplied no agentId, default directly to the bound identity
-      if (!suppliedAgentId) {
+      if (!normalizedSupplied) {
         return {
           authenticated: true,
           agentId: normalizedBound,
           method: 'connection_binding'
         };
       }
-
-      const normalizedSupplied = suppliedAgentId.trim().toLowerCase();
 
       // Caller claims to be the same as bound identity -> verified
       if (normalizedSupplied === normalizedBound) {
@@ -126,12 +157,9 @@ export class AgentIdentityManager {
     }
 
     // 3. Fallback for unbound connections (e.g. generic CLI or testing)
-    if (suppliedAgentId) {
-      const normalizedSupplied = suppliedAgentId.trim().toLowerCase();
-
+    if (normalizedSupplied) {
       // Do NOT allow untrusted external callers to claim 'system' without token
       if (normalizedSupplied === 'system' && !token) {
-        // Fall back to 'freebuff' or reject
         return {
           authenticated: false,
           compatibilityMode: true,
@@ -148,6 +176,16 @@ export class AgentIdentityManager {
           method: 'unbound_compatibility'
         };
       }
+
+      // Explicitly preserve unknown identity with isUnknown flag rather than
+      // silently coercing to 'freebuff'.
+      return {
+        authenticated: false,
+        compatibilityMode: false,
+        agentId: normalizedSupplied,
+        isUnknown: true,
+        method: 'unbound_unknown_identity'
+      };
     }
 
     return {

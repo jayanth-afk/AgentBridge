@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 import { BridgeHttpServer } from '../src/http-server.js';
 import { AuditLogger } from '../src/audit-logger.js';
 
@@ -211,6 +212,35 @@ test('MCP Transport Conformance Suite', async (t) => {
       });
       const noNameJson = await noNameRes.json();
       assert.equal(noNameJson.error.code, -32602);
+    });
+
+    await t.test('8. tools/list_changed capability negotiation and notification delivery', async () => {
+      const sseUrl = new URL(`http://127.0.0.1:${testPort}/sse`);
+      const transport = new SSEClientTransport(sseUrl);
+      const client = new Client(
+        { name: 'list-changed-test-client', version: '1.0.0' },
+        { capabilities: {} }
+      );
+
+      await client.connect(transport);
+
+      // Verify listChanged capability is advertised as true
+      const caps = client.getServerCapabilities();
+      assert.equal(caps?.tools?.listChanged, true, 'Server must advertise tools.listChanged: true');
+
+      let receivedNotification = false;
+      client.setNotificationHandler(ToolListChangedNotificationSchema, () => {
+        receivedNotification = true;
+      });
+
+      // Broadcast tool list changed event
+      server.broadcastToolListChanged();
+
+      // Wait a moment for SSE delivery
+      await new Promise(resolve => setTimeout(resolve, 50));
+      assert.equal(receivedNotification, true, 'Client must receive notifications/tools/list_changed over SSE');
+
+      await client.close();
     });
   } finally {
     await server.stop();

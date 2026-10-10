@@ -1668,9 +1668,8 @@ export class ToolRegistry {
           tags: { type: 'array', items: { type: 'string' } },
           status: {
             type: 'string',
-            enum: ['verified', 'hypothesis', 'obsolete', 'failed-experiment', 'agent-claimed'],
-            default: 'verified',
-            description: 'Item lifecycle status: verified, hypothesis, obsolete, failed-experiment, agent-claimed'
+            enum: ['verified', 'hypothesis', 'obsolete', 'failed-experiment', 'agent-claimed', 'unreviewed'],
+            description: 'Item lifecycle status: verified (requires verifiable evidence), hypothesis, obsolete, failed-experiment, agent-claimed (default for agents), unreviewed'
           },
           validFrom: { type: 'string', description: 'ISO start validity timestamp' },
           validUntil: { type: 'string', description: 'ISO expiration timestamp' },
@@ -1681,20 +1680,21 @@ export class ToolRegistry {
       },
       handler: async (args, ctx) => {
         const store = resolveKnowledgeStore(ctx);
+        const boundAgent = ctx?.identity?.boundAgentId || ctx?.identity?.agentId || ctx?.agentId || (ctx?.requireAuthentication ? null : args.agentId) || 'system';
         const item = store.storeKnowledge({
-          agentId: args.agentId,
+          agentId: boundAgent,
           title: args.title,
           content: args.content,
           category: args.category || 'general',
           tags: args.tags || [],
-          status: args.status || 'verified',
+          status: args.status,
           validFrom: args.validFrom || null,
           validUntil: args.validUntil || null,
           provenance: args.provenance || 'agent_finding',
           sourceFile: args.sourceFile || null
         });
         ctx.logger?.log?.({
-          agentId: args.agentId,
+          agentId: boundAgent,
           action: 'store_knowledge',
           status: 'success',
           details: { id: item.id, title: item.title, category: item.category, status: item.status }
@@ -1706,6 +1706,8 @@ export class ToolRegistry {
           title: item.title,
           category: item.category,
           status: item.status,
+          trustLevel: item.trustLevel,
+          untrustedData: true,
           validFrom: item.validFrom,
           validUntil: item.validUntil,
           sourceFile: item.sourceFile,

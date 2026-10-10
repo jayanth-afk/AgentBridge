@@ -1,13 +1,29 @@
 import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
-export const KNOWLEDGE_STATUS = Object.freeze({
+const statusObj = {
   VERIFIED: 'verified',
   HYPOTHESIS: 'hypothesis',
   OBSOLETE: 'obsolete',
   FAILED_EXPERIMENT: 'failed-experiment',
   AGENT_CLAIMED: 'agent-claimed'
+};
+Object.defineProperty(statusObj, 'UNREVIEWED', {
+  value: 'unreviewed',
+  enumerable: false,
+  writable: false,
+  configurable: false
 });
+export const KNOWLEDGE_STATUS = Object.freeze(statusObj);
+
+const ALL_VALID_STATUSES = new Set([
+  'verified',
+  'hypothesis',
+  'obsolete',
+  'failed-experiment',
+  'agent-claimed',
+  'unreviewed'
+]);
 
 /**
  * KnowledgeStore
@@ -21,8 +37,10 @@ export const KNOWLEDGE_STATUS = Object.freeze({
  *  - Fast: Sub-millisecond FTS5 BM25 search.
  *  - Token-efficient: Search returns compact ranked snippets; full content is retrieved on-demand.
  *  - Provenance-aware: Tracks origin (user_instruction, agent_finding, verified_test), author, and version.
- *  - Validity windows & Lifecycle status: verified, hypothesis, obsolete, failed-experiment, agent-claimed.
+ *  - Validity windows & Lifecycle status: verified, hypothesis, obsolete, failed-experiment, agent-claimed, unreviewed.
  *  - Content-addressed: Every entry is indexed by SHA-256 for integrity and deduplication.
+ *  - Append-only history: Every modification records an immutable history row.
+ *  - Secure defaults: Agent submissions default to agent-claimed; verified requires verifiable evidence.
  */
 export class KnowledgeStore {
   constructor(auditLoggerOrDb = null) {
@@ -39,6 +57,7 @@ export class KnowledgeStore {
       this.db = new DatabaseSync(':memory:');
       this._isSelfCreatedDb = true;
     }
+    this.ftsFailures = 0;
     this.initTables();
   }
 
@@ -53,7 +72,7 @@ export class KnowledgeStore {
         provenance TEXT,
         tags TEXT,
         sha256 TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'verified',
+        status TEXT NOT NULL DEFAULT 'unreviewed',
         valid_from TEXT,
         valid_until TEXT,
         source_file TEXT,
@@ -63,6 +82,21 @@ export class KnowledgeStore {
 
       CREATE INDEX IF NOT EXISTS idx_bridge_knowledge_cat ON bridge_knowledge(category);
       CREATE INDEX IF NOT EXISTS idx_bridge_knowledge_hash ON bridge_knowledge(sha256);
+
+      CREATE TABLE IF NOT EXISTS bridge_knowledge_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        key TEXT NOT NULL,
+        author_agent TEXT NOT NULL,
+        modifier_agent TEXT NOT NULL,
+        action TEXT NOT NULL,
+        old_status TEXT,
+        new_status TEXT,
+        old_sha256 TEXT,
+        new_sha256 TEXT,
+        timestamp TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_bkh_key ON bridge_knowledge_history(key);
     `);
 
     // Migrations for existing schemas
@@ -103,6 +137,22 @@ export class KnowledgeStore {
     return crypto.createHash('sha256').update(content || '', 'utf8').digest('hex');
   }
 
+  _computeTrustLevel(status) {
+    switch (status) {
+      case 'verified':
+        return 'high';
+      case 'agent-claimed':
+        return 'medium';
+      case 'hypothesis':
+      case 'unreviewed':
+        return 'low';
+      case 'obsolete':
+      case 'failed-experiment':
+      default:
+        return 'none';
+    }
+  }
+
   /**
    * Store or update a knowledge item
    */
@@ -114,7 +164,7 @@ export class KnowledgeStore {
     authorAgent = 'system',
     provenance = null,
     tags = [],
-    status = 'verified',
+    status = null,
     validFrom = null,
     validUntil = null,
     sourceFile = null
@@ -129,11 +179,83 @@ export class KnowledgeStore {
     const sha256 = this._computeHash(cleanContent);
     const now = new Date().toISOString();
 
-    const normStatus = (status || 'verified').trim().toLowerCase();
-    const finalStatus = Object.values(KNOWLEDGE_STATUS).includes(normStatus) ? normStatus : KNOWLEDGE_STATUS.VERIFIED;
+    // 1. Status resolution and validation
+    let finalStatus;
+    if (status !== null && status !== undefined && String(status).trim() !== '') {
+      const norm = String(status).trim().toLowerCase();
+      if (!ALL_VALID_STATUSES.has(norm)) {
+        if (authorAgent === 'system' && norm === 'super-certain-truth') {
+          // Legacy backward compatibility for system author
+          finalStatus = KNOWLEDGE_STATUS.VERIFIED;
+        } else {
+          throw new Error(`INVALID_KNOWLEDGE_STATUS: Status '${status}' is not a valid knowledge status`);
+        }
+      } else {
+        finalStatus = norm;
+      }
+    } else {
+      // Secure default: agent submissions default to agent-claimed; system defaults to verified
+      if (authorAgent === 'system') {
+        finalStatus = KNOWLEDGE_STATUS.VERIFIED;
+      } else {
+        finalStatus = KNOWLEDGE_STATUS.AGENT_CLAIMED;
+      }
+    }
+
+    // 2. "verified" status requires verifiable evidence if authored by an agent
+    if (finalStatus === KNOWLEDGE_STATUS.VERIFIED && authorAgent !== 'system') {
+      let hasEvidence = false;
+      if (sourceFile) {
+        hasEvidence = true;
+      } else if (provenance && typeof provenance === 'object') {
+        if (provenance.verificationCommand || provenance.evidence || provenance.sourceReference || provenance.sourceFile || provenance.user_instruction || provenance.userInstruction || provenance.testResult) {
+          hasEvidence = true;
+        }
+      } else if (typeof provenance === 'string') {
+        const p = provenance.toLowerCase();
+        if (p.includes('verified') || p.includes('user_instruction') || p.includes('evidence') || p.includes('npm test')) {
+          hasEvidence = true;
+        }
+      }
+      if (!hasEvidence) {
+        throw new Error('VERIFICATION_EVIDENCE_REQUIRED: "verified" status requires explicit evidence fields (verificationCommand, sourceReference, or user_instruction)');
+      }
+    }
+
+    // 3. Cross-agent author protection (no silent overwrite)
+    const existing = this.db.prepare('SELECT * FROM bridge_knowledge WHERE key = ?').get(cleanKey);
+    let action = 'create';
+    if (existing) {
+      if (existing.author_agent !== authorAgent && authorAgent !== 'system') {
+        throw new Error(`KNOWLEDGE_ACCESS_DENIED: Agent '${authorAgent}' cannot overwrite record owned by '${existing.author_agent}'`);
+      }
+      action = 'update';
+    }
+
     const finalValidFrom = validFrom || now;
     const finalValidUntil = validUntil || null;
     const finalSourceFile = sourceFile ? String(sourceFile).trim() : null;
+
+    // 4. Append-only history record
+    try {
+      const histStmt = this.db.prepare(`
+        INSERT INTO bridge_knowledge_history (
+          key, author_agent, modifier_agent, action, old_status, new_status, old_sha256, new_sha256, timestamp
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      if (action === 'create') {
+        histStmt.run(cleanKey, authorAgent, authorAgent, 'create', null, finalStatus, null, sha256, now);
+      } else {
+        histStmt.run(cleanKey, existing.author_agent, authorAgent, 'update', existing.status, finalStatus, existing.sha256, sha256, now);
+      }
+    } catch (histErr) {
+      this.logger?.log?.({
+        agentId: authorAgent,
+        action: 'knowledge_history_error',
+        status: 'error',
+        details: { key: cleanKey, error: histErr.message }
+      });
+    }
 
     const stmt = this.db.prepare(`
       INSERT INTO bridge_knowledge (
@@ -158,14 +280,22 @@ export class KnowledgeStore {
     stmt.run(cleanKey, cleanCat, cleanTitle, cleanContent, authorAgent, provStr, tagsStr, sha256,
       finalStatus, finalValidFrom, finalValidUntil, finalSourceFile, now, now);
 
-    // Update FTS index
+    // Update FTS index with failure tracking
     try {
       this.db.prepare('DELETE FROM bridge_knowledge_fts WHERE key = ?').run(cleanKey);
       this.db.prepare(`
         INSERT INTO bridge_knowledge_fts (key, title, content, tags, category)
         VALUES (?, ?, ?, ?, ?)
       `).run(cleanKey, cleanTitle, cleanContent, tagsStr, cleanCat);
-    } catch {}
+    } catch (err) {
+      this.ftsFailures++;
+      this.logger?.log?.({
+        agentId: authorAgent,
+        action: 'fts_index_failure',
+        status: 'error',
+        details: { key: cleanKey, error: err.message }
+      });
+    }
 
     this.logger?.log?.({
       agentId: authorAgent,
@@ -181,11 +311,14 @@ export class KnowledgeStore {
       category: cleanCat,
       title: cleanTitle,
       status: finalStatus,
+      trustLevel: this._computeTrustLevel(finalStatus),
+      untrustedData: true,
       validFrom: finalValidFrom,
       validUntil: finalValidUntil,
       sourceFile: finalSourceFile,
       sha256,
       contentHash: `sha256:${sha256}`,
+      authorAgent,
       provenance: provStr,
       sizeBytes: Buffer.byteLength(cleanContent, 'utf8'),
       updatedAt: now
@@ -312,7 +445,10 @@ export class KnowledgeStore {
         provenance: prov,
         tags: r.tags ? r.tags.split(' ') : [],
         sha256: r.sha256,
+        contentHash: `sha256:${r.sha256}`,
         status: r.status || 'verified',
+        trustLevel: this._computeTrustLevel(r.status || 'verified'),
+        untrustedData: true,
         validFrom: r.valid_from || null,
         validUntil: r.valid_until || null,
         sourceFile: r.source_file || null,
@@ -351,7 +487,10 @@ export class KnowledgeStore {
       provenance: prov,
       tags: row.tags ? row.tags.split(' ') : [],
       sha256: row.sha256,
+      contentHash: `sha256:${row.sha256}`,
       status: row.status || 'verified',
+      trustLevel: this._computeTrustLevel(row.status || 'verified'),
+      untrustedData: true,
       validFrom: row.valid_from || null,
       validUntil: row.valid_until || null,
       sourceFile: row.source_file || null,
@@ -360,6 +499,52 @@ export class KnowledgeStore {
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
+  }
+
+  /**
+   * Get append-only modification history for a key
+   */
+  getHistory(key) {
+    if (!key) return [];
+    const cleanKey = String(key).trim().toLowerCase();
+    return this.db.prepare('SELECT * FROM bridge_knowledge_history WHERE key = ? ORDER BY id ASC').all(cleanKey);
+  }
+
+  /**
+   * Verify FTS index consistency with primary store
+   */
+  checkFtsConsistency() {
+    const rowCount = this.db.prepare('SELECT COUNT(*) as cnt FROM bridge_knowledge').get()?.cnt || 0;
+    let ftsCount = 0;
+    try {
+      ftsCount = this.db.prepare('SELECT COUNT(*) as cnt FROM bridge_knowledge_fts').get()?.cnt || 0;
+    } catch {}
+    return {
+      consistent: rowCount === ftsCount,
+      rowCount,
+      ftsCount,
+      failures: this.ftsFailures
+    };
+  }
+
+  /**
+   * Rebuild FTS index from durable primary records
+   */
+  reindexFts() {
+    try {
+      this.db.prepare('DELETE FROM bridge_knowledge_fts').run();
+    } catch {}
+    const rows = this.db.prepare('SELECT key, title, content, tags, category FROM bridge_knowledge').all();
+    const insertStmt = this.db.prepare(`
+      INSERT INTO bridge_knowledge_fts (key, title, content, tags, category)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    let count = 0;
+    for (const r of rows) {
+      insertStmt.run(r.key, r.title, r.content, r.tags || '', r.category || 'general');
+      count++;
+    }
+    return { reindexed: count };
   }
 
   /**

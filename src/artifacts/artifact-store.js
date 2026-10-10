@@ -461,7 +461,8 @@ export class ArtifactStore {
         SELECT * FROM bridge_artifacts
         WHERE transfer_status = 'STORED' AND expires_at IS NOT NULL AND expires_at <= ?
       `).all(new Date(now).toISOString());
-    } catch {
+    } catch (err) {
+      this.logger?.debug?.('Failed to query expired artifacts', err);
       return { cleaned: 0 };
     }
 
@@ -472,7 +473,9 @@ export class ArtifactStore {
         if (fs.existsSync(storagePath)) fs.rmSync(storagePath, { force: true });
         this.db.prepare(`UPDATE bridge_artifacts SET transfer_status = 'EXPIRED' WHERE artifact_id = ?`).run(row.artifact_id);
         cleaned++;
-      } catch {}
+      } catch (err) {
+        this.logger?.debug?.(`Failed to clean expired artifact ${row.artifact_id}`, err);
+      }
     }
     return { cleaned };
   }

@@ -11,6 +11,8 @@ import {
 import { ResponsePreserver, detectResponseMode, ResponseMode } from './artifacts/response-preserver.js';
 import { ArtifactStore } from './artifacts/artifact-store.js';
 import { TokenAccountant } from './telemetry/token-accountant.js';
+import { CONFIG } from './config.js';
+import { normalizeAgentId } from './agent-identity.js';
 
 export const TERMINAL_REQUEST_STATES = Object.freeze(new Set([
   'completed',
@@ -74,6 +76,9 @@ export class MailboxHub {
     emitEvent = true,
     dedupKey = null
   }) {
+    const normFrom = normalizeAgentId(fromAgent) || fromAgent;
+    const normTo = normalizeAgentId(toAgent) || toAgent;
+
     const id = `msg_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const timestamp = new Date().toISOString();
     const convId = conversationId || `conv_msg_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
@@ -86,22 +91,22 @@ export class MailboxHub {
         INSERT INTO messages (id, timestamp, from_agent, to_agent, subject, content, reply_to_id, read_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
       `);
-      stmt.run(id, timestamp, fromAgent, toAgent, subject, content, replyToId);
+      stmt.run(id, timestamp, normFrom, normTo, subject, content, replyToId);
 
       this.logger?.log({
-        agentId: fromAgent,
+        agentId: normFrom,
         action: 'send_message',
         targetPath: null,
         command: null,
         status: 'success',
-        details: { messageId: id, toAgent, subject, conversationId: convId, requestId }
+        details: { messageId: id, toAgent: normTo, subject, conversationId: convId, requestId }
       });
 
       if (emitEvent && stageEventFn) {
         stageEventFn({
           type: 'message_sent',
-          agentId: toAgent,
-          fromAgent,
+          agentId: normTo,
+          fromAgent: normFrom,
           conversationId: convId,
           requestId,
           status: 'unread',
@@ -113,7 +118,7 @@ export class MailboxHub {
         });
       }
 
-      resultMsg = { id, timestamp, fromAgent, toAgent, subject, content, replyToId, conversationId: convId, requestId };
+      resultMsg = { id, timestamp, fromAgent: normFrom, toAgent: normTo, subject, content, replyToId, conversationId: convId, requestId };
     };
 
     if (this.eventBus && typeof this.eventBus.runInTransaction === 'function') {
@@ -157,6 +162,7 @@ export class MailboxHub {
   }
 
   getInbox({ agentId, unreadOnly = false, compact = false, limit = 50 }) {
+    const normAgent = normalizeAgentId(agentId) || agentId;
     let query = `SELECT * FROM messages WHERE to_agent = ?`;
     if (unreadOnly) {
       query += ` AND read_at IS NULL`;
@@ -164,10 +170,10 @@ export class MailboxHub {
     query += ` ORDER BY timestamp DESC LIMIT ?`;
 
     const stmt = this.db.prepare(query);
-    const messages = stmt.all(agentId, limit);
+    const messages = stmt.all(normAgent, limit);
 
     this.logger.log({
-      agentId,
+      agentId: normAgent,
       action: 'check_inbox',
       targetPath: null,
       command: null,
@@ -212,13 +218,16 @@ export class MailboxHub {
     notifyInbox = true,
     emitEvent = true
   }) {
+    const normFrom = normalizeAgentId(fromAgent) || fromAgent;
+    const normTo = normalizeAgentId(toAgent) || toAgent;
+
     const resolvedReqId = requestId || `req_task_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const convId = conversationId || (resolvedReqId ? `conv_${resolvedReqId}` : null);
 
     const runWork = () => {
       const task = this.tasks.createTask({
-        fromAgent,
-        toAgent,
+        fromAgent: normFrom,
+        toAgent: normTo,
         title,
         instructions,
         context,
@@ -242,9 +251,11 @@ export class MailboxHub {
                 request_id, conversation_id, from_agent, to_agent, question, context,
                 task_id, status, response, error, timeout_ms, created_at, updated_at
               ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, 60000, ?, ?)
-            `).run(resolvedReqId, convId, fromAgent, toAgent, instructions || title, ctxStr, task.id, now, now);
+            `).run(resolvedReqId, convId, normFrom, normTo, instructions || title, ctxStr, task.id, now, now);
           }
-        } catch {}
+        } catch (reqInsErr) {
+          this.logger?.debug?.('Failed to create matching bridge_request in delegateTask', reqInsErr);
+        }
       }
 
       const actualConvId = convId || `conv_task_${task.id}`;
@@ -252,8 +263,8 @@ export class MailboxHub {
       // Send an inbox message for durable mail fallback only if requested
       if (notifyInbox) {
         this.sendMessage({
-          fromAgent,
-          toAgent,
+          fromAgent: normFrom,
+          toAgent: normTo,
           subject: `[Task Delegation] ${title}`,
           content: `New task assigned (${task.id}): ${instructions}`,
           replyToId: null,
@@ -290,18 +301,55 @@ export class MailboxHub {
     asyncMode = false,
     responseMode = null
   }) {
+    const normFrom = normalizeAgentId(fromAgent) || fromAgent;
+    const normTo = normalizeAgentId(toAgent) || toAgent;
+
+    if (fromAgent && normFrom !== fromAgent) {
+      this.logger?.log?.({
+        agentId: normFrom,
+        action: 'agent_alias_normalized',
+        status: 'info',
+        details: { raw: fromAgent, normalized: normFrom, context: 'askAgent.fromAgent' }
+      });
+    }
+    if (toAgent && normTo !== toAgent) {
+      this.logger?.log?.({
+        agentId: normTo,
+        action: 'agent_alias_normalized',
+        status: 'info',
+        details: { raw: toAgent, normalized: normTo, context: 'askAgent.toAgent' }
+      });
+    }
+
+    if (!toAgent) {
+      return {
+        mode: 'request_failed',
+        fromAgent: normFrom,
+        toAgent: null,
+        requestId: requestId || `req_missing_target_${Date.now()}`,
+        conversationId,
+        taskId: null,
+        question,
+        status: 'failed',
+        error: 'EXECUTION_UNSUPPORTED: Target agent must be specified'
+      };
+    }
+
     const timestamp = new Date().toISOString();
     const resolvedMode = detectResponseMode({ question, explicitMode: responseMode });
 
     // 1. If target agent has a registered local handler (e.g. test peer or in-memory mock), call synchronously
-    const handler = this.agentHandlers.get(toAgent);
+    const handler = this.agentHandlers.get(normTo) || this.agentHandlers.get(toAgent);
     if (handler) {
+      const syncRespondingId = this.agentHandlers.has(toAgent) ? toAgent : normTo;
+      const syncRequestingId = normFrom;
+
       const sensitive = isSensitiveCredentialRequest(question);
       if (sensitive.sensitive) {
         return {
           mode: 'request_failed',
-          fromAgent,
-          toAgent,
+          fromAgent: syncRequestingId,
+          toAgent: syncRespondingId,
           requestId: requestId || `req_denied_${Date.now()}`,
           conversationId,
           taskId: null,
@@ -313,20 +361,20 @@ export class MailboxHub {
 
       let response;
       if (isVerificationTokenRequest(question)) {
-        response = getRegisteredVerificationToken(toAgent);
+        response = getRegisteredVerificationToken(syncRespondingId) || getRegisteredVerificationToken(toAgent);
       } else {
         response = await handler(question, context);
       }
 
       this.sendMessage({
-        fromAgent,
-        toAgent,
+        fromAgent: syncRequestingId,
+        toAgent: syncRespondingId,
         subject: `[Direct Query] ${question.slice(0, 40)}...`,
         content: question
       });
       this.sendMessage({
-        fromAgent: toAgent,
-        toAgent: fromAgent,
+        fromAgent: syncRespondingId,
+        toAgent: syncRequestingId,
         subject: `[Direct Response] Re: ${question.slice(0, 40)}...`,
         content: typeof response === 'string' ? response : JSON.stringify(response)
       });
@@ -344,8 +392,8 @@ export class MailboxHub {
           `).run(
             reqIdSync,
             conversationId || `conv_sync_${Date.now()}`,
-            fromAgent,
-            toAgent,
+            syncRequestingId,
+            syncRespondingId,
             question,
             typeof context === 'object' && context !== null ? JSON.stringify(context) : context,
             respText,
@@ -354,7 +402,9 @@ export class MailboxHub {
             nowSync,
             nowSync
           );
-        } catch {}
+        } catch (reqSyncErr) {
+          this.logger?.debug?.('Failed to insert bridge_request in askAgent', reqSyncErr);
+        }
       }
 
       let artifact = null;
@@ -363,8 +413,8 @@ export class MailboxHub {
       try {
         artifact = this.responsePreserver.preserveResponse({
           requestId: reqIdSync,
-          respondingAgentId: toAgent,
-          requestingAgentId: fromAgent,
+          respondingAgentId: syncRespondingId,
+          requestingAgentId: syncRequestingId,
           responseText: respText,
           responseMode: resolvedMode,
           executionMetadata: {
@@ -377,8 +427,8 @@ export class MailboxHub {
         tokenMetrics = this.tokenAccountant.recordTurn({
           requestId: reqIdSync,
           responseMode: resolvedMode,
-          requestingAgent: fromAgent,
-          respondingAgent: toAgent,
+          requestingAgent: syncRequestingId,
+          respondingAgent: syncRespondingId,
           promptText: question,
           responseText: respText
         });
@@ -390,8 +440,8 @@ export class MailboxHub {
 
       return {
         mode: 'synchronous_peer_response',
-        fromAgent,
-        toAgent,
+        fromAgent: syncRequestingId,
+        toAgent: syncRespondingId,
         question,
         response: isQuarantined ? null : response,
         status: isQuarantined ? 'quarantined' : 'completed',
@@ -612,12 +662,12 @@ export class MailboxHub {
           request_id, conversation_id, from_agent, to_agent, question, context,
           task_id, status, response, error, timeout_ms, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', NULL, NULL, ?, ?, ?)
-      `).run(reqId, convId, fromAgent, toAgent, question, ctxString, timeoutMs, now, now);
+      `).run(reqId, convId, normFrom, normTo, question, ctxString, timeoutMs, now, now);
 
       task = this.delegateTask({
-        fromAgent,
-        toAgent,
-        title: `Query from ${fromAgent}`,
+        fromAgent: normFrom,
+        toAgent: normTo,
+        title: `Query from ${normFrom}`,
         instructions: question,
         context: taskContext,
         priority: 'high',
@@ -634,8 +684,8 @@ export class MailboxHub {
       if (stageEventFn) {
         stageEventFn({
           type: 'request_created',
-          agentId: toAgent,
-          fromAgent,
+          agentId: normTo,
+          fromAgent: normFrom,
           conversationId: convId,
           requestId: reqId,
           taskId: task.id,
@@ -657,8 +707,8 @@ export class MailboxHub {
       if (this.eventBus) {
         this.eventBus.publish({
           type: 'request_created',
-          agentId: toAgent,
-          fromAgent,
+          agentId: normTo,
+          fromAgent: normFrom,
           conversationId: convId,
           requestId: reqId,
           taskId: task.id,
@@ -676,15 +726,15 @@ export class MailboxHub {
       requestId: reqId,
       stage: LifecycleStage.REQUEST_CREATED,
       taskId: task ? task.id : null,
-      agentId: toAgent,
-      meta: { fromAgent, conversationId: convId, asyncMode }
+      agentId: normTo,
+      meta: { fromAgent: normFrom, conversationId: convId, asyncMode }
     });
     if (task) {
       this.tracer.mark({
         requestId: reqId,
         stage: LifecycleStage.TASK_CREATED,
         taskId: task.id,
-        agentId: toAgent
+        agentId: normTo
       });
     }
 
@@ -692,13 +742,13 @@ export class MailboxHub {
     if (asyncMode) {
       return {
         mode: 'queued_in_mailbox',
-        fromAgent,
-        toAgent,
+        fromAgent: normFrom,
+        toAgent: normTo,
         requestId: reqId,
         conversationId: convId,
         taskId: task.id,
         status: 'pending',
-        note: `Query queued in ${toAgent}'s mailbox for processing.`
+        note: `Query queued in ${normTo}'s mailbox for processing.`
       };
     }
 
@@ -706,7 +756,7 @@ export class MailboxHub {
     // Originating agent stays attached to correlated response channel waiting for B's answer
     const outcome = await this.eventBus.waitForResponse({
       requestId: reqId,
-      agentId: fromAgent,
+      agentId: normFrom,
       taskId: task ? task.id : null,
       timeoutMs
     });
@@ -716,7 +766,7 @@ export class MailboxHub {
       requestId: reqId,
       stage: LifecycleStage.RESPONSE_RETURNED,
       taskId: task ? task.id : null,
-      agentId: fromAgent,
+      agentId: normFrom,
       meta: { outcome: outcome.status }
     });
 
@@ -734,8 +784,8 @@ export class MailboxHub {
 
       return {
         mode: 'autonomous_correlated_response',
-        fromAgent,
-        toAgent,
+        fromAgent: normFrom,
+        toAgent: normTo,
         requestId: reqId,
         conversationId: convId,
         taskId: task.id,
@@ -763,21 +813,21 @@ export class MailboxHub {
 
       return {
         mode: 'request_timeout',
-        fromAgent,
-        toAgent,
+        fromAgent: normFrom,
+        toAgent: normTo,
         requestId: reqId,
         conversationId: convId,
         taskId: task.id,
         question,
         status: 'timeout',
-        error: outcome.error || `Timed out after ${timeoutMs}ms waiting for response from ${toAgent}`,
+        error: outcome.error || `Timed out after ${timeoutMs}ms waiting for response from ${normTo}`,
         recoverable: true
       };
     } else {
       return {
         mode: 'request_failed',
-        fromAgent,
-        toAgent,
+        fromAgent: normFrom,
+        toAgent: normTo,
         requestId: reqId,
         conversationId: convId,
         taskId: task.id,
@@ -865,7 +915,9 @@ export class MailboxHub {
                   payload: result || error,
                   reason: `Late ${status} submitted after request was already terminal '${reqRow.status}'`
                 });
-              } catch {}
+              } catch (qErr) {
+                this.logger?.debug?.('Failed to quarantine late response in submitTaskResult', qErr);
+              }
             }
             this.logger?.log({
               agentId,
@@ -881,7 +933,9 @@ export class MailboxHub {
               SET status = ?, response = ?, error = ?, updated_at = ?, completed_at = ?
               WHERE request_id = ?
             `).run(status, resultStr, error, now, now, requestId);
-          } catch {}
+          } catch (updErr) {
+            this.logger?.debug?.('Failed to update bridge_requests in submitTaskResult', updErr);
+          }
         }
       }
 
@@ -1025,7 +1079,8 @@ export class MailboxHub {
   }
 
   claimNextTask(agentId) {
-    return this.tasks.claimNextTask(agentId);
+    const norm = normalizeAgentId(agentId) || agentId;
+    return this.tasks.claimNextTask(norm);
   }
 
   failTask({ taskId, agentId, error, allowRetry = true, attemptId = null, epoch = null }) {
@@ -1161,7 +1216,9 @@ export class MailboxHub {
             payload: response || error,
             reason: errMsg
           });
-        } catch {}
+        } catch (qErr) {
+          this.logger?.debug?.('Failed to quarantine unauth response in answerRequest', qErr);
+        }
       }
       return {
         status: 'quarantined',
@@ -1193,7 +1250,9 @@ export class MailboxHub {
             payload: response || error,
             reason: `Late submission on already terminal request (${reqRow.status})`
           });
-        } catch {}
+        } catch (qErr) {
+          this.logger?.debug?.('Failed to quarantine late response on terminal request in answerRequest', qErr);
+        }
       }
       return {
         status: 'quarantined',
@@ -1232,7 +1291,9 @@ export class MailboxHub {
             payload: response || error,
             reason: fencingErr.message
           });
-        } catch {}
+        } catch (qErr) {
+          this.logger?.debug?.('Failed to quarantine fenced late response in answerRequest', qErr);
+        }
         return {
           status: 'quarantined',
           quarantined: true,

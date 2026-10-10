@@ -12,6 +12,11 @@ export class DiagnosticsManager {
       totalExecutionMs: 0
     };
     this.startTime = Date.now();
+    this.startupStamp = null;
+  }
+
+  setStartupStamp(stamp) {
+    this.startupStamp = stamp;
   }
 
   recordToolExecution(toolName, durationMs, success = true) {
@@ -52,6 +57,7 @@ export class DiagnosticsManager {
 
     return {
       uptimeSec,
+      startupStamp: this.startupStamp || null,
       memoryMb: {
         rss: Math.round(memoryUsage.rss / 1024 / 1024),
         heapUsed: Math.round(memoryUsage.heapUsed / 1024 / 1024)
@@ -209,6 +215,7 @@ export class DiagnosticsManager {
 
     return {
       agent: agentId,
+      startupStamp: this.startupStamp || null,
       state,
       connection,
       cursor,

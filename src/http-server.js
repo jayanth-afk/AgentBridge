@@ -1,5 +1,6 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
+import { execSync } from 'node:child_process';
 import { CONFIG } from './config.js';
 import { timingSafeEqualString } from './config-resolver.js';
 import { ToolRegistry } from './tool-registry.js';
@@ -36,6 +37,20 @@ export class BridgeHttpServer {
     this.effectsLedger = options.effectsLedger || (this.logger?.db ? new EffectsLedger(this.logger) : null);
     this.attemptLedger = options.attemptLedger || this.taskManager?.attempts || (this.logger?.db ? new AttemptLedger(this.logger) : null);
     this.artifactStore = options.artifactStore || (this.logger ? new ArtifactStore(this.logger) : null);
+
+    if (!this.diagnostics.startupStamp) {
+      let gitHead = 'unknown';
+      try {
+        gitHead = execSync('git rev-parse HEAD', { cwd: CONFIG.BRIDGE_ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      } catch {}
+      this.diagnostics.setStartupStamp({
+        gitHead,
+        toolCount: this.registry.getToolDefinitions().length,
+        profile: this.registry.profile || 'all',
+        startedAt: new Date().toISOString(),
+        pid: process.pid
+      });
+    }
 
     // Authentication boundary for network-exposed control plane requests.
     // Enforced when `requireApiKey` is on (operator opt-in) or an explicit
@@ -245,7 +260,8 @@ export class BridgeHttpServer {
               ziaWriteLocked: this.guard.config.ZIA_WRITE_LOCKED,
               allowedRoots: this.guard.config.ALLOWED_ROOTS,
               activeAgents: this.guard.config.AGENT_IDENTITIES,
-              liveAgents: this.presence ? this.presence.listAgents() : []
+              liveAgents: this.presence ? this.presence.listAgents() : [],
+              startupStamp: this.diagnostics?.startupStamp || null
             }));
           }
 
@@ -630,7 +646,7 @@ export class BridgeHttpServer {
                   protocolVersion: clientProtocol,
                   capabilities: {
                     tools: {
-                      listChanged: false
+                      listChanged: true
                     }
                   },
                   serverInfo: {
@@ -747,6 +763,19 @@ export class BridgeHttpServer {
 
       this.server.on('error', reject);
     });
+  }
+
+  broadcastToolListChanged() {
+    const notification = {
+      jsonrpc: '2.0',
+      method: 'notifications/tools/list_changed',
+      params: {}
+    };
+    for (const [sessionId, client] of this.sseClients.entries()) {
+      try {
+        client.res.write(`event: message\ndata: ${JSON.stringify(notification)}\n\n`);
+      } catch {}
+    }
   }
 
   stop() {
