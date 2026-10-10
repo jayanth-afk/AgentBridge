@@ -178,6 +178,13 @@ export class BridgeMcpServer {
   }
 
   async startStdio() {
+    if (this.taskManager && typeof this.taskManager.startupRecovery === 'function') {
+      try {
+        this.taskManager.startupRecovery();
+      } catch (err) {
+        this.logger?.warn?.('Startup recovery failed on MCP server start', { error: err.message });
+      }
+    }
     if (this.httpServer) {
       try {
         await this.httpServer.start();

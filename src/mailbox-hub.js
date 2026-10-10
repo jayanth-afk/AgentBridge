@@ -192,7 +192,8 @@ export class MailboxHub {
     notifyInbox = true,
     emitEvent = true
   }) {
-    const convId = conversationId || (requestId ? `conv_${requestId}` : null);
+    const resolvedReqId = requestId || `req_task_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    const convId = conversationId || (resolvedReqId ? `conv_${resolvedReqId}` : null);
 
     const runWork = () => {
       const task = this.tasks.createTask({
@@ -205,9 +206,26 @@ export class MailboxHub {
         priority,
         dependencies,
         conversationId: convId,
-        requestId,
+        requestId: resolvedReqId,
         emitEvent
       });
+
+      // Establish uniform request-task correlation in bridge_requests so desktop and autonomous workers can uniformly claim and track all tasks
+      if (this.db) {
+        try {
+          const existing = this.db.prepare('SELECT request_id FROM bridge_requests WHERE request_id = ?').get(resolvedReqId);
+          if (!existing) {
+            const now = new Date().toISOString();
+            const ctxStr = typeof context === 'object' && context !== null ? JSON.stringify(context) : context;
+            this.db.prepare(`
+              INSERT INTO bridge_requests (
+                request_id, conversation_id, from_agent, to_agent, question, context,
+                task_id, status, response, error, timeout_ms, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, 60000, ?, ?)
+            `).run(resolvedReqId, convId, fromAgent, toAgent, instructions || title, ctxStr, task.id, now, now);
+          }
+        } catch {}
+      }
 
       const actualConvId = convId || `conv_task_${task.id}`;
 
@@ -305,6 +323,122 @@ export class MailboxHub {
     const reqId = requestId || `req_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const convId = conversationId || `conv_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const now = new Date().toISOString();
+
+    // Idempotent reconnect check: if this request already exists in bridge_requests,
+    // attach to existing request rather than inserting a duplicate and failing.
+    let existingReq = null;
+    if (requestId) {
+      try {
+        existingReq = this.db.prepare('SELECT * FROM bridge_requests WHERE request_id = ?').get(requestId);
+      } catch {}
+    }
+
+    if (existingReq) {
+      if (existingReq.status === 'completed') {
+        this.tracer?.mark({
+          requestId: existingReq.request_id,
+          stage: LifecycleStage.RESPONSE_RETURNED,
+          taskId: existingReq.task_id,
+          agentId: fromAgent,
+          meta: { outcome: 'completed', reconnected: true }
+        });
+        return {
+          mode: 'autonomous_correlated_response',
+          fromAgent: existingReq.from_agent,
+          toAgent: existingReq.to_agent,
+          requestId: existingReq.request_id,
+          conversationId: existingReq.conversation_id,
+          taskId: existingReq.task_id,
+          question: existingReq.question,
+          response: existingReq.response,
+          status: 'completed',
+          timestamp: existingReq.completed_at || existingReq.updated_at
+        };
+      }
+      if (existingReq.status === 'failed') {
+        return {
+          mode: 'request_failed',
+          fromAgent: existingReq.from_agent,
+          toAgent: existingReq.to_agent,
+          requestId: existingReq.request_id,
+          conversationId: existingReq.conversation_id,
+          taskId: existingReq.task_id,
+          question: existingReq.question,
+          status: 'failed',
+          error: existingReq.error || 'Request failed'
+        };
+      }
+      if (asyncMode) {
+        return {
+          mode: 'queued_in_mailbox',
+          fromAgent: existingReq.from_agent,
+          toAgent: existingReq.to_agent,
+          requestId: existingReq.request_id,
+          conversationId: existingReq.conversation_id,
+          taskId: existingReq.task_id,
+          status: existingReq.status,
+          note: `Re-attached to existing request (${existingReq.status}) in ${existingReq.to_agent}'s mailbox.`
+        };
+      }
+      // Re-attach sync waiter to existing in-flight request
+      const outcome = await this.eventBus.waitForResponse({
+        requestId: existingReq.request_id,
+        agentId: fromAgent,
+        taskId: existingReq.task_id,
+        timeoutMs
+      });
+      this.tracer?.mark({
+        requestId: existingReq.request_id,
+        stage: LifecycleStage.RESPONSE_RETURNED,
+        taskId: existingReq.task_id,
+        agentId: fromAgent,
+        meta: { outcome: outcome.status, reconnected: true }
+      });
+      if (outcome.status === 'completed') {
+        let finalResponse = outcome.response;
+        if (finalResponse === undefined || finalResponse === null) {
+          const row = this.db.prepare('SELECT response FROM bridge_requests WHERE request_id = ?').get(existingReq.request_id);
+          finalResponse = row?.response;
+        }
+        return {
+          mode: 'autonomous_correlated_response',
+          fromAgent: existingReq.from_agent,
+          toAgent: existingReq.to_agent,
+          requestId: existingReq.request_id,
+          conversationId: existingReq.conversation_id,
+          taskId: existingReq.task_id,
+          question: existingReq.question,
+          response: finalResponse,
+          status: 'completed',
+          timestamp: outcome.completedAt || new Date().toISOString()
+        };
+      } else if (outcome.status === 'timeout') {
+        return {
+          mode: 'request_timeout',
+          fromAgent: existingReq.from_agent,
+          toAgent: existingReq.to_agent,
+          requestId: existingReq.request_id,
+          conversationId: existingReq.conversation_id,
+          taskId: existingReq.task_id,
+          question: existingReq.question,
+          status: 'timeout',
+          error: outcome.error || `Timed out after ${timeoutMs}ms waiting for response from ${existingReq.to_agent}`,
+          recoverable: true
+        };
+      } else {
+        return {
+          mode: 'request_failed',
+          fromAgent: existingReq.from_agent,
+          toAgent: existingReq.to_agent,
+          requestId: existingReq.request_id,
+          conversationId: existingReq.conversation_id,
+          taskId: existingReq.task_id,
+          question: existingReq.question,
+          status: 'failed',
+          error: outcome.error || 'Request failed'
+        };
+      }
+    }
 
     // Store request in bridge_requests table for full durability
     const ctxString = typeof context === 'object' && context !== null ? JSON.stringify(context) : context;
@@ -547,13 +681,17 @@ export class MailboxHub {
       const resultStr = typeof result === 'string' ? result : (result ? JSON.stringify(result) : null);
 
       if (requestId) {
-        try {
-          targetDb.prepare(`
-            UPDATE bridge_requests
-            SET status = ?, response = ?, error = ?, updated_at = ?, completed_at = ?
-            WHERE request_id = ?
-          `).run(status, resultStr, error, now, now, requestId);
-        } catch {}
+        // If request is already terminal completed, do NOT downgrade or overwrite it with failure
+        const isAlreadyCompleted = reqRow?.status === 'completed';
+        if (!isAlreadyCompleted || status === 'completed') {
+          try {
+            targetDb.prepare(`
+              UPDATE bridge_requests
+              SET status = ?, response = ?, error = ?, updated_at = ?, completed_at = ?
+              WHERE request_id = ?
+            `).run(status, resultStr, error, now, now, requestId);
+          } catch {}
+        }
       }
 
       // Record persistence inside the same transaction as the authoritative
@@ -611,8 +749,9 @@ export class MailboxHub {
         }
       }
 
-      // Durable mailbox notification fallback only for standalone tasks (not active correlated requests)
-      if (!requestId && task && task.creator && task.creator !== agentId) {
+      // Durable mailbox notification fallback for standalone tasks (not active correlated requests)
+      const isStandaloneTask = !requestId || requestId.startsWith('req_task_');
+      if (isStandaloneTask && task && task.creator && task.creator !== agentId) {
         this.sendMessage({
           fromAgent: agentId,
           toAgent: task.creator,
@@ -622,11 +761,11 @@ export class MailboxHub {
             status,
             result: task.result,
             error: task.error,
-            requestId: null,
+            requestId,
             conversationId
           }),
           conversationId,
-          requestId: null
+          requestId
         });
       }
     };
@@ -660,8 +799,8 @@ export class MailboxHub {
     return this.tasks.claimNextTask(agentId);
   }
 
-  failTask({ taskId, agentId, error, allowRetry = true }) {
-    const res = this.tasks.failTask({ taskId, agentId, error, allowRetry });
+  failTask({ taskId, agentId, error, allowRetry = true, attemptId = null, epoch = null }) {
+    const res = this.tasks.failTask({ taskId, agentId, error, allowRetry, attemptId, epoch });
     if (res.status === 'failed') {
       this.submitTaskResult({ taskId, agentId, status: 'failed', error });
     }
@@ -731,7 +870,7 @@ export class MailboxHub {
     }
   }
 
-  answerRequest({ requestId, agentId, response, status = 'completed', error = null }) {
+  answerRequest({ requestId, agentId, response, status = 'completed', error = null, attemptId = null, epoch = null }) {
     if (!requestId) throw new Error('requestId is required');
     if (!agentId) throw new Error('agentId is required');
 
@@ -750,8 +889,20 @@ export class MailboxHub {
         agentId,
         status,
         result: response,
-        error
+        error,
+        attemptId,
+        epoch
       });
+    }
+
+    // Direct request without backing task
+    if (reqRow.status === 'completed' && status !== 'completed') {
+      return {
+        status: 'completed',
+        requestId,
+        answeredBy: reqRow.to_agent,
+        result: reqRow.response
+      };
     }
 
     // Direct request without backing task

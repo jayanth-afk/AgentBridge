@@ -727,4 +727,137 @@ export class GitController {
       throw new Error(`GitPushFailed: ${firstLine}`);
     }
   }
+
+  async getSummary(repoPath, agentId) {
+    const t0 = Date.now();
+    const perm = this.guard.checkPermission(agentId, 'GIT_READ');
+    if (!perm.allowed) throw new Error(perm.reason);
+
+    const pathCheck = this.guard.validatePathAccess(repoPath, 'READ');
+    if (!pathCheck.allowed) throw new Error(pathCheck.reason);
+
+    await this._verifyGitRepo(pathCheck.path);
+
+    try {
+      const { stdout: headOut } = await this._execGit(pathCheck.path, ['rev-parse', '--short', 'HEAD']);
+      const headCommit = headOut.trim();
+
+      const { stdout: branchOut } = await this._execGit(pathCheck.path, ['rev-parse', '--abbrev-ref', 'HEAD']);
+      const branch = branchOut.trim();
+
+      const { stdout: statusOut } = await this._execGit(pathCheck.path, ['status', '--porcelain=v1']);
+      const statusLines = statusOut.split('\n').filter(Boolean);
+
+      let stagedCount = 0;
+      let unstagedCount = 0;
+      let untrackedCount = 0;
+
+      for (const line of statusLines) {
+        const x = line[0];
+        const y = line[1];
+        if (x === '?' && y === '?') {
+          untrackedCount++;
+        } else {
+          if (x !== ' ' && x !== '?') stagedCount++;
+          if (y !== ' ' && y !== '?') unstagedCount++;
+        }
+      }
+
+      const summary = {
+        branch,
+        commit: headCommit,
+        isClean: statusLines.length === 0,
+        stagedCount,
+        unstagedCount,
+        untrackedCount,
+        totalDirtyFiles: statusLines.length,
+        executionMs: Date.now() - t0
+      };
+
+      this.logger.log({
+        agentId,
+        action: 'git_summary',
+        targetPath: pathCheck.path,
+        status: 'success',
+        executionMs: Date.now() - t0,
+        details: summary
+      });
+
+      return summary;
+    } catch (err) {
+      throw new Error(`GitSummaryFailed: ${err.message}`);
+    }
+  }
+
+  async getBlame(repoPath, agentId, filePath, startLine = 1, endLine = 50) {
+    const t0 = Date.now();
+    const perm = this.guard.checkPermission(agentId, 'GIT_READ');
+    if (!perm.allowed) throw new Error(perm.reason);
+
+    const pathCheck = this.guard.validatePathAccess(repoPath, 'READ');
+    if (!pathCheck.allowed) throw new Error(pathCheck.reason);
+
+    await this._verifyGitRepo(pathCheck.path);
+
+    const fileRel = path.relative(pathCheck.path, path.resolve(pathCheck.path, filePath));
+    const s = Math.max(1, parseInt(startLine, 10) || 1);
+    const e = Math.max(s, parseInt(endLine, 10) || (s + 20));
+
+    try {
+      const { stdout } = await this._execGit(pathCheck.path, [
+        'blame',
+        `-L${s},${e}`,
+        '--porcelain',
+        '--',
+        fileRel
+      ]);
+
+      const lines = stdout.split('\n');
+      const entries = [];
+      let currentCommit = null;
+      let currentAuthor = null;
+      let currentLineNum = null;
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line) continue;
+        if (line.startsWith('\t')) {
+          entries.push({
+            lineNumber: currentLineNum,
+            commit: currentCommit ? currentCommit.slice(0, 8) : 'unknown',
+            author: currentAuthor || 'unknown',
+            content: line.slice(1).slice(0, 100)
+          });
+        } else {
+          const parts = line.split(' ');
+          if (parts.length >= 3 && /^[0-9a-f]{40}$/.test(parts[0])) {
+            currentCommit = parts[0];
+            currentLineNum = parseInt(parts[2], 10);
+          } else if (parts[0] === 'author') {
+            currentAuthor = parts.slice(1).join(' ');
+          }
+        }
+      }
+
+      const result = {
+        file: fileRel,
+        range: `${s}-${e}`,
+        entries: entries.slice(0, 100),
+        executionMs: Date.now() - t0
+      };
+
+      this.logger.log({
+        agentId,
+        action: 'git_blame',
+        targetPath: pathCheck.path,
+        status: 'success',
+        executionMs: Date.now() - t0,
+        details: { file: fileRel, count: entries.length }
+      });
+
+      return result;
+    } catch (err) {
+      throw new Error(`GitBlameFailed: ${err.message}`);
+    }
+  }
 }

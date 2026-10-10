@@ -23,23 +23,58 @@ export class AgentBridgeClient {
       ...(options.headers || {})
     };
 
-    const res = await fetch(url, {
-      ...options,
-      headers
-    });
+    const maxRetries = options.maxRetries ?? 3;
+    let attempt = 0;
 
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      const err = new Error(`Bridge HTTP Error ${res.status}: ${errText}`);
-      err.status = res.status;
-      throw err;
-    }
+    while (true) {
+      attempt++;
+      let res;
+      try {
+        res = await fetch(url, {
+          ...options,
+          headers
+        });
+      } catch (networkErr) {
+        if (attempt <= maxRetries) {
+          const delay = Math.min(250 * Math.pow(2, attempt - 1) + Math.random() * 100, 3000);
+          await new Promise(r => setTimeout(r, delay));
+          continue;
+        }
+        throw networkErr;
+      }
 
-    const contentType = res.headers.get('content-type') || '';
-    if (contentType.includes('application/json')) {
-      return await res.json();
+      if (res.status === 429 || res.status === 503) {
+        if (attempt <= maxRetries) {
+          const retryAfterHeader = res.headers?.get ? res.headers.get('retry-after') : null;
+          let delayMs = 0;
+          if (retryAfterHeader) {
+            const parsedSeconds = parseFloat(retryAfterHeader);
+            if (!isNaN(parsedSeconds)) {
+              delayMs = Math.min(parsedSeconds * 1000, 10000);
+            }
+          }
+          if (delayMs <= 0) {
+            // Bounded exponential backoff with jitter
+            delayMs = Math.min(250 * Math.pow(2, attempt - 1) + Math.random() * 150, 4000);
+          }
+          await new Promise(r => setTimeout(r, delayMs));
+          continue;
+        }
+      }
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        const err = new Error(`Bridge HTTP Error ${res.status}: ${errText}`);
+        err.status = res.status;
+        throw err;
+      }
+
+      const contentType = res.headers?.get ? (res.headers.get('content-type') || '') : '';
+      if (contentType.includes('application/json')) {
+        return await res.json();
+      }
+      return await res.text();
     }
-    return await res.text();
   }
 
   /** Health & Connectivity */

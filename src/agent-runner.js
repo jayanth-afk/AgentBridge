@@ -235,7 +235,9 @@ export class AgentRunner extends EventEmitter {
         taskId: task.id,
         agentId: this.agentId,
         status: 'completed',
-        result: typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+        result: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
+        attemptId: task.attemptId || null,
+        epoch: task.epoch || null
       });
 
       this.emit('taskCompleted', { task, result, executionMs: Date.now() - t0 });
@@ -249,7 +251,9 @@ export class AgentRunner extends EventEmitter {
         taskId: task.id,
         agentId: this.agentId,
         error: err.message,
-        allowRetry: true
+        allowRetry: true,
+        attemptId: task.attemptId || null,
+        epoch: task.epoch || null
       });
 
       this.emit('taskFailed', { task, error: err.message, executionMs: Date.now() - t0 });

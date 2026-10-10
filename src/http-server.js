@@ -1,4 +1,5 @@
 import http from 'node:http';
+import crypto from 'node:crypto';
 import { CONFIG } from './config.js';
 import { timingSafeEqualString } from './config-resolver.js';
 import { ToolRegistry } from './tool-registry.js';
@@ -55,6 +56,7 @@ export class BridgeHttpServer {
     this.backgroundGPT = null;
     this.backgroundGPTPromise = null;
     this.localEngine = null;
+    this.sseClients = new Map();
   }
 
   /** Lazily-created headless engine (bundled Codex CLI inside ChatGPT.app). */
@@ -530,36 +532,140 @@ export class BridgeHttpServer {
             }
           }
 
+          // MCP SSE transport endpoint. Standard MCP SSE clients probe GET /sse or GET /mcp
+          // (or send HEAD) expecting text/event-stream and an 'endpoint' event containing the POST URL.
+          if ((pathname === '/sse' || pathname === '/mcp') && (method === 'GET' || method === 'HEAD')) {
+            const sessionId = crypto.randomUUID();
+            res.writeHead(200, {
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache, no-transform',
+              'Connection': 'keep-alive'
+            });
+            if (method === 'HEAD') {
+              return res.end();
+            }
+            const keepAliveTimer = setInterval(() => {
+              try {
+                res.write(': keepalive\n\n');
+              } catch {
+                clearInterval(keepAliveTimer);
+              }
+            }, 15000);
+            if (keepAliveTimer.unref) keepAliveTimer.unref();
+
+            this.sseClients.set(sessionId, { res, keepAliveTimer });
+            req.on('close', () => {
+              clearInterval(keepAliveTimer);
+              this.sseClients.delete(sessionId);
+            });
+            // Send standard MCP endpoint event pointing to the POST handler with sessionId
+            res.write(`event: endpoint\ndata: /mcp?sessionId=${sessionId}\n\n`);
+            return;
+          }
+
+          // MCP session termination endpoint (DELETE /mcp or DELETE /sse)
+          if ((pathname === '/sse' || pathname === '/mcp') && method === 'DELETE') {
+            const sessionId = parsedUrl.searchParams.get('sessionId') || query.sessionId;
+            if (sessionId && this.sseClients.has(sessionId)) {
+              const client = this.sseClients.get(sessionId);
+              if (client.keepAliveTimer) clearInterval(client.keepAliveTimer);
+              try { client.res.end(); } catch {}
+              this.sseClients.delete(sessionId);
+              res.writeHead(204);
+              return res.end();
+            }
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'Session not found' }));
+          }
+
           // Canonical MCP JSON-RPC endpoint. `/api/mcp/call` is retained as an
           // alias because the shipped AgentBridgeClient SDK (used by Zia) posts
           // there; without this alias every SDK tool call returned HTTP 404.
           if ((pathname === '/mcp' || pathname === '/api/mcp/call') && method === 'POST') {
             const body = await readBody();
-            const { method: rpcMethod, params = {}, id = 1 } = body;
+            const { method: rpcMethod, params = {}, id } = body;
+            const sessionId = parsedUrl.searchParams.get('sessionId') || query.sessionId;
+
+            // Session validation: If an explicit sessionId is provided, ensure it maps to an active session
+            if (sessionId && !this.sseClients.has(sessionId)) {
+              res.writeHead(404, { 'Content-Type': 'application/json' });
+              return res.end(JSON.stringify({
+                jsonrpc: '2.0',
+                id: id ?? null,
+                error: {
+                  code: -32001,
+                  message: 'Session not found or expired'
+                }
+              }));
+            }
+
+            // Notification handling: A Notification is a Request without an "id". It MUST NOT receive a response.
+            const isNotification = id === undefined || id === null || rpcMethod?.startsWith('notifications/');
+
+            const sendJsonRpc = (payload) => {
+              if (sessionId && this.sseClients.has(sessionId)) {
+                try {
+                  const client = this.sseClients.get(sessionId);
+                  client.res.write(`event: message\ndata: ${JSON.stringify(payload)}\n\n`);
+                } catch {}
+                res.writeHead(202, { 'Content-Type': 'text/plain' });
+                return res.end('Accepted');
+              }
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              return res.end(JSON.stringify(payload));
+            };
+
+            if (isNotification) {
+              // Notification accepted without response object
+              res.writeHead(202, { 'Content-Type': 'text/plain' });
+              return res.end('Accepted');
+            }
+
+            if (rpcMethod === 'initialize') {
+              const clientProtocol = params?.protocolVersion || '2024-11-05';
+              return sendJsonRpc({
+                jsonrpc: '2.0',
+                id,
+                result: {
+                  protocolVersion: clientProtocol,
+                  capabilities: {
+                    tools: {
+                      listChanged: false
+                    }
+                  },
+                  serverInfo: {
+                    name: 'agent-bridge',
+                    version: '1.2.0'
+                  }
+                }
+              });
+            }
+
+            if (rpcMethod === 'ping') {
+              return sendJsonRpc({ jsonrpc: '2.0', id, result: {} });
+            }
 
             if (rpcMethod === 'tools/list') {
-              res.writeHead(200, { 'Content-Type': 'application/json' });
-              return res.end(JSON.stringify({
+              return sendJsonRpc({
                 jsonrpc: '2.0',
                 id,
                 result: {
                   tools: this.registry.getToolDefinitions()
                 }
-              }));
+              });
             }
 
             if (rpcMethod === 'tools/call') {
               const { name, arguments: args = {} } = params;
               if (!name) {
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                return res.end(JSON.stringify({
+                return sendJsonRpc({
                   jsonrpc: '2.0',
                   id,
                   error: {
                     code: -32602,
                     message: 'Invalid params: tool name is required'
                   }
-                }));
+                });
               }
 
               const toolContext = {
@@ -582,8 +688,7 @@ export class BridgeHttpServer {
               try {
                 const out = await this.registry.executeTool(name, args, toolContext);
                 const isError = Boolean(out && typeof out === 'object' && out.isError === true);
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                return res.end(JSON.stringify({
+                return sendJsonRpc({
                   jsonrpc: '2.0',
                   id,
                   result: {
@@ -595,10 +700,9 @@ export class BridgeHttpServer {
                       }
                     ]
                   }
-                }));
+                });
               } catch (toolErr) {
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                return res.end(JSON.stringify({
+                return sendJsonRpc({
                   jsonrpc: '2.0',
                   id,
                   result: {
@@ -610,20 +714,19 @@ export class BridgeHttpServer {
                       }
                     ]
                   }
-                }));
+                });
               }
             }
 
             // Unknown JSON-RPC method on MCP endpoint
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            return res.end(JSON.stringify({
+            return sendJsonRpc({
               jsonrpc: '2.0',
               id,
               error: {
                 code: -32601,
                 message: `Method not found: ${rpcMethod}`
               }
-            }));
+            });
           }
 
           // 404 fallback
@@ -648,6 +751,11 @@ export class BridgeHttpServer {
 
   stop() {
     return new Promise((resolve) => {
+      for (const [sessionId, client] of this.sseClients.entries()) {
+        if (client.keepAliveTimer) clearInterval(client.keepAliveTimer);
+        try { client.res.end(); } catch {}
+      }
+      this.sseClients.clear();
       if (this.server) {
         this.server.close(resolve);
       } else {

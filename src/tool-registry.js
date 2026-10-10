@@ -4,6 +4,7 @@ import { createSessionAdapter } from './session-adapters/index.js';
 import { isEffectfulTool, getToolClassification, EffectsLedger } from './effects/effects-ledger.js';
 import { AttemptLedger } from './attempts/attempt-ledger.js';
 import { ArtifactStore, ArtifactError } from './artifacts/artifact-store.js';
+import { KnowledgeStore } from './memory/knowledge-store.js';
 
 // Lazily-created per-context artifact store, so every transport (stdio MCP, HTTP
 // MCP, plugins) can store/retrieve real bytes without each wiring its own.
@@ -16,6 +17,18 @@ async function resolveArtifactStore(ctx) {
     artifactStoreCache.set(ctx, store);
   }
   if (!store) throw new ArtifactError('Artifact store unavailable: no audit logger in context', 'ARTIFACT_STORE_UNAVAILABLE');
+  return store;
+}
+
+const knowledgeStoreCache = new WeakMap();
+function resolveKnowledgeStore(ctx) {
+  if (ctx.knowledgeStore) return ctx.knowledgeStore;
+  let store = knowledgeStoreCache.get(ctx);
+  if (!store) {
+    const db = ctx.db || ctx.logger?.db || null;
+    store = new KnowledgeStore(db);
+    knowledgeStoreCache.set(ctx, store);
+  }
   return store;
 }
 
@@ -1065,7 +1078,9 @@ export class ToolRegistry {
           agentId: { type: 'string', description: 'Responding agent ID' },
           response: { type: 'string', description: 'The answer content or result' },
           status: { type: 'string', enum: ['completed', 'failed'], default: 'completed' },
-          error: { type: 'string', description: 'Optional error description if status is failed' }
+          error: { type: 'string', description: 'Optional error description if status is failed' },
+          attemptId: { type: 'string', description: 'Attempt ID for monotonic fencing' },
+          epoch: { type: 'number', description: 'Attempt epoch token' }
         },
         required: ['requestId', 'agentId', 'response']
       },
@@ -1439,6 +1454,248 @@ export class ToolRegistry {
           details: result
         });
         return result;
+      }
+    });
+
+    // 8. Tool Discovery & Prompt Efficiency
+    this.registerTool({
+      name: 'bridge_discover_tools',
+      category: 'discovery',
+      description: 'Discover available tools filtered by category or query to eliminate prompt bloat.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          category: { type: 'string', description: 'Filter: discovery, inspection, mutation, git, knowledge, artifacts, diagnostics, messaging' },
+          query: { type: 'string', description: 'Keyword search for tool name or description' }
+        }
+      },
+      handler: async (args, ctx) => {
+        const all = this.getToolDefinitions();
+        const results = [];
+        const q = args.query ? args.query.toLowerCase() : null;
+        const cat = args.category ? args.category.toLowerCase() : null;
+
+        for (const t of all) {
+          const toolObj = this.tools.get(t.name) || {};
+          const toolCat = toolObj.category || 'core';
+          if (cat && toolCat.toLowerCase() !== cat) continue;
+          if (q && !t.name.toLowerCase().includes(q) && !t.description.toLowerCase().includes(q)) continue;
+
+          results.push({
+            name: t.name,
+            description: t.description,
+            category: toolCat,
+            effect: getToolClassification(t.name)
+          });
+        }
+
+        return {
+          totalAvailable: all.length,
+          matchedCount: results.length,
+          tools: results
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'bridge_tool_info',
+      category: 'discovery',
+      description: 'Retrieve detailed schema and permissions for a specific tool on demand.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          toolName: { type: 'string', description: 'Tool name to inspect' }
+        },
+        required: ['toolName']
+      },
+      handler: async (args, ctx) => {
+        const tool = this.tools.get(args.toolName);
+        if (!tool) throw new Error(`Unknown tool: '${args.toolName}'`);
+        return {
+          name: tool.name,
+          description: tool.description,
+          category: tool.category || 'general',
+          effectClassification: getToolClassification(tool.name),
+          isEffectful: isEffectfulTool(tool.name),
+          inputSchema: tool.inputSchema
+        };
+      }
+    });
+
+    // 9. Knowledge & Memory Management (SQLite FTS5 + BM25)
+    this.registerTool({
+      name: 'bridge_store_knowledge',
+      category: 'knowledge',
+      description: 'Store project facts and findings with SQLite FTS5 BM25 indexing and provenance tracking.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agentId: { type: 'string' },
+          title: { type: 'string', description: 'Knowledge item title' },
+          content: { type: 'string', description: 'Finding or documentation' },
+          category: { type: 'string', description: 'architecture, decision, finding, constraint, test_result, or general' },
+          tags: { type: 'array', items: { type: 'string' } },
+          provenance: { type: 'string', description: 'user_instruction, agent_finding, verified_test, or external_doc' },
+          sourceFile: { type: 'string', description: 'Related source file path' }
+        },
+        required: ['title', 'content']
+      },
+      handler: async (args, ctx) => {
+        const store = resolveKnowledgeStore(ctx);
+        const item = store.storeKnowledge({
+          agentId: args.agentId,
+          title: args.title,
+          content: args.content,
+          category: args.category || 'general',
+          tags: args.tags || [],
+          provenance: args.provenance || 'agent_finding',
+          sourceFile: args.sourceFile || null
+        });
+        ctx.logger?.log?.({
+          agentId: args.agentId,
+          action: 'store_knowledge',
+          status: 'success',
+          details: { id: item.id, title: item.title, category: item.category }
+        });
+        return {
+          success: true,
+          id: item.id,
+          contentHash: item.contentHash,
+          title: item.title,
+          category: item.category,
+          provenance: item.provenance
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'bridge_search_knowledge',
+      category: 'knowledge',
+      description: 'Search project knowledge using SQLite FTS5 BM25 ranking and snippet extraction.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search term or question' },
+          category: { type: 'string', description: 'Filter by category' },
+          tag: { type: 'string', description: 'Filter by tag' },
+          limit: { type: 'number', description: 'Max results (default 5, max 20)' }
+        },
+        required: ['query']
+      },
+      handler: async (args, ctx) => {
+        const store = resolveKnowledgeStore(ctx);
+        const results = store.searchKnowledge(args.query, {
+          category: args.category,
+          tag: args.tag,
+          limit: Math.min(args.limit || 5, 20)
+        });
+        return {
+          query: args.query,
+          count: results.length,
+          results
+        };
+      }
+    });
+
+    this.registerTool({
+      name: 'bridge_get_knowledge',
+      category: 'knowledge',
+      description: 'Retrieve a complete knowledge record by ID or SHA-256 content hash.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'Knowledge record ID' },
+          contentHash: { type: 'string', description: 'SHA-256 hash of content' }
+        }
+      },
+      handler: async (args, ctx) => {
+        const store = resolveKnowledgeStore(ctx);
+        const record = args.id ? store.getKnowledge(args.id) : (args.contentHash ? store.getByHash(args.contentHash) : null);
+        if (!record) throw new Error('Knowledge record not found.');
+        return record;
+      }
+    });
+
+    // 10. Code Quality & Syntax Validation
+    this.registerTool({
+      name: 'bridge_check_syntax',
+      category: 'inspection',
+      description: 'Non-destructive fast syntax and compilation validation for JS, JSON, and Python files.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: { type: 'string', description: 'Source file path' },
+          agentId: { type: 'string' }
+        },
+        required: ['filePath']
+      },
+      handler: async (args, ctx) => {
+        if (!ctx.controller) throw new Error('ProjectController unavailable in context');
+        return ctx.controller.checkSyntax(args.filePath, args.agentId);
+      }
+    });
+
+    // 11. Git Intelligence & Provenance
+    this.registerTool({
+      name: 'bridge_git_summary',
+      category: 'git',
+      description: 'Compact git repository summary (branch, commit, clean status, dirty count) consuming <50 tokens.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          repoPath: { type: 'string', description: 'Path to git repository' },
+          agentId: { type: 'string' }
+        },
+        required: ['repoPath']
+      },
+      handler: async (args, ctx) => {
+        if (!ctx.git) throw new Error('GitController unavailable in context');
+        return ctx.git.getSummary(args.repoPath, args.agentId);
+      }
+    });
+
+    this.registerTool({
+      name: 'bridge_git_blame',
+      category: 'git',
+      description: 'Compact git blame inspection for a specific line range to verify author and commit provenance.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          repoPath: { type: 'string', description: 'Path to git repository' },
+          filePath: { type: 'string', description: 'Relative path to file' },
+          startLine: { type: 'number', description: 'Start line number (default 1)' },
+          endLine: { type: 'number', description: 'End line number (default 50)' },
+          agentId: { type: 'string' }
+        },
+        required: ['repoPath', 'filePath']
+      },
+      handler: async (args, ctx) => {
+        if (!ctx.git) throw new Error('GitController unavailable in context');
+        return ctx.git.getBlame(args.repoPath, args.agentId, args.filePath, args.startLine, args.endLine);
+      }
+    });
+
+    // 12. Structured Data Extraction
+    this.registerTool({
+      name: 'bridge_extract_data',
+      category: 'inspection',
+      description: 'Bounded deterministic extraction of structured data (JSON, CSV, Markdown outline) without LLM tokens.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: { type: 'string', description: 'Path to data file (.json, .csv, .md)' },
+          jsonPath: { type: 'string', description: 'Dot-separated key path for JSON extraction' },
+          limit: { type: 'number', description: 'Maximum rows or entries to extract (default 50)' },
+          agentId: { type: 'string' }
+        },
+        required: ['filePath']
+      },
+      handler: async (args, ctx) => {
+        if (!ctx.controller) throw new Error('ProjectController unavailable in context');
+        return ctx.controller.extractData(args.filePath, args.agentId, {
+          jsonPath: args.jsonPath,
+          limit: args.limit
+        });
       }
     });
   }

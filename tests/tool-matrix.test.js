@@ -182,7 +182,16 @@ test('Agent Bridge Tool Matrix — all registered tools exercised', async (t) =>
     ['bridge_artifact_store', { agentId: AGENT, dataBase64: matrixPngBase64, mimeType: 'image/png', filename: 'matrix2.png' }],
     ['bridge_artifact_get', { agentId: AGENT, artifactId: storedArtifact.artifact_id }],
     ['bridge_artifact_read', { agentId: AGENT, artifactId: storedArtifact.artifact_id }],
-    ['bridge_artifact_cleanup', { agentId: AGENT }]
+    ['bridge_artifact_cleanup', { agentId: AGENT }],
+    ['bridge_discover_tools', { category: 'discovery' }],
+    ['bridge_tool_info', { toolName: 'bridge_check_syntax' }],
+    ['bridge_store_knowledge', { title: 'Matrix Knowledge', content: 'Matrix test knowledge content', agentId: AGENT }],
+    ['bridge_search_knowledge', { query: 'matrix test' }],
+    ['bridge_get_knowledge', { id: 'matrix_knowledge' }],
+    ['bridge_check_syntax', { filePath: path.join(CONFIG.BRIDGE_ROOT, 'src', 'tool-registry.js'), agentId: AGENT }],
+    ['bridge_git_summary', { repoPath: repoDir, agentId: AGENT }],
+    ['bridge_git_blame', { repoPath: repoDir, filePath: 'seed.txt', startLine: 1, endLine: 2, agentId: AGENT }],
+    ['bridge_extract_data', { filePath: path.join(CONFIG.BRIDGE_ROOT, 'package.json'), jsonPath: 'name', agentId: AGENT }]
   ];
 
   const registry = new ToolRegistry();

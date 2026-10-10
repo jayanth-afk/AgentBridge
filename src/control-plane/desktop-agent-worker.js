@@ -119,11 +119,12 @@ export class DesktopAgentWorker extends EventEmitter {
   _onEvent(event) {
     if (!event) return;
     if (event.type !== 'request_created' && event.type !== 'task_created') return;
-    if (!event.requestId) return;
+    const reqId = event.requestId || (event.taskId ? `req_${event.taskId}` : null);
+    if (!reqId) return;
     if (event.status && ['completed', 'failed', 'cancelled'].includes(event.status)) return;
     if (event.fromAgent === this.agentId) return;
-    this._trace(event.requestId, LifecycleStage.WORKER_AWAKENED, { trigger: event.type }, event.taskId);
-    this.handleRequest(event.requestId).catch((err) => this.emit('error', err));
+    this._trace(reqId, LifecycleStage.WORKER_AWAKENED, { trigger: event.type }, event.taskId);
+    this.handleRequest(reqId).catch((err) => this.emit('error', err));
   }
 
   _trace(requestId, stage, meta = null, taskId = null) {
@@ -155,7 +156,26 @@ export class DesktopAgentWorker extends EventEmitter {
   }
 
   async _deliver(requestId) {
-    const request = this.mailbox?.getRequest ? this.mailbox.getRequest(requestId) : null;
+    let request = this.mailbox?.getRequest ? this.mailbox.getRequest(requestId) : null;
+    if (!request && this.mailbox?.getTask) {
+      const taskIdCandidate = requestId.startsWith('req_task_')
+        ? requestId.replace(/^req_/, '')
+        : (requestId.startsWith('task_') ? requestId : null);
+      if (taskIdCandidate) {
+        const task = this.mailbox.getTask(taskIdCandidate, false);
+        if (task) {
+          request = {
+            requestId,
+            taskId: task.id,
+            fromAgent: task.creator,
+            toAgent: task.assignee,
+            question: task.instructions || task.title,
+            status: task.status,
+            context: task.context
+          };
+        }
+      }
+    }
     if (!request) return { handled: false, requestId, error: 'REQUEST_NOT_FOUND' };
     if (['completed', 'failed', 'cancelled'].includes(request.status)) {
       this.delivered.add(requestId);

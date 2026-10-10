@@ -47,9 +47,9 @@ export class AutonomousCollaborationOrchestrator extends EventEmitter {
     // Per-turn character cap for each prior turn's response when building the
     // carried context. Bounds prompt growth without dropping earlier turns.
     this.historySnippetChars = options.historySnippetChars || 300;
-    // `null` is an intentional test/embedded-mode opt-out. `||` previously
-    // recreated a live monitor in that case, making pure state tests depend on
-    // the user's desktop focus.
+    this.capabilityRegistry = options.capabilityRegistry || null;
+    this.presence = options.presenceManager || options.presence || null;
+    this.contextCache = options.contextCache || null;
     this.invisibilityMonitor = Object.hasOwn(options, 'invisibilityMonitor')
       ? options.invisibilityMonitor
       : new DesktopInvisibilityMonitor(options);
@@ -459,5 +459,163 @@ export class AutonomousCollaborationOrchestrator extends EventEmitter {
    */
   getCollaboration(collaborationId) {
     return this.activeCollaborations.get(collaborationId) || null;
+  }
+
+  /**
+   * Capability-based agent selection.
+   * Evaluates verified capabilities, presence/liveness, and trust tiers.
+   * Prevents blind routing to disconnected or unverified agents.
+   */
+  selectBestAgent({
+    requiredDimension = 'model_execution',
+    candidateAgents = ['chatgpt', 'claude', 'gemini', 'antigravity'],
+    preferredAgent = null,
+    verifyLiveness = true
+  } = {}) {
+    const liveAgents = this.presence ? this.presence.listAgents().map(a => a.agentId.toLowerCase()) : [];
+    const candidates = candidateAgents.map(a => a.toLowerCase());
+
+    if (preferredAgent) {
+      const normPref = preferredAgent.toLowerCase();
+      const isLive = !verifyLiveness || liveAgents.length === 0 || liveAgents.some(la => la.includes(normPref) || normPref.includes(la));
+      if (this.capabilityRegistry) {
+        const verified = this.capabilityRegistry.hasVerifiedCapability(normPref, normPref, requiredDimension);
+        if (verified && isLive) {
+          return { selectedAgent: normPref, score: 100, verified: true, live: isLive };
+        }
+      } else if (isLive) {
+        return { selectedAgent: normPref, score: 90, verified: false, live: isLive };
+      }
+    }
+
+    let best = null;
+    let highestScore = -1;
+
+    for (const cand of candidates) {
+      let score = 50;
+      let verified = false;
+      const isLive = liveAgents.length === 0 || liveAgents.some(la => la.includes(cand) || cand.includes(la));
+      if (isLive) score += 20;
+
+      if (this.capabilityRegistry) {
+        const cap = this.capabilityRegistry.getCapability(cand, cand, requiredDimension);
+        if (cap.state === 'verified') {
+          score += 30;
+          verified = true;
+        } else if (cap.state === 'probed') {
+          score += 20;
+          verified = true;
+        } else if (cap.state === 'declared') {
+          score += 10;
+        }
+        if (cap.trustTier !== undefined && cap.trustTier !== null) {
+          score += Math.max(0, (5 - cap.trustTier) * 3);
+        }
+      }
+
+      if (score > highestScore) {
+        highestScore = score;
+        best = { selectedAgent: cand, score, verified, live: isLive };
+      }
+    }
+
+    return best || { selectedAgent: candidateAgents[0], score: 0, verified: false, live: false };
+  }
+
+  /**
+   * Single-agent bypass: Determines whether multi-agent collaboration is justified.
+   * If the task is simple, self-contained, or low-risk, avoids launching a multi-hop chain.
+   */
+  shouldCollaborate({ task, complexity = 'normal', requiresIndependentReview = false } = {}) {
+    if (requiresIndependentReview) {
+      return { collaborate: true, reason: 'INDEPENDENT_REVIEW_REQUIRED' };
+    }
+    if (complexity === 'high' || complexity === 'complex') {
+      return { collaborate: true, reason: 'HIGH_COMPLEXITY' };
+    }
+    const taskLen = typeof task === 'string' ? task.length : 0;
+    if (taskLen < 150 && complexity !== 'high') {
+      return { collaborate: false, reason: 'SIMPLE_TASK_SINGLE_AGENT_SUFFICIENT', recommendedAgent: 'chatgpt' };
+    }
+    return { collaborate: true, reason: 'MULTI_AGENT_BENEFIT' };
+  }
+
+  /**
+   * Execute independent subtasks concurrently up to concurrencyLimit.
+   * Eliminates sequential blocking when subtasks have no data dependencies.
+   */
+  async executeParallelTurns({
+    collaborationId,
+    turns,
+    concurrencyLimit = 3,
+    timeoutMs = null
+  }) {
+    const session = this.activeCollaborations.get(collaborationId);
+    if (!session) throw new Error(`COLLABORATION_NOT_FOUND: ${collaborationId}`);
+    if (session.status !== CollaborationStatus.ACTIVE) throw new Error(`COLLABORATION_INACTIVE: Session is ${session.status}`);
+
+    const results = [];
+    const queue = [...turns];
+    const limit = Math.max(1, Math.min(concurrencyLimit, 5));
+
+    while (queue.length > 0) {
+      const batch = queue.splice(0, limit);
+      const batchOutcomes = await Promise.allSettled(batch.map(turnSpec => {
+        return this.executeTurn({
+          collaborationId,
+          fromAgent: turnSpec.fromAgent || session.initiator,
+          toAgent: turnSpec.toAgent,
+          instruction: turnSpec.instruction,
+          deadline: Date.now() + (timeoutMs || 120000)
+        });
+      }));
+
+      for (let i = 0; i < batchOutcomes.length; i++) {
+        const out = batchOutcomes[i];
+        if (out.status === 'fulfilled') {
+          results.push(out.value);
+        } else {
+          results.push({ success: false, status: 'PARALLEL_TURN_FAILED', error: out.reason?.message || 'Rejected' });
+        }
+      }
+    }
+
+    return {
+      collaborationId: session.id,
+      totalRequested: turns.length,
+      completed: results.filter(r => r.success).length,
+      failed: results.filter(r => !r.success).length,
+      outcomes: results
+    };
+  }
+
+  /**
+   * Targeted follow-up turn. Correlates with parent turn while transmitting
+   * only the follow-up instruction rather than replaying the entire history.
+   */
+  async executeFollowUpTurn({
+    collaborationId,
+    parentTurnNumber,
+    instruction,
+    toAgent = null,
+    fromAgent = null
+  }) {
+    const session = this.activeCollaborations.get(collaborationId);
+    if (!session) throw new Error(`COLLABORATION_NOT_FOUND: ${collaborationId}`);
+
+    const parentTurn = session.turns.find(t => t.turnNumber === parentTurnNumber);
+    if (!parentTurn) throw new Error(`PARENT_TURN_NOT_FOUND: Turn ${parentTurnNumber}`);
+
+    const targetAgent = toAgent || parentTurn.toAgent;
+    const sourceAgent = fromAgent || parentTurn.fromAgent;
+
+    const followUpInstruction = `FOLLOW-UP TO TURN ${parentTurnNumber} (${parentTurn.toAgent}'s previous response):\nParent Response Excerpt: ${parentTurn.response.slice(0, 200)}...\n\nFollow-up Request:\n${instruction}`;
+
+    return this.executeTurn({
+      collaborationId,
+      fromAgent: sourceAgent,
+      toAgent: targetAgent,
+      instruction: followUpInstruction
+    });
   }
 }

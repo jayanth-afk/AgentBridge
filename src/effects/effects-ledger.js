@@ -73,7 +73,10 @@ export const TOOL_EFFECT_CLASSIFICATIONS = Object.freeze({
   // bytes (idempotent). Both are side effects and must be fenced/audited like
   // any other mutation rather than silently bypassing the effects policy.
   bridge_artifact_store: EffectClassification.NON_IDEMPOTENT,
-  bridge_artifact_cleanup: EffectClassification.IDEMPOTENT
+  bridge_artifact_cleanup: EffectClassification.IDEMPOTENT,
+
+  // Knowledge store writes
+  bridge_store_knowledge: EffectClassification.IDEMPOTENT
 });
 
 export function isEffectfulTool(toolName) {

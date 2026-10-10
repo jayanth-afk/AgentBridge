@@ -50,6 +50,9 @@ export class TaskManager extends EventEmitter {
     // without limit. Overridable per instance (and by env) for tests.
     this.maxDelegationDepth = Number(process.env.AGENT_BRIDGE_MAX_DELEGATION_DEPTH || 24);
     this.initTables();
+    try {
+      this.startupRecovery();
+    } catch {}
   }
 
   initTables() {
@@ -362,6 +365,55 @@ export class TaskManager extends EventEmitter {
     return recovered;
   }
 
+  /**
+   * Comprehensive crash/restart recovery sweep:
+   * Recovers expired attempts, sweeps expired tasks across all agents,
+   * flushes unpublished transactional outbox events, and logs the sweep.
+   */
+  startupRecovery() {
+    const recovered = {
+      attempts: [],
+      tasks: [],
+      outboxEvents: 0
+    };
+    if (this.attempts?.recoverExpiredAttempts) {
+      try {
+        recovered.attempts = this.attempts.recoverExpiredAttempts();
+      } catch (err) {
+        this.logger?.log({
+          agentId: 'system',
+          action: 'startup_recovery_attempts_error',
+          status: 'error',
+          details: { error: err.message }
+        });
+      }
+    }
+    try {
+      recovered.tasks = this.recoverExpiredTasks(null);
+    } catch (err) {
+      this.logger?.log({
+        agentId: 'system',
+        action: 'startup_recovery_tasks_error',
+        status: 'error',
+        details: { error: err.message }
+      });
+    }
+    const outbox = this.eventBus?.outbox || this.outbox;
+    if (outbox?.recoverPendingOutbox) {
+      try {
+        recovered.outboxEvents = outbox.recoverPendingOutbox();
+      } catch (err) {
+        this.logger?.log({
+          agentId: 'system',
+          action: 'startup_recovery_outbox_error',
+          status: 'error',
+          details: { error: err.message }
+        });
+      }
+    }
+    return recovered;
+  }
+
   touchTask({ taskId, agentId, attemptId = null, epoch = null }) {
     if (attemptId && epoch && this.attempts) {
       this.attempts.touchAttempt(attemptId, epoch, agentId);
@@ -427,6 +479,40 @@ export class TaskManager extends EventEmitter {
       task = this.db.prepare(`SELECT * FROM tasks WHERE id = ?`).get(taskId);
       if (!task) {
         throw new Error(`Task '${taskId}' not found.`);
+      }
+
+      // Terminal state protection: if the task is already completed, it cannot be
+      // mutated, downgraded to failed, or overwritten by a stale attempt.
+      if (task.status === 'completed') {
+        const serializedResult = (result !== null && typeof result === 'object') ? JSON.stringify(result) : result;
+        // If idempotent duplicate completion, return cleanly without changing terminal state
+        if (status === 'completed' && (task.result === serializedResult || serializedResult === null)) {
+          return;
+        }
+        // Stale attempt or late failure/cancellation: quarantine payload if attempts ledger exists
+        if (this.attempts && (attemptId || result || error)) {
+          try {
+            this.attempts.quarantineLateResponse({
+              attemptId: attemptId || `stale_on_${taskId}`,
+              requestId: task.parent_task_id || taskId,
+              epoch: epoch || 0,
+              payload: result || error,
+              reason: `Stale ${status} submitted after task was already marked completed`
+            });
+          } catch {}
+        }
+        this.logger?.log({
+          agentId,
+          action: 'stale_completion_ignored',
+          status: 'ignored',
+          details: { taskId, currentStatus: task.status, submittedStatus: status }
+        });
+        return;
+      }
+
+      // If task is already failed and another failure is submitted, handle idempotently
+      if (task.status === 'failed' && status === 'failed') {
+        return;
       }
 
       // Fencing invariant: validate attempt if attemptId or epoch provided
@@ -524,15 +610,35 @@ export class TaskManager extends EventEmitter {
     return updated;
   }
 
-  failTask({ taskId, agentId, error, allowRetry = true }) {
+  failTask({ taskId, agentId, error, allowRetry = true, attemptId = null, epoch = null }) {
     const task = this.db.prepare(`SELECT * FROM tasks WHERE id = ?`).get(taskId);
     if (!task) throw new Error(`Task '${taskId}' not found.`);
+
+    // If task is already completed, do not allow failure to overwrite it
+    if (task.status === 'completed') {
+      return this.getTask(taskId, false);
+    }
+
+    // If attemptId and epoch provided, validate fencing
+    if (attemptId && epoch && this.attempts) {
+      try {
+        this.attempts.validateFencing({ taskId, attemptId, epoch, agentId });
+      } catch (fencingErr) {
+        return this.getTask(taskId, false);
+      }
+    }
 
     const now = new Date().toISOString();
     const retryCount = (task.retry_count || 0) + 1;
     const maxRetries = task.max_retries || 3;
 
     if (allowRetry && retryCount <= maxRetries) {
+      if (attemptId && epoch && this.attempts) {
+        try {
+          this.attempts.failAttempt({ attemptId, epoch, error });
+        } catch {}
+      }
+
       // Re-queue task as pending
       this.db.prepare(`
         UPDATE tasks
@@ -540,11 +646,11 @@ export class TaskManager extends EventEmitter {
         WHERE id = ?
       `).run(retryCount, error, now, taskId);
 
-      this.logger.log({
+      this.logger?.log({
         agentId,
         action: 'retry_task',
         status: 'retry',
-        details: { taskId, retryCount, maxRetries, error }
+        details: { taskId, retryCount, maxRetries, error, attemptId, epoch }
       });
 
       return { taskId, status: 'pending', retryCount, willRetry: true, error };
@@ -555,7 +661,9 @@ export class TaskManager extends EventEmitter {
       taskId,
       agentId,
       status: 'failed',
-      error: `Failed after ${retryCount} attempts: ${error}`
+      error: `Failed after ${retryCount} attempts: ${error}`,
+      attemptId,
+      epoch
     });
   }
 

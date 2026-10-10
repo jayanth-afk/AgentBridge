@@ -1,12 +1,29 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { exec } from 'node:child_process';
+import { exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { ConcurrencyManager } from './concurrency-manager.js';
 import { CacheManager } from './cache-manager.js';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+let cachedRgPath = undefined;
+function getRipgrepPath() {
+  if (cachedRgPath !== undefined) return cachedRgPath;
+  const candidates = ['/opt/homebrew/bin/rg', '/usr/local/bin/rg', 'rg'];
+  for (const cand of candidates) {
+    try {
+      if (cand.startsWith('/') && fs.existsSync(cand)) {
+        cachedRgPath = cand;
+        return cachedRgPath;
+      }
+    } catch {}
+  }
+  cachedRgPath = 'rg';
+  return cachedRgPath;
+}
 
 const BINARY_EXTENSIONS = new Set([
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.svgz',
@@ -188,71 +205,144 @@ export class ProjectController {
     }
 
     const resolved = pathCheck.path;
-    const cacheKey = `search_${resolved}_${query}_${isRegex}_${maxResults}_${extensions}`;
+    const cacheKey = `search_${resolved}_${query}_${isRegex}_${maxResults}_${extensions}_${filePattern}`;
     const cached = this.cache.get(cacheKey);
     if (cached) return cached;
 
-    const matcher = isRegex ? new RegExp(query, 'i') : null;
-    const results = [];
     const limit = Math.min(maxResults || 20, 100);
-    const allowedExts = Array.isArray(extensions) ? new Set(extensions.map(e => e.toLowerCase())) : null;
+    const results = [];
 
-    const walk = (dir) => {
-      if (results.length >= limit) return;
-      let entries;
+    // Attempt ripgrep acceleration first for sub-5ms repository search
+    const rgPath = getRipgrepPath();
+    let usedRipgrep = false;
+    if (rgPath && typeof query === 'string' && query.length > 0) {
       try {
-        entries = fs.readdirSync(dir, { withFileTypes: true });
-      } catch {
-        return;
-      }
+        const rgArgs = [
+          '--line-number',
+          '--no-heading',
+          '--color=never',
+          '--max-columns=120',
+          '--max-columns-preview',
+          '-m', String(limit)
+        ];
+        if (!isRegex) {
+          rgArgs.push('-F');
+        }
+        rgArgs.push('-e', query);
 
-      for (const entry of entries) {
-        if (results.length >= limit) return;
-        // Skip noise & cache directories
-        if (
-          entry.name.startsWith('.git') ||
-          entry.name === 'node_modules' ||
-          entry.name === '.build' ||
-          entry.name === '.cache' ||
-          entry.name === '.next' ||
-          entry.name === 'dist' ||
-          entry.name === 'data'
-        ) continue;
-
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-          walk(full);
-        } else if (entry.isFile()) {
-          const ext = path.extname(entry.name).toLowerCase();
-          if (allowedExts && !allowedExts.has(ext)) continue;
-          if (this.isBinaryFile(full)) continue;
-
-          try {
-            const data = fs.readFileSync(full, 'utf8');
-            const lines = data.split('\n');
-            for (let idx = 0; idx < lines.length; idx++) {
-              if (results.length >= limit) break;
-              const line = lines[idx];
-              const matches = isRegex ? matcher.test(line) : line.includes(query);
-              if (matches) {
-                // Keep snippets compact (max 120 chars) to prevent token explosion
-                const trimmed = line.trim();
-                const snippet = trimmed.length > 120 ? trimmed.slice(0, 120) + '...' : trimmed;
-                results.push({
-                  file: full,
-                  lineNumber: idx + 1,
-                  line: snippet
-                });
-              }
-            }
-          } catch {
-            // Ignore unreadable or locked files
+        if (Array.isArray(extensions) && extensions.length > 0) {
+          for (const ext of extensions) {
+            const clean = ext.startsWith('.') ? `*${ext}` : `*.${ext}`;
+            rgArgs.push('-g', clean);
           }
         }
-      }
-    };
+        if (filePattern && typeof filePattern === 'string') {
+          rgArgs.push('-g', filePattern);
+        }
 
-    walk(resolved);
+        // Standard exclusions
+        rgArgs.push(
+          '-g', '!node_modules/**',
+          '-g', '!.git/**',
+          '-g', '!.build/**',
+          '-g', '!.cache/**',
+          '-g', '!.next/**',
+          '-g', '!dist/**',
+          '-g', '!data/**'
+        );
+
+        rgArgs.push(resolved);
+
+        const { stdout } = await execFileAsync(rgPath, rgArgs, {
+          timeout: 4000,
+          maxBuffer: 4 * 1024 * 1024
+        });
+
+        const lines = stdout.split('\n').filter(Boolean);
+        for (const line of lines) {
+          if (results.length >= limit) break;
+          const match = line.match(/^([^:]+):(\d+):(.*)$/);
+          if (match) {
+            const file = match[1];
+            const lineNumber = parseInt(match[2], 10);
+            const lineContent = match[3].trim();
+            const snippet = lineContent.length > 120 ? lineContent.slice(0, 120) + '...' : lineContent;
+            results.push({
+              file,
+              lineNumber,
+              line: snippet
+            });
+          }
+        }
+        usedRipgrep = true;
+      } catch (rgErr) {
+        if (rgErr.code === 1) {
+          // ripgrep exit code 1 means 0 matches found successfully
+          usedRipgrep = true;
+        } else {
+          // Fall back to pure JS traversal on any binary or execution error
+          usedRipgrep = false;
+        }
+      }
+    }
+
+    if (!usedRipgrep) {
+      const matcher = isRegex ? new RegExp(query, 'i') : null;
+      const allowedExts = Array.isArray(extensions) ? new Set(extensions.map(e => e.toLowerCase())) : null;
+
+      const walk = (dir) => {
+        if (results.length >= limit) return;
+        let entries;
+        try {
+          entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+          return;
+        }
+
+        for (const entry of entries) {
+          if (results.length >= limit) return;
+          if (
+            entry.name.startsWith('.git') ||
+            entry.name === 'node_modules' ||
+            entry.name === '.build' ||
+            entry.name === '.cache' ||
+            entry.name === '.next' ||
+            entry.name === 'dist' ||
+            entry.name === 'data'
+          ) continue;
+
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            walk(full);
+          } else if (entry.isFile()) {
+            const ext = path.extname(entry.name).toLowerCase();
+            if (allowedExts && !allowedExts.has(ext)) continue;
+            if (this.isBinaryFile(full)) continue;
+
+            try {
+              const data = fs.readFileSync(full, 'utf8');
+              const lines = data.split('\n');
+              for (let idx = 0; idx < lines.length; idx++) {
+                if (results.length >= limit) break;
+                const line = lines[idx];
+                const matches = isRegex ? matcher.test(line) : line.includes(query);
+                if (matches) {
+                  const trimmed = line.trim();
+                  const snippet = trimmed.length > 120 ? trimmed.slice(0, 120) + '...' : trimmed;
+                  results.push({
+                    file: full,
+                    lineNumber: idx + 1,
+                    line: snippet
+                  });
+                }
+              }
+            } catch {}
+          }
+        }
+      };
+
+      walk(resolved);
+    }
 
     this.logger.log({
       agentId,
@@ -260,7 +350,7 @@ export class ProjectController {
       targetPath: resolved,
       status: 'allowed',
       executionMs: Date.now() - t0,
-      details: { query, resultsCount: results.length }
+      details: { query, resultsCount: results.length, usedRipgrep }
     });
 
     const res = {
@@ -268,11 +358,155 @@ export class ProjectController {
       query,
       count: results.length,
       capped: results.length >= limit,
-      results
+      results,
+      accelerator: usedRipgrep ? 'ripgrep' : 'javascript_walk',
+      executionMs: Date.now() - t0
     };
 
     this.cache.set(cacheKey, res, resolved, 10000);
     return res;
+  }
+
+  async checkSyntax(filePath, agentId) {
+    const t0 = Date.now();
+    const permCheck = this.guard.checkPermission(agentId, 'READ');
+    if (!permCheck.allowed) throw new Error(permCheck.reason);
+
+    const pathCheck = this.guard.validatePathAccess(filePath, 'READ');
+    if (!pathCheck.allowed) {
+      this.logger.log({ agentId, action: 'check_syntax', targetPath: filePath, status: 'denied', details: pathCheck.reason });
+      throw new Error(pathCheck.reason);
+    }
+
+    const resolved = pathCheck.path;
+    if (!fs.existsSync(resolved)) {
+      throw new Error(`File '${resolved}' does not exist.`);
+    }
+
+    const ext = path.extname(resolved).toLowerCase();
+    let valid = true;
+    let syntaxError = null;
+
+    if (ext === '.js' || ext === '.mjs' || ext === '.cjs') {
+      try {
+        await execFileAsync(process.execPath, ['--check', resolved], { timeout: 5000 });
+      } catch (err) {
+        valid = false;
+        syntaxError = (err.stderr || err.message || '').trim();
+      }
+    } else if (ext === '.json') {
+      try {
+        const raw = fs.readFileSync(resolved, 'utf8');
+        JSON.parse(raw);
+      } catch (err) {
+        valid = false;
+        syntaxError = err.message;
+      }
+    } else if (ext === '.py') {
+      try {
+        await execFileAsync('python3', ['-m', 'py_compile', resolved], { timeout: 5000 });
+      } catch (err) {
+        valid = false;
+        syntaxError = (err.stderr || err.message || '').trim();
+      }
+    } else {
+      return {
+        filePath: resolved,
+        supported: false,
+        message: `Syntax validation not implemented for extension '${ext}'`
+      };
+    }
+
+    this.logger.log({
+      agentId,
+      action: 'check_syntax',
+      targetPath: resolved,
+      status: valid ? 'valid' : 'invalid',
+      executionMs: Date.now() - t0,
+      details: { valid, error: syntaxError }
+    });
+
+    return {
+      filePath: resolved,
+      supported: true,
+      valid,
+      error: syntaxError,
+      executionMs: Date.now() - t0
+    };
+  }
+
+  async extractData(filePath, agentId, options = {}) {
+    const t0 = Date.now();
+    const permCheck = this.guard.checkPermission(agentId, 'READ');
+    if (!permCheck.allowed) throw new Error(permCheck.reason);
+
+    const pathCheck = this.guard.validatePathAccess(filePath, 'READ');
+    if (!pathCheck.allowed) throw new Error(pathCheck.reason);
+
+    const resolved = pathCheck.path;
+    if (!fs.existsSync(resolved)) throw new Error(`File '${resolved}' does not exist.`);
+
+    const ext = path.extname(resolved).toLowerCase();
+    const raw = fs.readFileSync(resolved, 'utf8');
+    const maxEntries = Math.min(options.limit || 50, 200);
+
+    let extracted = null;
+    let format = ext.replace('.', '');
+
+    if (ext === '.json') {
+      try {
+        const parsed = JSON.parse(raw);
+        if (options.jsonPath) {
+          const parts = options.jsonPath.split('.');
+          let cur = parsed;
+          for (const p of parts) {
+            if (cur && typeof cur === 'object') cur = cur[p];
+            else { cur = undefined; break; }
+          }
+          extracted = cur;
+        } else if (Array.isArray(parsed)) {
+          extracted = { total: parsed.length, sample: parsed.slice(0, maxEntries) };
+        } else if (typeof parsed === 'object' && parsed !== null) {
+          extracted = { keys: Object.keys(parsed), sample: Object.fromEntries(Object.entries(parsed).slice(0, maxEntries)) };
+        } else {
+          extracted = parsed;
+        }
+      } catch (err) {
+        throw new Error(`JSON parse error: ${err.message}`);
+      }
+    } else if (ext === '.csv') {
+      const lines = raw.split(/\r?\n/).filter(Boolean);
+      if (lines.length > 0) {
+        const header = lines[0].split(',').map(s => s.trim().replace(/^"|"$/g, ''));
+        const rows = [];
+        for (let i = 1; i < Math.min(lines.length, maxEntries + 1); i++) {
+          const cols = lines[i].split(',').map(s => s.trim().replace(/^"|"$/g, ''));
+          const rowObj = {};
+          header.forEach((h, idx) => { rowObj[h || `col_${idx}`] = cols[idx] !== undefined ? cols[idx] : null; });
+          rows.push(rowObj);
+        }
+        extracted = { headers: header, totalRows: lines.length - 1, sampleRows: rows };
+      }
+    } else if (ext === '.md' || ext === '.markdown') {
+      const lines = raw.split('\n');
+      const headings = [];
+      for (let i = 0; i < lines.length; i++) {
+        const match = lines[i].match(/^(#{1,6})\s+(.+)$/);
+        if (match) {
+          headings.push({ level: match[1].length, text: match[2].trim(), line: i + 1 });
+        }
+      }
+      extracted = { headings, totalHeadings: headings.length };
+    } else {
+      throw new Error(`Unsupported extract format for '${ext}'. Supported: .json, .csv, .md`);
+    }
+
+    return {
+      filePath: resolved,
+      format,
+      data: extracted,
+      executionMs: Date.now() - t0
+    };
   }
 
   async findSymbol(rootPath, agentId, symbol, maxResults = 20) {
