@@ -175,7 +175,7 @@ export async function runHostBoundaryHarness({ port = 8997, iterations = 5 } = {
           method: 'tools/call',
           params: {
             name: 'bridge_get_response',
-            arguments: { requestId: lastReqId }
+            arguments: { requestId: lastReqId, agentId: 'external-mcp-client' }
           }
         })
       });

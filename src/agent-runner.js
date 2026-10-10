@@ -314,7 +314,7 @@ export class AgentRunner extends EventEmitter {
             targetPath: null,
             command: null,
             status: 'success',
-            details: { taskId: task.id, token }
+            details: { taskId: task.id, tokenRedacted: true }
           });
         } catch {}
       }
@@ -334,32 +334,50 @@ export class AgentRunner extends EventEmitter {
       try { ctx = JSON.parse(ctx); } catch {}
     }
 
+    const delegator = task.fromAgent || task.from_agent || task.creator || 'unknown';
+    // Trusted execution: only explicitly authorized system tasks or trusted execution grants
+    // can request arbitrary effectful controller operations. Peer-authored instructions
+    // and context cannot self-grant command or filesystem permissions.
+    const isExplicitlyAuthorized = (delegator === 'system') &&
+      Boolean(ctx?._trustedAuthorization || ctx?.trustedExecution || task.trustedAuthorization);
+
     if (ctx && typeof ctx === 'object') {
       const action = ctx.action || ctx.originalContext?.action;
       const targetParams = ctx.originalContext || ctx;
 
       if (action && this.controller) {
+        const effectfulActions = ['executeCommand', 'exec', 'createFile', 'write', 'editFile', 'edit', 'deleteFile', 'delete'];
+        if (effectfulActions.includes(action)) {
+          if (!isExplicitlyAuthorized) {
+            const err = new Error(`SECURITY_DENIAL: Peer-authored task context cannot self-grant effectful '${action}' permission.`);
+            err.code = 'UNAUTHORIZED_PEER_ACTION';
+            throw err;
+          }
+        }
+
         switch (action) {
           case 'executeCommand':
           case 'exec':
             return await this.controller.executeCommand(
               targetParams.command,
               targetParams.cwd || CONFIG.TEST_WORKSPACE,
-              this.agentId
+              'system'
             );
           case 'readFile':
-          case 'read':
+          case 'read': {
+            const readerAgent = delegator !== 'unknown' ? delegator : this.agentId;
             return await this.controller.readFile(
               targetParams.filePath || targetParams.path,
-              this.agentId,
+              readerAgent,
               targetParams.startLine,
               targetParams.endLine
             );
+          }
           case 'createFile':
           case 'write':
             return await this.controller.createFile(
               targetParams.filePath || targetParams.path,
-              this.agentId,
+              'system',
               targetParams.content || '',
               targetParams.overwrite ?? true
             );
@@ -367,18 +385,20 @@ export class AgentRunner extends EventEmitter {
           case 'edit':
             return await this.controller.editFile(
               targetParams.filePath || targetParams.path,
-              this.agentId,
+              'system',
               targetParams.targetContent,
               targetParams.replacementContent,
               targetParams.expectedHash
             );
           case 'searchFiles':
-          case 'search':
+          case 'search': {
+            const searcherAgent = delegator !== 'unknown' ? delegator : this.agentId;
             return await this.controller.searchFiles(
               targetParams.searchPath || CONFIG.TEST_WORKSPACE,
-              this.agentId,
+              searcherAgent,
               targetParams.query
             );
+          }
           case 'gitStatus':
             if (this.git) {
               return await this.git.getStatus(targetParams.repoPath || CONFIG.BRIDGE_ROOT, this.agentId);
@@ -408,21 +428,36 @@ export class AgentRunner extends EventEmitter {
     }
 
     // Direct command execution: "exec: <command>" or "run: <command>"
-    const cmdMatch = text.match(/^(?:exec|run|command):\s*(.+)$/i);
-    if (cmdMatch && this.controller) {
-      return await this.controller.executeCommand(cmdMatch[1].trim(), CONFIG.TEST_WORKSPACE, this.agentId);
+    const cmdMatch = text.match(/(?:^|[\r\n\s]|;\s*)\b(?:exec|run|command):\s*(.+?)(?:[\r\n]|$)/i);
+    if (cmdMatch) {
+      if (!isExplicitlyAuthorized) {
+        const err = new Error(`SECURITY_DENIAL: Peer-authored instruction '${cmdMatch[0].trim()}' is untrusted. Effectful command execution is prohibited.`);
+        err.code = 'UNAUTHORIZED_PEER_EXECUTION';
+        throw err;
+      }
+      if (this.controller) {
+        return await this.controller.executeCommand(cmdMatch[1].trim(), CONFIG.TEST_WORKSPACE, 'system');
+      }
+    }
+
+    // Direct file write: "write: <filePath> content: <text>"
+    const writeMatch = text.match(/(?:^|[\r\n\s]|;\s*)\bwrite:\s*(\S+)\s+content:\s*(.+?)(?:[\r\n]|$)/is);
+    if (writeMatch) {
+      if (!isExplicitlyAuthorized) {
+        const err = new Error(`SECURITY_DENIAL: Peer-authored write instruction is untrusted. Effectful filesystem write is prohibited.`);
+        err.code = 'UNAUTHORIZED_PEER_WRITE';
+        throw err;
+      }
+      if (this.controller) {
+        return await this.controller.createFile(writeMatch[1].trim(), 'system', writeMatch[2], true);
+      }
     }
 
     // Direct file read: "read: <filePath>"
     const readMatch = text.match(/^read:\s*(.+)$/i);
     if (readMatch && this.controller) {
-      return await this.controller.readFile(readMatch[1].trim(), this.agentId);
-    }
-
-    // Direct file write: "write: <filePath> content: <text>"
-    const writeMatch = text.match(/^write:\s*(\S+)\s+content:\s*(.+)$/is);
-    if (writeMatch && this.controller) {
-      return await this.controller.createFile(writeMatch[1].trim(), this.agentId, writeMatch[2], true);
+      const readerAgent = delegator !== 'unknown' ? delegator : this.agentId;
+      return await this.controller.readFile(readMatch[1].trim(), readerAgent);
     }
 
     // 4. Exact reply extraction for deterministic communication tests

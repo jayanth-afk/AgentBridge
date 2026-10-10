@@ -200,6 +200,18 @@ export class ModelOrchestrator extends EventEmitter {
           expectedRequestId: requestId
         });
 
+        if (!correlated.correlated) {
+          envelope.transition(RequestState.FAILED, { error: 'CORRELATION_FAILED' });
+          return {
+            success: false,
+            requestId,
+            toAgent,
+            error: 'CORRELATION_FAILED: Response failed correlation verification',
+            latencyMs: Date.now() - startMs,
+            state: envelope.state
+          };
+        }
+
         envelope.transition(RequestState.RESPONSE_CORRELATED);
         envelope.transition(RequestState.DELIVERED);
 
@@ -270,6 +282,18 @@ export class ModelOrchestrator extends EventEmitter {
           rawResponse: responseText,
           expectedRequestId: requestId
         });
+
+        if (!correlated.correlated) {
+          envelope.transition(RequestState.FAILED, { error: 'CORRELATION_FAILED' });
+          return {
+            success: false,
+            requestId,
+            toAgent,
+            error: 'CORRELATION_FAILED: Response failed correlation verification',
+            latencyMs: Date.now() - startMs,
+            state: envelope.state
+          };
+        }
 
         envelope.transition(RequestState.RESPONSE_CORRELATED);
         envelope.transition(RequestState.DELIVERED);
@@ -356,6 +380,18 @@ export class ModelOrchestrator extends EventEmitter {
           rawResponse: responseText,
           expectedRequestId: requestId
         });
+
+        if (!correlated.correlated) {
+          envelope.transition(RequestState.FAILED, { error: 'CORRELATION_FAILED' });
+          return {
+            success: false,
+            requestId,
+            toAgent,
+            error: 'CORRELATION_FAILED: Response failed correlation verification',
+            latencyMs: Date.now() - startMs,
+            state: envelope.state
+          };
+        }
 
         envelope.transition(RequestState.RESPONSE_CORRELATED);
         envelope.transition(RequestState.DELIVERED);

@@ -35,7 +35,13 @@ export class ResponseCorrelator {
    */
   hasMarker(text, requestId) {
     if (!text || !requestId) return false;
-    return text.includes(`[${this.markerPrefix}:${requestId}]`);
+    if (text.includes(`[${this.markerPrefix}:${requestId}]`)) return true;
+    if (text.includes(`${this.markerPrefix}:${requestId}`)) return true;
+    const found = this.extractMarker(text);
+    if (found && found !== requestId) return false;
+    const escaped = requestId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`(?:^|[^a-zA-Z0-9_-])${escaped}(?:[^a-zA-Z0-9_-]|$)`);
+    return regex.test(text);
   }
 
   /**
@@ -62,7 +68,7 @@ export class ResponseCorrelator {
     const cleaned = this.cleanResponse(rawResponse);
 
     return {
-      correlated: hasExpected || (!foundMarker && Boolean(cleaned)),
+      correlated: hasExpected || (!expectedRequestId && !foundMarker && Boolean(cleaned)),
       foundMarker,
       expectedRequestId,
       cleanedText: cleaned,

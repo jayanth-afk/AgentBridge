@@ -8,7 +8,7 @@ import { TaskManager } from './task-manager.js';
 import { CacheManager } from './cache-manager.js';
 import { DiagnosticsManager } from './diagnostics-manager.js';
 import { PresenceManager } from './presence-manager.js';
-import { AgentIdentityManager } from './agent-identity.js';
+import { AgentIdentityManager, normalizeAgentId } from './agent-identity.js';
 import { GitController } from './git-controller.js';
 import { ZiABackgroundGPT } from './control-plane/zia-background-gpt.js';
 import { ChatGptLocalEngineAdapter } from './control-plane/chatgpt-local-engine.js';
@@ -19,7 +19,7 @@ import { ArtifactStore } from './artifacts/artifact-store.js';
 
 export class BridgeHttpServer {
   constructor(options = {}) {
-    this.port = options.port || 8765;
+    this.port = options.port !== undefined ? options.port : 8765;
     this.host = options.host || '127.0.0.1';
     this.logger = options.auditLogger;
     this.guard = options.permissionGuard;
@@ -62,6 +62,7 @@ export class BridgeHttpServer {
       : CONFIG.CONTROL_PLANE.REQUIRE_API_KEY;
     const configKey = this.requireApiKey ? CONFIG.CONTROL_PLANE.API_KEY : null;
     this.apiKey = options.apiKey !== undefined ? options.apiKey : configKey;
+    this.allowUnauthenticatedLocal = Boolean(options.allowUnauthenticatedLocal);
     // The ChatGPT brain endpoints (/api/chatgpt/*) ALWAYS require a key, so the
     // configured key is resolved independently of the general `requireApiKey`
     // opt-in. When none is configured those routes fail closed (503). The key is
@@ -123,10 +124,30 @@ export class BridgeHttpServer {
     return null;
   }
 
-  isAuthorized(req) {
-    if (!this.apiKey) return true; // no key configured -> local-only mode
+  resolveAuth(req) {
     const presented = this.extractApiKey(req);
-    return timingSafeEqualString(presented, this.apiKey);
+    if (this.apiKey && presented && timingSafeEqualString(presented, this.apiKey)) {
+      return { authorized: true, isPrivileged: true, agentId: 'system' };
+    }
+    if (presented && this.identity) {
+      const tokenAgent = this.identity.verifyToken(presented);
+      if (tokenAgent) {
+        return { authorized: true, isPrivileged: tokenAgent === 'system', agentId: tokenAgent };
+      }
+    }
+    // Fail-closed by default: unauthenticated access is rejected unless explicitly opted in
+    if (!this.apiKey && this.allowUnauthenticatedLocal) {
+      const remote = req.socket ? req.socket.remoteAddress : '';
+      const isLoopback = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remote);
+      if (isLoopback) {
+        return { authorized: true, isPrivileged: false, agentId: null, unauthenticatedLocal: true };
+      }
+    }
+    return { authorized: false, error: 'Unauthorized: missing or invalid API key.' };
+  }
+
+  isAuthorized(req) {
+    return this.resolveAuth(req).authorized;
   }
 
   /**
@@ -217,12 +238,48 @@ export class BridgeHttpServer {
           return res.end();
         }
 
-        // Enforce the authentication boundary before any handler runs. This is
-        // the authoritative gate: every route below is only reachable once
-        // this check passes.
-        if (!this.isAuthorized(req)) {
+        // Reject browser-origin cross-site requests unconditionally on protected control-plane endpoints
+        const origin = req.headers['origin'];
+        if (typeof origin === 'string' && origin.length > 0) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'Browser-originated requests are forbidden.' }));
+        }
+
+        if (pathname === '/health' && method === 'GET') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({
+            status: 'healthy',
+            service: 'agent-bridge',
+            authEnabled: Boolean(this.apiKey),
+            ziaWriteLocked: this.guard?.config?.ZIA_WRITE_LOCKED ?? CONFIG.ZIA_WRITE_LOCKED,
+            allowedRoots: this.guard?.config?.ALLOWED_ROOTS ?? CONFIG.ALLOWED_ROOTS,
+            activeAgents: this.guard?.config?.AGENT_IDENTITIES ?? CONFIG.AGENT_IDENTITIES,
+            liveAgents: this.presence ? this.presence.listAgents() : [],
+            startupStamp: this.diagnostics?.startupStamp || null
+          }));
+        }
+
+        // Enforce the authentication boundary
+        const auth = this.resolveAuth(req);
+        if ((this.apiKey || this.requireApiKey) && !auth.authorized) {
           res.writeHead(401, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ error: 'Unauthorized: missing or invalid API key.' }));
+          return res.end(JSON.stringify({ error: auth.error || 'Unauthorized: missing or invalid API key.' }));
+        }
+
+        // Protected REST routes fail closed by default if credentials are absent or unauthenticated
+        const isProtectedRestRoute = (
+          pathname.startsWith('/api/inbox/') ||
+          pathname === '/api/message' ||
+          pathname === '/api/task' ||
+          pathname.startsWith('/api/task/') ||
+          pathname === '/api/audit'
+        );
+        if (isProtectedRestRoute && (!auth.authorized || auth.unauthenticatedLocal || !auth.agentId)) {
+          if (pathname === '/api/audit' && (!auth.authorized || !auth.isPrivileged)) {
+            res.writeHead(auth.authorized ? 403 : 401, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'Forbidden: audit logs require privileged administrative access.' }));
+          }
+          res.writeHead(401, { 'Content-Type': 'application/json' });
         }
 
         const readBody = () => new Promise((resBody, rejBody) => {
@@ -251,20 +308,6 @@ export class BridgeHttpServer {
         });
 
         try {
-          if (pathname === '/health' && method === 'GET') {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            return res.end(JSON.stringify({
-              status: 'healthy',
-              service: 'agent-bridge',
-              authEnabled: Boolean(this.apiKey),
-              ziaWriteLocked: this.guard.config.ZIA_WRITE_LOCKED,
-              allowedRoots: this.guard.config.ALLOWED_ROOTS,
-              activeAgents: this.guard.config.AGENT_IDENTITIES,
-              liveAgents: this.presence ? this.presence.listAgents() : [],
-              startupStamp: this.diagnostics?.startupStamp || null
-            }));
-          }
-
           if (pathname === '/api/chatgpt/health' && method === 'GET') {
             if (!this.guardChatGPTRequest(req, res)) return;
             try {
@@ -303,6 +346,14 @@ export class BridgeHttpServer {
 
           if (pathname.startsWith('/api/inbox/') && method === 'GET') {
             const agentId = pathname.replace('/api/inbox/', '');
+            if (auth.unauthenticatedLocal || !auth.agentId) {
+              res.writeHead(401, { 'Content-Type': 'application/json' });
+              return res.end(JSON.stringify({ error: 'Unauthorized: caller must authenticate to access inboxes.' }));
+            }
+            if (!auth.isPrivileged && auth.agentId.toLowerCase() !== agentId.toLowerCase()) {
+              res.writeHead(403, { 'Content-Type': 'application/json' });
+              return res.end(JSON.stringify({ error: `Forbidden: caller '${auth.agentId}' cannot read inbox of '${agentId}'.` }));
+            }
             const unreadOnly = query.unreadOnly === 'true';
             const compact = query.compact === 'true';
             const messages = this.mailbox.getInbox({ agentId, unreadOnly, compact });
@@ -311,14 +362,50 @@ export class BridgeHttpServer {
           }
 
           if (pathname === '/api/message' && method === 'POST') {
+            if (auth.unauthenticatedLocal || !auth.agentId) {
+              res.writeHead(401, { 'Content-Type': 'application/json' });
+              return res.end(JSON.stringify({ error: 'Unauthorized: caller must authenticate to send messages.' }));
+            }
             const body = await readBody();
+            const presentedFrom = body.fromAgent || body.from_agent || body.creator;
+            if (!auth.isPrivileged) {
+              if (presentedFrom && normalizeAgentId(presentedFrom) !== normalizeAgentId(auth.agentId)) {
+                res.writeHead(403, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ error: `Forbidden: caller '${auth.agentId}' cannot send messages as '${presentedFrom}'.` }));
+              }
+              body.fromAgent = auth.agentId;
+              delete body.from_agent;
+              delete body.creator;
+            } else if (!presentedFrom) {
+              body.fromAgent = 'system';
+            } else {
+              body.fromAgent = presentedFrom;
+            }
             const msg = this.mailbox.sendMessage(body);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify(msg));
           }
 
           if (pathname === '/api/task' && method === 'POST') {
+            if (auth.unauthenticatedLocal || !auth.agentId) {
+              res.writeHead(401, { 'Content-Type': 'application/json' });
+              return res.end(JSON.stringify({ error: 'Unauthorized: caller must authenticate to delegate tasks.' }));
+            }
             const body = await readBody();
+            const presentedFrom = body.fromAgent || body.from_agent || body.creator;
+            if (!auth.isPrivileged) {
+              if (presentedFrom && normalizeAgentId(presentedFrom) !== normalizeAgentId(auth.agentId)) {
+                res.writeHead(403, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ error: `Forbidden: caller '${auth.agentId}' cannot delegate tasks as '${presentedFrom}'.` }));
+              }
+              body.fromAgent = auth.agentId;
+              delete body.from_agent;
+              delete body.creator;
+            } else if (!presentedFrom) {
+              body.fromAgent = 'system';
+            } else {
+              body.fromAgent = presentedFrom;
+            }
             const task = this.mailbox.delegateTask(body);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify(task));
@@ -326,13 +413,38 @@ export class BridgeHttpServer {
 
           if (pathname.startsWith('/api/task/') && method === 'GET') {
             const taskId = pathname.replace('/api/task/', '');
+            if (auth.unauthenticatedLocal || !auth.agentId) {
+              res.writeHead(401, { 'Content-Type': 'application/json' });
+              return res.end(JSON.stringify({ error: 'Unauthorized: caller must authenticate to access tasks.' }));
+            }
             const compact = query.compact !== 'false';
-            const task = this.mailbox.getTask(taskId, compact);
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            return res.end(JSON.stringify(task || { error: 'Not found' }));
+            const caller = {
+              agentId: auth.agentId,
+              isPrivileged: Boolean(auth.isPrivileged)
+            };
+            try {
+              const task = this.mailbox.getTask(taskId, compact, caller);
+              if (!task) {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ error: `Task not found: ${taskId}` }));
+              }
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              return res.end(JSON.stringify(task));
+            } catch (err) {
+              if (err.message && err.message.includes('Unauthorized')) {
+                res.writeHead(403, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ error: `Forbidden: caller '${auth.agentId}' is not authorized to access task '${taskId}'.` }));
+              }
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              return res.end(JSON.stringify({ error: err.message }));
+            }
           }
 
           if (pathname === '/api/audit' && method === 'GET') {
+            if (auth.unauthenticatedLocal || !auth.isPrivileged) {
+              res.writeHead(403, { 'Content-Type': 'application/json' });
+              return res.end(JSON.stringify({ error: 'Forbidden: audit logs require privileged administrative access.' }));
+            }
             const limit = parseInt(query.limit, 10) || 50;
             const compact = query.compact === 'true';
             const logs = this.logger.getRecentLogs(limit);
@@ -684,6 +796,7 @@ export class BridgeHttpServer {
                 });
               }
 
+              const isPublicTool = ['bridge_ping', 'bridge_discover_agents', 'bridge_agent_presence', 'bridge_diagnostics'].includes(name);
               const toolContext = {
                 controller: this.controller,
                 mailbox: this.mailbox,
@@ -698,7 +811,10 @@ export class BridgeHttpServer {
                 cache: this.cache,
                 effectsLedger: this.effectsLedger,
                 attemptLedger: this.attemptLedger,
-                artifactStore: this.artifactStore
+                artifactStore: this.artifactStore,
+                requireAuthentication: Boolean(this.apiKey || this.requireApiKey) && !isPublicTool && !auth.isPrivileged,
+                isPrivileged: Boolean(auth.isPrivileged),
+                agentId: auth.agentId || (typeof req.headers['x-agent-id'] === 'string' ? req.headers['x-agent-id'].trim() : null)
               };
 
               try {
@@ -758,6 +874,10 @@ export class BridgeHttpServer {
       });
 
       this.server.listen(this.port, this.host, () => {
+        const addr = this.server.address();
+        if (addr && typeof addr === 'object' && addr.port) {
+          this.port = addr.port;
+        }
         resolve({ host: this.host, port: this.port });
       });
 
@@ -786,7 +906,18 @@ export class BridgeHttpServer {
       }
       this.sseClients.clear();
       if (this.server) {
-        this.server.close(resolve);
+        try {
+          if (typeof this.server.closeAllConnections === 'function') {
+            this.server.closeAllConnections();
+          }
+        } catch {}
+        this.server.close(() => {
+          resolve();
+        });
+        // In case close callback is delayed by lingering handles
+        if (typeof this.server.unref === 'function') {
+          this.server.unref();
+        }
       } else {
         resolve();
       }

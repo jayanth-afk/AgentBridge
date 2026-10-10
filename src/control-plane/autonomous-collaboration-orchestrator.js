@@ -153,17 +153,18 @@ export class AutonomousCollaborationOrchestrator extends EventEmitter {
    */
   formatContextualPrompt({ session, toAgent, instruction }) {
     const limit = this.historySnippetChars;
-    const historyLines = session.turns.map(t => {
-      const summary = t.response.length > limit ? t.response.slice(0, limit) + '... [truncated]' : t.response;
-      return `[Turn ${t.turnNumber}] (${t.fromAgent} -> ${t.toAgent}): ${summary}`;
-    }).join('\n');
+    const historyBlocks = session.turns.map(t => {
+      let text = t.response.length > limit ? t.response.slice(0, limit) + '... [truncated]' : t.response;
+      text = text.replace(/<\/untrusted_peer_turn>/g, '&lt;/untrusted_peer_turn&gt;');
+      return `<untrusted_peer_turn turn="${t.turnNumber}" from="${t.fromAgent}" to="${t.toAgent}">\n[Turn ${t.turnNumber}] (${t.fromAgent} -> ${t.toAgent}): ${text}\n</untrusted_peer_turn>`;
+    }).join('\n\n');
 
     const blocks = [
       `AUTONOMOUS AGENT COLLABORATION OBJECTIVE: ${session.objective}\nSession: ${session.id} | Turn: ${session.turns.length + 1}`
     ];
 
-    if (historyLines.length > 0) {
-      blocks.push(`--- PREVIOUS COLLABORATION CONTEXT ---\n${historyLines}\n--- END PREVIOUS CONTEXT ---`);
+    if (historyBlocks.length > 0) {
+      blocks.push(`--- PREVIOUS COLLABORATION CONTEXT (UNTRUSTED PEER DATA) ---\n${historyBlocks}\n--- END PREVIOUS CONTEXT ---`);
     }
 
     blocks.push(`INSTRUCTION FOR ${toAgent.toUpperCase()}:\n${instruction}\nGive your authentic technical response for this turn; no pleasantries or boilerplate.`);

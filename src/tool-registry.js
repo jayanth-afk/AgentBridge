@@ -149,12 +149,15 @@ export class ToolRegistry {
       tool = {
         name: 'bridge_explain_request',
         handler: async (args, ctx) => {
+          const caller = (args.agentId && args.agentId !== 'freebuff') || ctx.agentId || ctx.isPrivileged
+            ? { agentId: args.agentId || ctx.agentId, isPrivileged: Boolean(ctx.isPrivileged) }
+            : null;
           if (ctx.requestExplainer) {
-            return ctx.requestExplainer.explainRequest(args.requestId);
+            return ctx.requestExplainer.explainRequest(args.requestId, caller);
           }
           const { RequestExplainer } = await import('./diagnostics/request-explainer.js');
-          const explainer = new RequestExplainer(ctx.db || ctx.audit?.db);
-          return explainer.explainRequest(args.requestId);
+          const explainer = new RequestExplainer(ctx.db || ctx.audit?.db || ctx.logger?.db || ctx.logger || ctx.mailbox?.db);
+          return explainer.explainRequest(args.requestId, caller);
         }
       };
     }
@@ -167,13 +170,16 @@ export class ToolRegistry {
     // Resolve caller identity through AgentIdentityManager. The resolved
     // identity is authoritative for authorization; a caller cannot substitute
     // an arbitrary agentId/fromAgent for a different identity.
-    let callerAgentId = rawArgs.agentId || rawArgs.fromAgent || null;
+    let callerAgentId = rawArgs.agentId || rawArgs.fromAgent || context.agentId || null;
     if (context.identity) {
       const resolved = context.identity.resolveIdentity(callerAgentId, {
         token: rawArgs.token,
         allowCompatibility: context.allowIdentityCompatibility
       });
-      if (context.requireAuthentication === true && resolved.authenticated !== true) {
+      const isAuthenticated = context.isPrivileged === true ||
+        (Boolean(context.agentId) && context.agentId.toLowerCase() === (callerAgentId || '').toLowerCase()) ||
+        resolved.authenticated === true;
+      if (context.requireAuthentication === true && !isAuthenticated) {
         throw new Error(`Unauthorized: caller for tool '${name}' could not be authenticated.`);
       }
       callerAgentId = resolved.agentId;
@@ -1084,7 +1090,8 @@ export class ToolRegistry {
       },
       handler: async (args, ctx) => {
         const compact = args.compact !== false; // default true
-        return ctx.mailbox.getTask(args.taskId, compact);
+        const caller = { agentId: args.agentId, isPrivileged: Boolean(ctx.isPrivileged) };
+        return ctx.mailbox.getTask(args.taskId, compact, caller);
       }
     });
 
@@ -1143,7 +1150,10 @@ export class ToolRegistry {
         },
         required: ['requestId']
       },
-      handler: async (args, ctx) => ctx.mailbox.getRequest(args.requestId)
+      handler: async (args, ctx) => {
+        const caller = { agentId: args.agentId, isPrivileged: Boolean(ctx.isPrivileged) };
+        return ctx.mailbox.getRequest(args.requestId, caller);
+      }
     });
 
     this.registerTool({
@@ -1160,12 +1170,13 @@ export class ToolRegistry {
         if (!args.responseId && !args.requestId) {
           throw new Error('Either responseId or requestId must be provided');
         }
+        const caller = { agentId: args.agentId, isPrivileged: Boolean(ctx.isPrivileged) };
         if (args.responseId) {
-          const resp = ctx.mailbox.getResponse ? ctx.mailbox.getResponse(args.responseId) : null;
+          const resp = ctx.mailbox.getResponse ? ctx.mailbox.getResponse(args.responseId, caller) : null;
           if (!resp) throw new Error(`Response not found: ${args.responseId}`);
           return resp;
         }
-        const req = ctx.mailbox.getRequest ? ctx.mailbox.getRequest(args.requestId) : null;
+        const req = ctx.mailbox.getRequest ? ctx.mailbox.getRequest(args.requestId, caller) : null;
         if (!req) throw new Error(`Request not found: ${args.requestId}`);
         if (req.artifact) {
           return {

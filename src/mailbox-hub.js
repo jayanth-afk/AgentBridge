@@ -498,6 +498,12 @@ export class MailboxHub {
     }
 
     if (existingReq) {
+      const normCaller = fromAgent ? (normalizeAgentId(fromAgent) || String(fromAgent).trim().toLowerCase()) : null;
+      const normOwner = existingReq.from_agent ? (normalizeAgentId(existingReq.from_agent) || String(existingReq.from_agent).trim().toLowerCase()) : null;
+      if (normCaller !== normOwner) {
+        throw new Error(`Security Violation: Agent '${fromAgent}' cannot reattach to requestId '${existingReq.request_id}' owned by '${existingReq.from_agent}'.`);
+      }
+
       if (existingReq.status === 'completed') {
         this.tracer?.mark({
           requestId: existingReq.request_id,
@@ -1121,20 +1127,38 @@ export class MailboxHub {
     return res;
   }
 
-  getTask(taskId, compact = true) {
-    return this.tasks.getTask(taskId, compact);
+  _isAuthorizedParty(fromAgent, toAgent, caller) {
+    if (!caller) return true; // Direct internal / unauthenticated library call
+    if (typeof caller === 'object' && (caller.isPrivileged === true || caller.isInternal === true)) {
+      return true;
+    }
+    const callerId = typeof caller === 'string' ? caller : caller.agentId;
+    if (!callerId) return true;
+    const normCaller = normalizeAgentId(callerId) || String(callerId).trim().toLowerCase();
+    const normFrom = fromAgent ? (normalizeAgentId(fromAgent) || String(fromAgent).trim().toLowerCase()) : null;
+    const normTo = toAgent ? (normalizeAgentId(toAgent) || String(toAgent).trim().toLowerCase()) : null;
+    return normCaller === normFrom || normCaller === normTo;
+  }
+
+  getTask(taskId, compact = true, caller = null) {
+    return this.tasks.getTask(taskId, compact, caller);
   }
 
   listTasks({ agentId = null, status = null, limit = 20, compact = true } = {}) {
     return this.tasks.listTasks({ agentId, status, limit, compact });
   }
 
-  getRequest(requestId) {
+  getRequest(requestId, caller = null) {
     if (!requestId || typeof requestId !== 'string') {
       throw new Error('requestId is required and must be a non-empty string.');
     }
     const row = this.db.prepare('SELECT * FROM bridge_requests WHERE request_id = ?').get(requestId);
     if (!row) return null;
+
+    if (caller && !this._isAuthorizedParty(row.from_agent, row.to_agent, caller)) {
+      const callerId = typeof caller === 'string' ? caller : caller.agentId;
+      throw new Error(`Unauthorized: Agent '${callerId}' is not authorized to access request '${requestId}'.`);
+    }
 
     const art = this.responsePreserver?.getByRequestId(requestId) || null;
     const isQuarantined = Boolean(art?.quarantined);
@@ -1167,10 +1191,15 @@ export class MailboxHub {
     };
   }
 
-  getResponse(responseId) {
+  getResponse(responseId, caller = null) {
     if (!responseId) throw new Error('responseId is required');
     const art = this.responsePreserver ? this.responsePreserver.getByResponseId(responseId) : null;
     if (!art) return null;
+
+    if (caller && !this._isAuthorizedParty(art.requestingAgentId, art.respondingAgentId, caller)) {
+      const callerId = typeof caller === 'string' ? caller : caller.agentId;
+      throw new Error(`Unauthorized: Agent '${callerId}' is not authorized to access response '${responseId}'.`);
+    }
     if (art.quarantined) {
       return {
         ...art,

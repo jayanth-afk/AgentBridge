@@ -133,7 +133,10 @@ export class DesktopAgentWorker extends EventEmitter {
     } catch {}
   }
 
-  async handleRequest(requestId) {
+  async handleRequest(requestOrId) {
+    const requestId = typeof requestOrId === 'object' && requestOrId !== null
+      ? requestOrId.requestId
+      : requestOrId;
     if (!requestId) return { handled: false, error: 'MISSING_REQUEST_ID' };
     if (this.inFlight.has(requestId)) {
       return { handled: false, requestId, duplicate: true, reason: 'IN_FLIGHT' };
@@ -258,7 +261,7 @@ export class DesktopAgentWorker extends EventEmitter {
               targetPath: null,
               command: null,
               status: 'success',
-              details: { requestId, fromAgent: request.fromAgent, token }
+              details: { requestId, fromAgent: request.fromAgent, tokenRedacted: true }
             });
           } catch {}
         }

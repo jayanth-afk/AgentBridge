@@ -607,6 +607,11 @@ export class EventBus extends EventEmitter {
     return waiterPromise;
   }
 
+  getActiveWaiterCount(requestId) {
+    if (!requestId) return 0;
+    return this.responseWaiters.get(requestId)?.size ?? 0;
+  }
+
   getCursor(agentId) {
     try {
       const row = this.db.prepare(`

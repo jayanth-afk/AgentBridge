@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import EventEmitter from 'node:events';
 import { AttemptLedger } from './attempts/attempt-ledger.js';
 import { TransactionalOutbox } from './events/transactional-outbox.js';
+import { normalizeAgentId } from './agent-identity.js';
 
 export function runInImmediateTx(db, fn) {
   let started = false;
@@ -756,9 +757,27 @@ export class TaskManager extends EventEmitter {
     });
   }
 
-  getTask(taskId, compact = true) {
+  _isAuthorizedParty(fromAgent, toAgent, caller) {
+    if (!caller) return true; // Direct internal / unauthenticated library call
+    if (typeof caller === 'object' && (caller.isPrivileged === true || caller.isInternal === true)) {
+      return true;
+    }
+    const callerId = typeof caller === 'string' ? caller : caller.agentId;
+    if (!callerId) return false;
+    const normCaller = normalizeAgentId(callerId) || String(callerId).trim().toLowerCase();
+    const normFrom = fromAgent ? (normalizeAgentId(fromAgent) || String(fromAgent).trim().toLowerCase()) : null;
+    const normTo = toAgent ? (normalizeAgentId(toAgent) || String(toAgent).trim().toLowerCase()) : null;
+    return normCaller === normFrom || normCaller === normTo;
+  }
+
+  getTask(taskId, compact = true, caller = null) {
     const row = this.db.prepare(`SELECT * FROM tasks WHERE id = ?`).get(taskId);
     if (!row) return null;
+
+    if (caller && !this._isAuthorizedParty(row.from_agent, row.to_agent, caller)) {
+      const callerId = typeof caller === 'string' ? caller : caller.agentId;
+      throw new Error(`Unauthorized: Agent '${callerId}' is not authorized to access task '${taskId}'.`);
+    }
 
     if (compact) {
       return {

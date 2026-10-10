@@ -4,12 +4,17 @@
  * Answers: "What happened to request X?" with evidence-backed causal trace.
  */
 export class RequestExplainer {
-  constructor(auditLogger) {
-    this.logger = auditLogger;
-    this.db = auditLogger.db;
+  constructor(auditLoggerOrDb) {
+    if (auditLoggerOrDb && typeof auditLoggerOrDb.prepare === 'function') {
+      this.db = auditLoggerOrDb;
+      this.logger = null;
+    } else {
+      this.logger = auditLoggerOrDb;
+      this.db = auditLoggerOrDb?.db || null;
+    }
   }
 
-  explainRequest(requestId) {
+  explainRequest(requestId, caller = null) {
     if (!requestId) throw new Error('requestId is required');
 
     // 1. Fetch Request
@@ -23,6 +28,19 @@ export class RequestExplainer {
         requestId,
         error: `Request '${requestId}' not found in bridge_requests.`
       };
+    }
+
+    if (caller) {
+      const isPrivileged = typeof caller === 'object' && caller.isPrivileged === true;
+      const callerId = typeof caller === 'string' ? caller : caller.agentId;
+      if (!isPrivileged && callerId) {
+        const normCaller = callerId.trim().toLowerCase();
+        const normFrom = (requestRow.from_agent || '').trim().toLowerCase();
+        const normTo = (requestRow.to_agent || '').trim().toLowerCase();
+        if (normCaller !== normFrom && normCaller !== normTo) {
+          throw new Error(`Unauthorized: Agent '${callerId}' is not authorized to explain request '${requestId}'.`);
+        }
+      }
     }
 
     const taskId = requestRow.task_id;

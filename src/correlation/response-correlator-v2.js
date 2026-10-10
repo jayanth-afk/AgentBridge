@@ -59,6 +59,7 @@ export class CorrelatedResponse {
 export class ResponseCorrelatorV2 {
   constructor(options = {}) {
     this.options = options;
+    this.activeNonces = new Map();
   }
 
   /**
@@ -106,11 +107,14 @@ export class ResponseCorrelatorV2 {
 
   tagMessage(text, requestId, nonce = null) {
     if (nonce) {
+      if (requestId) this.activeNonces.set(requestId, nonce);
       return this.embedNonceInPrompt(text, nonce);
     }
     if (requestId) {
-      const synthNonce = `ABN-${crypto.createHash('sha256').update(String(requestId)).digest('hex').slice(0, 16)}`;
-      return this.embedNonceInPrompt(text, synthNonce);
+      // Unpredictable cryptographically secure random nonce
+      const randNonce = `ABN-${crypto.randomBytes(8).toString('hex')}`;
+      this.activeNonces.set(requestId, randNonce);
+      return this.embedNonceInPrompt(text, randNonce);
     }
     return text;
   }
@@ -119,7 +123,7 @@ export class ResponseCorrelatorV2 {
     if (!rawResponse) {
       return { correlated: false, error: 'EMPTY_RESPONSE', confidence: CorrelationConfidence.NO_RESPONSE };
     }
-    const resolvedNonce = nonce || (expectedRequestId ? `ABN-${crypto.createHash('sha256').update(String(expectedRequestId)).digest('hex').slice(0, 16)}` : null);
+    const resolvedNonce = nonce || (expectedRequestId ? this.activeNonces.get(expectedRequestId) : null);
     const result = this.correlate({
       requestId: expectedRequestId,
       expectedNonce: resolvedNonce,
