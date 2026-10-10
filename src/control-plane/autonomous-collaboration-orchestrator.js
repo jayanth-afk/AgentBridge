@@ -316,15 +316,29 @@ export class AutonomousCollaborationOrchestrator extends EventEmitter {
     // AgentRunner-style acknowledgement envelopes are transport receipts, not
     // model answers. Reject both the bare marker and its historical JSON
     // envelope so a collaboration cannot claim an invisible model turn that
-    // never occurred.
+    // never occurred. Also reject all synthetic simulation prefixes and constant tokens.
     let syntheticEnvelope = false;
     try {
       syntheticEnvelope = JSON.parse(responseText)?.status === 'EXECUTED_BY_AGENT';
     } catch {}
-    if (responseText === 'EXECUTED_BY_AGENT' || syntheticEnvelope || responseText.length === 0) {
+
+    const isSynthetic = (
+      modelResult.provenance === 'synthetic' ||
+      modelResult.provenance === 'simulated' ||
+      modelResult.status === 'unsupported' ||
+      responseText === 'EXECUTED_BY_AGENT' ||
+      responseText === 'ANTIGRAVITY_TASK_COMPLETED' ||
+      responseText.startsWith('[Antigravity Execution:') ||
+      responseText.startsWith('ANTIGRAVITY_PROCESSED_VERIFIED:') ||
+      responseText.startsWith('FREEBUFF_AUDIT_VERIFIED:') ||
+      syntheticEnvelope ||
+      responseText.length === 0
+    );
+
+    if (isSynthetic) {
       session.status = CollaborationStatus.FAILED;
       session.updatedAt = new Date().toISOString();
-      const errorMsg = 'NON_MODEL_RESPONSE_REJECTED: Received synthetic or empty response';
+      const errorMsg = 'NON_MODEL_RESPONSE_REJECTED: Received synthetic, simulated, or non-model response';
       return { success: false, status: 'SYNTHETIC_RESPONSE_REJECTED', error: errorMsg };
     }
 

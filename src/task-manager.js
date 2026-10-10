@@ -84,7 +84,8 @@ export class TaskManager extends EventEmitter {
       { name: 'max_retries', type: 'INTEGER DEFAULT 3' },
       { name: 'timeout_ms', type: 'INTEGER DEFAULT 60000' },
       { name: 'error', type: 'TEXT' },
-      { name: 'dependencies', type: 'TEXT' } // JSON array of task IDs
+      { name: 'dependencies', type: 'TEXT' }, // JSON array of task IDs
+      { name: 'dedup_key', type: 'TEXT' }
     ];
 
     for (const col of newCols) {
@@ -100,6 +101,7 @@ export class TaskManager extends EventEmitter {
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_tasks_to_agent_status ON tasks(to_agent, status);
         CREATE INDEX IF NOT EXISTS idx_tasks_parent_id ON tasks(parent_task_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_dedup_key ON tasks(dedup_key) WHERE dedup_key IS NOT NULL;
       `);
     } catch {}
   }
@@ -156,6 +158,19 @@ export class TaskManager extends EventEmitter {
       }
     }
 
+    const effectiveDedupKey = dedupKey || (
+      typeof context === 'object' && context !== null ? context.dedupKey : null
+    ) || null;
+
+    if (effectiveDedupKey) {
+      try {
+        const existing = this.db.prepare('SELECT id FROM tasks WHERE dedup_key = ?').get(effectiveDedupKey);
+        if (existing) {
+          return this.getTask(existing.id, false);
+        }
+      } catch {}
+    }
+
     const id = `task_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const timestamp = new Date().toISOString();
     const depsJson = Array.isArray(dependencies) ? JSON.stringify(dependencies) : null;
@@ -173,40 +188,65 @@ export class TaskManager extends EventEmitter {
       priority,
       createdAt: timestamp,
       updatedAt: timestamp,
-      dependencies
+      dependencies,
+      dedupKey: effectiveDedupKey
     };
 
+    let finalTask = task;
+
     const insertWork = (targetDb, stageEventFn = null) => {
+      if (effectiveDedupKey) {
+        try {
+          const existing = targetDb.prepare('SELECT id FROM tasks WHERE dedup_key = ?').get(effectiveDedupKey);
+          if (existing) {
+            finalTask = this.getTask(existing.id, false);
+            return;
+          }
+        } catch {}
+      }
+
       const stmt = targetDb.prepare(`
         INSERT INTO tasks (
           id, created_at, updated_at, from_agent, to_agent, title, instructions,
-          context, status, result, parent_task_id, priority, timeout_ms, max_retries, dependencies
+          context, status, result, parent_task_id, priority, timeout_ms, max_retries, dependencies, dedup_key
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
       `);
 
-      stmt.run(
-        id,
-        timestamp,
-        timestamp,
-        fromAgent,
-        toAgent,
-        title,
-        instructions,
-        resolvedContext,
-        initialStatus,
-        parentTaskId,
-        priority,
-        timeoutMs,
-        maxRetries,
-        depsJson
-      );
+      try {
+        stmt.run(
+          id,
+          timestamp,
+          timestamp,
+          fromAgent ?? null,
+          toAgent ?? null,
+          title ?? null,
+          instructions ?? null,
+          resolvedContext ?? null,
+          initialStatus ?? null,
+          parentTaskId ?? null,
+          priority ?? null,
+          timeoutMs ?? null,
+          maxRetries ?? null,
+          depsJson ?? null,
+          effectiveDedupKey ?? null
+        );
+      } catch (insertErr) {
+        if (effectiveDedupKey && insertErr.message && insertErr.message.includes('UNIQUE constraint failed')) {
+          const existing = targetDb.prepare('SELECT id FROM tasks WHERE dedup_key = ?').get(effectiveDedupKey);
+          if (existing) {
+            finalTask = this.getTask(existing.id, false);
+            return;
+          }
+        }
+        throw insertErr;
+      }
 
       this.logger?.log({
         agentId: fromAgent,
         action: 'delegate_task',
         status: 'success',
-        details: { taskId: id, toAgent, title, priority, parentTaskId }
+        details: { taskId: id, toAgent, title, priority, parentTaskId, dedupKey: effectiveDedupKey }
       });
 
       if (emitEvent && stageEventFn) {
@@ -222,7 +262,7 @@ export class TaskManager extends EventEmitter {
             title: title ? (title.length > 80 ? title.slice(0, 80) + '...' : title) : '',
             priority
           },
-          dedupKey: dedupKey || `task_created_${id}`
+          dedupKey: effectiveDedupKey || `task_created_${id}`
         });
       }
     };
@@ -238,8 +278,10 @@ export class TaskManager extends EventEmitter {
       });
     }
 
-    this.emit('taskCreated', task);
-    return task;
+    if (finalTask === task) {
+      this.emit('taskCreated', task);
+    }
+    return finalTask;
   }
 
   claimNextTask(agentId) {
@@ -751,7 +793,8 @@ export class TaskManager extends EventEmitter {
       completedAt: row.completed_at,
       dependencies: row.dependencies ? (() => { try { return JSON.parse(row.dependencies); } catch { return []; } })() : [],
       result: row.result,
-      error: row.error
+      error: row.error,
+      dedupKey: row.dedup_key || null
     };
   }
 

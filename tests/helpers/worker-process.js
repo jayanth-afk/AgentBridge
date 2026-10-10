@@ -5,6 +5,7 @@
  * Mode "requester": issues a bridge_ask_agent call and directly awaits the
  *                   correlated response over the cross-process event bus.
  */
+import crypto from 'node:crypto';
 import { AuditLogger } from '../../src/audit-logger.js';
 import { TaskManager } from '../../src/task-manager.js';
 import { MailboxHub } from '../../src/mailbox-hub.js';
@@ -44,6 +45,19 @@ if (mode === 'worker') {
 
   runner.registerHandler('ping_query', async () => {
     return `PONG_FROM_${agentId.toUpperCase()}`;
+  });
+
+  runner.registerHandler('derive_nonce', async (task) => {
+    const match = task.instructions.match(/derive_nonce\s+([a-zA-Z0-9_\-]+)/i);
+    const nonce = match ? match[1] : 'unknown';
+    const derived = crypto.createHash('sha256').update(`RESPONDER_${agentId}_${nonce}`).digest('hex');
+    return JSON.stringify({
+      responderPid: process.pid,
+      responderAgent: agentId,
+      receivedNonce: nonce,
+      derivedToken: derived,
+      status: 'VERIFIED_EXECUTION'
+    });
   });
 
   runner.on('eventWoken', (data) => {

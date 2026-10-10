@@ -216,10 +216,20 @@ export class MailboxHub {
     conversationId = null,
     requestId = null,
     notifyInbox = true,
-    emitEvent = true
+    emitEvent = true,
+    dedupKey = null
   }) {
-    const normFrom = normalizeAgentId(fromAgent) || fromAgent;
-    const normTo = normalizeAgentId(toAgent) || toAgent;
+    if (!toAgent) {
+      const err = new Error('VALIDATION_ERROR: Target agent must be specified');
+      err.code = 'VALIDATION_ERROR';
+      throw err;
+    }
+    const normFrom = normalizeAgentId(fromAgent) || fromAgent || null;
+    const normTo = normalizeAgentId(toAgent) || toAgent || null;
+
+    const effectiveDedupKey = dedupKey || (
+      typeof context === 'object' && context !== null ? context.dedupKey : null
+    ) || null;
 
     const resolvedReqId = requestId || `req_task_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const convId = conversationId || (resolvedReqId ? `conv_${resolvedReqId}` : null);
@@ -236,11 +246,23 @@ export class MailboxHub {
         dependencies,
         conversationId: convId,
         requestId: resolvedReqId,
-        emitEvent
+        emitEvent,
+        dedupKey: effectiveDedupKey
       });
 
-      // Establish uniform request-task correlation in bridge_requests so desktop and autonomous workers can uniformly claim and track all tasks
+      // Check if task already existed (deduplicated)
+      let alreadyExisted = false;
       if (this.db) {
+        try {
+          const reqRow = this.db.prepare('SELECT request_id FROM bridge_requests WHERE task_id = ?').get(task.id);
+          if (reqRow) {
+            alreadyExisted = true;
+          }
+        } catch {}
+      }
+
+      // Establish uniform request-task correlation in bridge_requests so desktop and autonomous workers can uniformly claim and track all tasks
+      if (this.db && !alreadyExisted) {
         try {
           const existing = this.db.prepare('SELECT request_id FROM bridge_requests WHERE request_id = ?').get(resolvedReqId);
           if (!existing) {
@@ -260,8 +282,8 @@ export class MailboxHub {
 
       const actualConvId = convId || `conv_task_${task.id}`;
 
-      // Send an inbox message for durable mail fallback only if requested
-      if (notifyInbox) {
+      // Send an inbox message for durable mail fallback only if requested and task is freshly created
+      if (notifyInbox && !alreadyExisted) {
         this.sendMessage({
           fromAgent: normFrom,
           toAgent: normTo,
@@ -442,6 +464,8 @@ export class MailboxHub {
         mode: 'synchronous_peer_response',
         fromAgent: syncRequestingId,
         toAgent: syncRespondingId,
+        requestId: reqIdSync,
+        conversationId: conversationId || `conv_sync_${Date.now()}`,
         question,
         response: isQuarantined ? null : response,
         status: isQuarantined ? 'quarantined' : 'completed',

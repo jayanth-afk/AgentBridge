@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 
 const DEFAULT_CODEX_PATH =
   '/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex';
@@ -129,7 +130,7 @@ export class ChatGptModelAdapter extends ModelExecutionAdapter {
     const { spawn } = await import('node:child_process');
     const resolvedId = requestId || `req_cg_${Date.now()}`;
     if (!this.isInstalled()) {
-      return { success: false, error: 'CODEX_CLI_NOT_FOUND', modelTurnConfirmed: false };
+      return { success: false, status: 'UNSUPPORTED', error: 'CODEX_CLI_NOT_FOUND', modelTurnConfirmed: false, provenance: 'unsupported' };
     }
     const startMs = Date.now();
     const args = ['exec', prompt, '--skip-git-repo-check', '--json'];
@@ -157,7 +158,15 @@ export class ChatGptModelAdapter extends ModelExecutionAdapter {
         job.cancelled = true;
         try { child.kill('SIGTERM'); } catch {}
         this.activeJobs.delete(resolvedId);
-        resolve({ success: false, error: 'TIMEOUT', requestId: resolvedId, modelTurnConfirmed: true, latencyMs: Date.now() - startMs });
+        resolve({
+          success: false,
+          status: 'TIMEOUT',
+          error: 'TIMEOUT',
+          requestId: resolvedId,
+          modelTurnConfirmed: false,
+          provenance: 'timeout',
+          latencyMs: Date.now() - startMs
+        });
       }, this.options.timeoutMs || 60000);
 
       child.on('close', (code) => {
@@ -165,11 +174,15 @@ export class ChatGptModelAdapter extends ModelExecutionAdapter {
         this.activeJobs.delete(resolvedId);
         if (job.cancelled) return;
         const latencyMs = Date.now() - startMs;
+        const isSuccess = code === 0 && response.length > 0;
         resolve({
-          success: code === 0 && response.length > 0,
-          response,
+          success: isSuccess,
+          status: isSuccess ? 'COMPLETED' : (code !== 0 ? `PROCESS_EXIT_${code}` : 'EMPTY_RESPONSE'),
+          error: isSuccess ? null : (code !== 0 ? `PROCESS_EXIT_${code}` : 'EMPTY_RESPONSE'),
+          response: isSuccess ? response : null,
           requestId: resolvedId,
-          modelTurnConfirmed: true,
+          modelTurnConfirmed: isSuccess,
+          provenance: isSuccess ? 'real-model' : 'failed',
           latencyMs
         });
       });
@@ -254,15 +267,34 @@ export class ClaudeModelAdapter extends ModelExecutionAdapter {
       const session = new ClaudeAutonomousSession(this.options);
       const res = await session.send({ text: resolvedText, requestId: resolvedId });
       this.activeTurns.set(resolvedId, res);
+
+      const hasResponse = Boolean(res && (res.response || res.text || res.data));
+      const isSuccess = Boolean(res && res.success !== false && hasResponse);
+      const isTimeout = Boolean(res?.status === 'TIMEOUT' || res?.error?.includes('timed out') || res?.error === 'TIMEOUT');
+      const isTurnConfirmed = Boolean(isSuccess && res?.modelTurnConfirmed === true);
+      const provenance = isSuccess ? (res.provenance || 'real-model') : (isTimeout ? 'timeout' : (res.provenance || 'failed'));
+
       return {
         ...res,
-        success: res.success !== false,
-        modelTurnConfirmed: true,
+        success: isSuccess,
+        status: res?.status || (isSuccess ? 'COMPLETED' : (isTimeout ? 'TIMEOUT' : 'FAILED')),
+        error: isSuccess ? null : (res?.error || (isTimeout ? 'TIMEOUT' : 'EMPTY_RESPONSE')),
+        modelTurnConfirmed: isTurnConfirmed,
+        provenance,
         requestId: resolvedId,
-        latencyMs: Date.now() - startMs
+        latencyMs: res?.latencyMs || (Date.now() - startMs)
       };
     } catch (err) {
-      return { success: false, error: err.message, requestId: resolvedId, modelTurnConfirmed: false, latencyMs: Date.now() - startMs };
+      const isTimeout = /timed?\s*out/i.test(err.message);
+      return {
+        success: false,
+        status: isTimeout ? 'TIMEOUT' : 'FAILED',
+        error: err.message,
+        requestId: resolvedId,
+        modelTurnConfirmed: false,
+        provenance: isTimeout ? 'timeout' : 'failed',
+        latencyMs: Date.now() - startMs
+      };
     }
   }
 
@@ -297,6 +329,7 @@ export class AntigravityModelAdapter extends ModelExecutionAdapter {
       idleModelWake: true,
       uiSubmissionSupported: true,
       modelTurnConfirmation: true,
+      workerExecutionSupported: true,
       modelResponseCorrelation: true,
       streaming: false,
       cancellation: true,
@@ -315,11 +348,28 @@ export class AntigravityModelAdapter extends ModelExecutionAdapter {
 
     // Autonomous worker executes deterministic tasks inline (no external model call)
     const response = this._executeWorkerTask(prompt || '', resolvedId);
+    if (!response) {
+      return {
+        success: false,
+        status: 'UNSUPPORTED_INSTRUCTION',
+        error: `UNSUPPORTED_WORKER_TASK: No execution handler for '${prompt || ''}'`,
+        modelTurnConfirmed: false,
+        workerExecuted: false,
+        provenance: 'unsupported',
+        requestId: resolvedId,
+        latencyMs: Date.now() - startMs
+      };
+    }
+
     this.completedTasks.set(resolvedId, response);
 
     return {
       success: true,
+      status: 'COMPLETED',
+      error: null,
       modelTurnConfirmed: true,
+      workerExecuted: true,
+      provenance: 'local-engine',
       requestId: resolvedId,
       response,
       transport: 'antigravity-worker',
@@ -342,7 +392,22 @@ export class AntigravityModelAdapter extends ModelExecutionAdapter {
       const m = prompt.match(/math_double\s+(\d+)/i);
       return String(parseInt(m[1], 10) * 2);
     }
-    return `[Antigravity Execution: ${prompt}] (req:${requestId})`;
+    // Cryptographic derive_nonce
+    if (/derive_nonce\s+([a-zA-Z0-9_-]+)/i.test(prompt)) {
+      const match = prompt.match(/derive_nonce\s+([a-zA-Z0-9_-]+)/i);
+      const nonce = match[1];
+      const derivedToken = crypto.createHash('sha256').update(`RESPONDER_antigravity_${nonce}`).digest('hex');
+      return JSON.stringify({
+        status: 'OK',
+        derivedToken,
+        nonce,
+        responderAgent: 'antigravity',
+        responderPid: process.pid,
+        timestamp: new Date().toISOString()
+      });
+    }
+    // Truthful failure: unsupported prompt returns null
+    return null;
   }
 
   _primeFactors(n) {

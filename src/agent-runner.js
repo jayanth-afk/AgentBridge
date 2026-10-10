@@ -225,6 +225,19 @@ export class AgentRunner extends EventEmitter {
       // Execute task logic
       const result = await this.executeTaskLogic(task);
 
+      // Defensively reject synthetic fallback envelopes if returned by an errant handler or legacy fallback
+      const isSyntheticFallbackEnvelope = (
+        typeof result === 'object' &&
+        result !== null &&
+        result.status === 'EXECUTED_BY_AGENT' &&
+        Boolean(result.taskId || result.agent || result.completedAt || result.fallback)
+      );
+      if (isSyntheticFallbackEnvelope) {
+        const err = new Error('CANNOT_SUBMIT_CANNED_ENVELOPE: Fallback EXECUTED_BY_AGENT envelope cannot be submitted as completed execution');
+        err.code = 'UNSUPPORTED_INSTRUCTION';
+        throw err;
+      }
+
       // Transition: REPORTING
       this.state = 'REPORTING';
       if (this.presence) {
@@ -251,7 +264,7 @@ export class AgentRunner extends EventEmitter {
         taskId: task.id,
         agentId: this.agentId,
         error: err.message,
-        allowRetry: true,
+        allowRetry: err.code !== 'UNSUPPORTED_INSTRUCTION',
         attemptId: task.attemptId || null,
         epoch: task.epoch || null
       });
@@ -431,6 +444,20 @@ export class AgentRunner extends EventEmitter {
       return `PONG_FROM_${this.agentId.toUpperCase()}`;
     }
 
+    // Cryptographic nonce derivation for deterministic verified execution
+    const deriveMatch = text.match(/derive_nonce\s+([a-zA-Z0-9_\-]+)/i);
+    if (deriveMatch) {
+      const nonce = deriveMatch[1];
+      const derived = crypto.createHash('sha256').update(`RESPONDER_${this.agentId}_${nonce}`).digest('hex');
+      return JSON.stringify({
+        responderPid: process.pid,
+        responderAgent: this.agentId,
+        receivedNonce: nonce,
+        derivedToken: derived,
+        status: 'VERIFIED_EXECUTION'
+      });
+    }
+
     // 5. Harmless Smoke Test (autonomous-test or linkage-test)
     if (lower.includes('linkage-test') || lower.includes('autonomous-test') || lower.includes('smoke test')) {
       const workspace = CONFIG.TEST_WORKSPACE;
@@ -474,14 +501,9 @@ export class AgentRunner extends EventEmitter {
       return await this.git.getStatus(CONFIG.BRIDGE_ROOT, this.agentId);
     }
 
-    // 7. General autonomous execution with genuine metadata
-    return {
-      status: 'EXECUTED_BY_AGENT',
-      agent: this.agentId,
-      taskId: task.id,
-      title: task.title,
-      instructions: task.instructions,
-      completedAt: new Date().toISOString()
-    };
+    // 7. Unsupported instruction: fail truthfully when no recognized handler or execution pattern matches
+    const err = new Error(`UNSUPPORTED_INSTRUCTION: No execution handler registered for '${task.title || task.instructions || task.id}'`);
+    err.code = 'UNSUPPORTED_INSTRUCTION';
+    throw err;
   }
 }

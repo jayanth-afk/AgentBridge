@@ -122,7 +122,8 @@ test('Zero-Waste Inter-Agent Response Delivery & Token Efficiency Suite', async 
 
     const orchestrator = new AutonomousCollaborationOrchestrator({
       modelOrchestrator: mockModelOrchestrator,
-      mailboxHub: mailbox
+      mailboxHub: mailbox,
+      invisibilityMonitor: null
     });
 
     // Run a 2-step chain (Step 1: delegate to Gemini, Step 2: scheduled synthesis wrapper by ChatGPT)
@@ -291,7 +292,8 @@ Citations:
 
     const orchestrator = new AutonomousCollaborationOrchestrator({
       modelOrchestrator: mockModelOrchestrator,
-      mailboxHub: mailbox
+      mailboxHub: mailbox,
+      invisibilityMonitor: null
     });
 
     const chainOutcome = await orchestrator.runCollaborationChain({
@@ -330,7 +332,8 @@ Citations:
 
     const orchestrator = new AutonomousCollaborationOrchestrator({
       modelOrchestrator: mockModelOrchestrator,
-      mailboxHub: mailbox
+      mailboxHub: mailbox,
+      invisibilityMonitor: null
     });
 
     const directOutcome = await orchestrator.runCollaborationChain({
@@ -365,7 +368,8 @@ Citations:
 
     const orchestrator = new AutonomousCollaborationOrchestrator({
       modelOrchestrator: mockModelOrchestrator,
-      mailboxHub: mailbox
+      mailboxHub: mailbox,
+      invisibilityMonitor: null
     });
 
     const failedOutcome = await orchestrator.delegateDirect({

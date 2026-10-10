@@ -33,6 +33,75 @@ export class ModelOrchestrator extends EventEmitter {
   }
 
   /**
+   * Await task completion from autonomous worker via TaskManager event bus
+   */
+  async _waitForTaskResult(taskId, timeoutMs = 15000) {
+    if (!this.mailbox?.tasks) {
+      return { status: 'unsupported', error: 'No task manager available' };
+    }
+
+    return new Promise((resolve) => {
+      let timer = null;
+      const tasks = this.mailbox.tasks;
+
+      const onCompleted = (updated) => {
+        if (updated && updated.id === taskId) {
+          cleanup();
+          resolve({ status: 'completed', task: updated, result: updated.result });
+        }
+      };
+
+      const onFailed = (updated) => {
+        if (updated && updated.id === taskId) {
+          cleanup();
+          resolve({ status: 'failed', task: updated, error: updated.error });
+        }
+      };
+
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        if (typeof tasks.removeListener === 'function') {
+          tasks.removeListener('taskCompleted', onCompleted);
+          tasks.removeListener('taskFailed', onFailed);
+        }
+      };
+
+      if (typeof tasks.on === 'function') {
+        tasks.on('taskCompleted', onCompleted);
+        tasks.on('taskFailed', onFailed);
+      }
+
+      // Check immediate state in case already completed
+      try {
+        const existing = tasks.getTask(taskId, false);
+        if (existing) {
+          if (existing.status === 'completed') {
+            cleanup();
+            resolve({ status: 'completed', task: existing, result: existing.result });
+            return;
+          } else if (existing.status === 'failed') {
+            cleanup();
+            resolve({ status: 'failed', task: existing, error: existing.error });
+            return;
+          }
+        }
+      } catch {}
+
+      timer = setTimeout(() => {
+        cleanup();
+        try {
+          const late = tasks.getTask(taskId, false);
+          if (late && late.status === 'completed') {
+            resolve({ status: 'completed', task: late, result: late.result });
+            return;
+          }
+        } catch {}
+        resolve({ status: 'timeout', error: 'TIMEOUT_WAITING_FOR_WORKER' });
+      }, timeoutMs);
+    });
+  }
+
+  /**
    * Delegate model task between agents with authentic model turn lifecycle
    */
   async delegateModelTask({
@@ -77,8 +146,6 @@ export class ModelOrchestrator extends EventEmitter {
       // 1. Target: ChatGPT Desktop
       if (normalizedTarget.includes('chatgpt')) {
         envelope.transition(RequestState.TRANSPORT_CONNECTED, { transport: 'chatgpt-autonomous-session' });
-        envelope.transition(RequestState.MODEL_TURN_CONFIRMED);
-        envelope.transition(RequestState.ASSISTANT_STARTED);
 
         let conv = this.conversations.get(resolvedConvId);
         if (!conv) {
@@ -123,6 +190,10 @@ export class ModelOrchestrator extends EventEmitter {
           };
         }
 
+        if (sessionRes.modelTurnConfirmed) {
+          envelope.transition(RequestState.MODEL_TURN_CONFIRMED);
+        }
+        envelope.transition(RequestState.ASSISTANT_STARTED);
         envelope.transition(RequestState.ASSISTANT_COMPLETED);
         const correlated = this.correlator.correlateTurn({
           rawResponse: responseText,
@@ -154,8 +225,6 @@ export class ModelOrchestrator extends EventEmitter {
       // 2. Target: Claude Desktop
       else if (normalizedTarget.includes('claude')) {
         envelope.transition(RequestState.TRANSPORT_CONNECTED);
-        envelope.transition(RequestState.MODEL_TURN_CONFIRMED);
-        envelope.transition(RequestState.ASSISTANT_STARTED);
 
         const taggedPrompt = this.correlator.tagMessage(envelope.message, requestId);
         const claudeRes = await this.claudeSession.send({
@@ -192,6 +261,10 @@ export class ModelOrchestrator extends EventEmitter {
             state: envelope.state
           };
         }
+        if (claudeRes.modelTurnConfirmed) {
+          envelope.transition(RequestState.MODEL_TURN_CONFIRMED);
+        }
+        envelope.transition(RequestState.ASSISTANT_STARTED);
         envelope.transition(RequestState.ASSISTANT_COMPLETED);
         const correlated = this.correlator.correlateTurn({
           rawResponse: responseText,
@@ -231,8 +304,6 @@ export class ModelOrchestrator extends EventEmitter {
       // 3. Target: Gemini Desktop (Gemini.app via Swift AX)
       else if (normalizedTarget.includes('gemini')) {
         envelope.transition(RequestState.TRANSPORT_CONNECTED, { transport: 'gemini-autonomous-session' });
-        envelope.transition(RequestState.MODEL_TURN_CONFIRMED);
-        envelope.transition(RequestState.ASSISTANT_STARTED);
 
         let conv = this.conversations.get(resolvedConvId);
         if (!conv) {
@@ -276,6 +347,10 @@ export class ModelOrchestrator extends EventEmitter {
           };
         }
 
+        if (geminiRes.modelTurnConfirmed) {
+          envelope.transition(RequestState.MODEL_TURN_CONFIRMED);
+        }
+        envelope.transition(RequestState.ASSISTANT_STARTED);
         envelope.transition(RequestState.ASSISTANT_COMPLETED);
         const correlated = this.correlator.correlateTurn({
           rawResponse: responseText,
@@ -306,47 +381,68 @@ export class ModelOrchestrator extends EventEmitter {
 
       // 4. Target: Antigravity IDE (Autonomous Task Execution)
       else if (normalizedTarget.includes('antigravity') || normalizedTarget.includes('worker')) {
-        envelope.transition(RequestState.TRANSPORT_CONNECTED, { transport: 'antigravity-worker' });
-        envelope.transition(RequestState.MODEL_TURN_CONFIRMED);
-        envelope.transition(RequestState.ASSISTANT_STARTED);
-
         // If MailboxHub is wired, queue task directly for autonomous worker
-        if (this.mailbox) {
-          const task = this.mailbox.createTask({
+        if (this.mailbox && typeof this.mailbox.delegateTask === 'function') {
+          envelope.transition(RequestState.TRANSPORT_CONNECTED, { transport: 'antigravity-worker' });
+          envelope.transition(RequestState.ASSISTANT_STARTED);
+
+          const task = await this.mailbox.delegateTask({
+            fromAgent,
+            toAgent: normalizedTarget,
             title: `Model Delegation: ${requestId}`,
             instructions: envelope.message,
-            assignee: 'antigravity-ide',
-            creator: fromAgent,
-            context
+            context,
+            requestId,
+            conversationId: resolvedConvId,
+            priority
           });
 
           // Wait for autonomous completion with lease check
-          const waiter = await this.mailbox.waitForTaskResult(task.id, 15000);
-          envelope.transition(RequestState.ASSISTANT_COMPLETED);
-          envelope.transition(RequestState.DELIVERED);
+          const timeoutMs = deadline ? Math.max(1000, deadline - Date.now()) : 15000;
+          const waiter = await this._waitForTaskResult(task.id, timeoutMs);
 
-          result = {
-            success: waiter.status === 'completed',
-            requestId,
-            fromAgent,
-            toAgent,
-            transport: 'antigravity-worker',
-            taskId: task.id,
-            response: waiter.result || 'ANTIGRAVITY_TASK_COMPLETED',
-            latencyMs: Date.now() - startMs,
-            state: envelope.state
-          };
+          if (waiter.status === 'completed' && waiter.result) {
+            envelope.transition(RequestState.ASSISTANT_COMPLETED);
+            envelope.transition(RequestState.DELIVERED);
+
+            result = {
+              success: true,
+              requestId,
+              fromAgent,
+              toAgent,
+              transport: 'antigravity-worker',
+              taskId: task.id,
+              response: typeof waiter.result === 'object' ? JSON.stringify(waiter.result) : String(waiter.result),
+              latencyMs: Date.now() - startMs,
+              state: envelope.state
+            };
+          } else {
+            const failReason = waiter.error || (waiter.status === 'completed' ? 'TASK_COMPLETED_WITHOUT_RESULT' : 'EXECUTION_FAILED');
+            envelope.transition(RequestState.FAILED, { error: failReason });
+            result = {
+              success: false,
+              status: waiter.status || 'failed',
+              requestId,
+              fromAgent,
+              toAgent,
+              transport: 'antigravity-worker',
+              taskId: task.id,
+              error: failReason,
+              latencyMs: Date.now() - startMs,
+              state: envelope.state
+            };
+          }
         } else {
-          // Direct execution simulation for tests
-          envelope.transition(RequestState.ASSISTANT_COMPLETED);
-          envelope.transition(RequestState.DELIVERED);
+          // No autonomous worker execution mechanism available - fail honestly
+          envelope.transition(RequestState.FAILED, { error: 'EXECUTION_UNSUPPORTED: no autonomous worker' });
           result = {
-            success: true,
+            success: false,
+            status: 'unsupported',
             requestId,
             fromAgent,
             toAgent,
             transport: 'antigravity-worker',
-            response: `[Antigravity Execution: ${envelope.message}]`,
+            error: 'EXECUTION_UNSUPPORTED: no autonomous worker',
             latencyMs: Date.now() - startMs,
             state: envelope.state
           };
