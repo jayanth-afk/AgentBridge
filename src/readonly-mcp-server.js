@@ -7,6 +7,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema
 } from '@modelcontextprotocol/sdk/types.js';
+import { serializeModelResult } from './utils/model-serializer.js';
 
 // Approved root configuration - STRICTLY LOCKED to Zia
 export const APPROVED_ROOT = path.resolve('/Users/jayanthpranaykonada/Zia');
@@ -363,7 +364,7 @@ export async function startStdioServer() {
         content: [
           {
             type: 'text',
-            text: JSON.stringify(result, null, 2)
+            text: serializeModelResult(result)
           }
         ]
       };
@@ -372,7 +373,7 @@ export async function startStdioServer() {
         content: [
           {
             type: 'text',
-            text: JSON.stringify({ error: err.message }, null, 2)
+            text: serializeModelResult({ error: err.message })
           }
         ],
         isError: true
@@ -472,7 +473,7 @@ export function startHttpServer(port = 8766, host = '127.0.0.1') {
                     content: [
                       {
                         type: 'text',
-                        text: JSON.stringify(result, null, 2)
+                        text: serializeModelResult(result)
                       }
                     ]
                   }
@@ -486,7 +487,7 @@ export function startHttpServer(port = 8766, host = '127.0.0.1') {
                     content: [
                       {
                         type: 'text',
-                        text: JSON.stringify({ error: toolErr.message }, null, 2)
+                        text: serializeModelResult({ error: toolErr.message })
                       }
                     ],
                     isError: true

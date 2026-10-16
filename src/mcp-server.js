@@ -7,6 +7,7 @@ import {
 
 import { execSync } from 'node:child_process';
 import { getScrubbedEnv } from './utils/scrubbed-env.js';
+import { serializeModelResult, serializeModelError } from './utils/model-serializer.js';
 import { CONFIG } from './config.js';
 import { AuditLogger } from './audit-logger.js';
 import { PermissionGuard } from './permission-guard.js';
@@ -184,7 +185,7 @@ export class BridgeMcpServer {
           content: [
             {
               type: 'text',
-              text: typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+              text: serializeModelResult(result)
             }
           ]
         };
@@ -194,7 +195,7 @@ export class BridgeMcpServer {
           content: [
             {
               type: 'text',
-              text: `Error executing ${name}: ${err.message}`
+              text: serializeModelError(name, err)
             }
           ]
         };

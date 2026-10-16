@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { CONFIG } from './config.js';
+import { serializeModelResult } from './utils/model-serializer.js';
 import {
   isSensitiveCredentialRequest,
   isVerificationTokenRequest,
@@ -260,7 +261,7 @@ export class AgentRunner extends EventEmitter {
         taskId: task.id,
         agentId: this.agentId,
         status: 'completed',
-        result: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
+        result: serializeModelResult(result),
         attemptId: task.attemptId || null,
         epoch: task.epoch || null
       });

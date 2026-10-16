@@ -58,8 +58,10 @@ export class RollingSummaryManager {
       collab.keyFacts.push(turn.facts);
     }
 
-    // Persist complete raw history to CAS
-    const fullLogJson = JSON.stringify(collab.turns, null, 2);
+    // Persist complete raw history to CAS. Compact JSON keeps the CAS payload
+    // (and the token measure below) free of indentation whitespace that would
+    // otherwise inflate storage and prematurely trip the summarization threshold.
+    const fullLogJson = JSON.stringify(collab.turns);
     const stored = this.cas.store(fullLogJson);
     collab.fullHistoryRef = stored.hash ? `ref:${stored.hash}` : (stored.ref || 'none');
 

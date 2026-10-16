@@ -6,6 +6,7 @@ import {
   SECURITY_DENIAL_MESSAGE
 } from '../security/verification-tokens.js';
 import { LifecycleStage } from '../diagnostics/request-tracer.js';
+import { serializeModelResult } from '../utils/model-serializer.js';
 
 export const DesktopAgentWorkerStatus = Object.freeze({
   IDLE: 'IDLE',
@@ -331,7 +332,7 @@ export class DesktopAgentWorker extends EventEmitter {
         for (const [name, handler] of this.customHandlers.entries()) {
           if ((request.question || '').toLowerCase().includes(name.toLowerCase())) {
             const result = await handler(request);
-            const responseText = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+            const responseText = serializeModelResult(result);
             this._settle(request, { status: 'completed', result: responseText });
             this._recordDelivered(requestId);
             this.stats.delivered++;

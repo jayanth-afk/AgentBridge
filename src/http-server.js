@@ -2,6 +2,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { getScrubbedEnv } from './utils/scrubbed-env.js';
+import { serializeModelResult, serializeModelError } from './utils/model-serializer.js';
 import { CONFIG } from './config.js';
 import { timingSafeEqualString } from './config-resolver.js';
 import { ToolRegistry } from './tool-registry.js';
@@ -918,7 +919,7 @@ export class BridgeHttpServer {
                     content: [
                       {
                         type: 'text',
-                        text: typeof out === 'string' ? out : JSON.stringify(out, null, 2)
+                        text: serializeModelResult(out)
                       }
                     ]
                   }
@@ -932,7 +933,7 @@ export class BridgeHttpServer {
                     content: [
                       {
                         type: 'text',
-                        text: `Error executing ${name}: ${toolErr.message}`
+                        text: serializeModelError(name, toolErr)
                       }
                     ]
                   }

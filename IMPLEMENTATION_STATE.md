@@ -791,6 +791,77 @@ Covered by `tests/zero-waste-response-delivery.test.js` (16/16 passed):
 - **Idempotent:** replaying the same request + content hash reuses the existing canonical artifact rather than storing a duplicate.
 - **`bridge_requests.response` is retained, intentionally:** it is the durable cross-process delivery buffer read directly by `EventBus._readTerminalRequest()` and asserted at the raw-row level by delivery-contract tests (e.g. `event-delivery-latency.test.js`, `chatgpt-adapter.test.js`, `verification-tokens.test.js`). It is a transport projection, not an artifact-store duplicate; removing it is a delivery-protocol change, not a storage change, and is out of scope.
 
+## Zero-Waste Tool I/O: compact serialization, answer contract & surface memoization (2026-10-17)
+
+Reproducible harness: `node scripts/bench/bench-model-serialization.mjs`.
+Token figures are **estimates** from `HonestTokenizer` (documented ±5%); byte figures are exact.
+
+### 1. Compact model-facing tool results
+
+The bridge pasted pretty-printed JSON (`JSON.stringify(result, null, 2)`) into every
+model-facing tool result. The host model pays input tokens for every indentation and
+newline, which carry no information. All model-facing paths now serialize through
+`serializeModelResult` (`src/utils/model-serializer.js`), which emits **compact JSON**
+and passes strings through untouched.
+
+Wired into: `src/mcp-server.js` (stdio MCP), `src/http-server.js` (HTTP MCP),
+`src/readonly-mcp-server.js` (both transports), `src/agent-runner.js`, and
+`src/control-plane/desktop-agent-worker.js`. `RollingSummaryManager` also stores its
+CAS turn log compactly (smaller payload, and the summarization threshold is no longer
+tripped early by indentation whitespace).
+
+Measured on a representative three-result corpus:
+
+| Metric | Pretty | Compact | Reduction |
+| :--- | :--: | :--: | :--: |
+| Bytes | 33,150 | 25,005 | **24.57%** |
+| Estimated tokens | 10,471 | 7,169 | **31.53%** |
+
+This is a **whitespace-only** transform: parsed compact JSON is deep-equal to the input
+value in every case (`tests/model-serialization.test.js`).
+
+### 2. Answer-only response contract (M3)
+
+`src/protocol/response-contract.js` implements the deterministic half of the answer-only
+contract. `bridge_submit_task_result` and `bridge_answer_request` now accept an optional
+`contract: { answerOnly, forbidPreamble, maxWords, format }`. When supplied, a closed-set
+regex grammar strips leading bare pleasantries ("Sure!", "Here's the answer:") and
+trailing offers of help ("Hope this helps", "Let me know if…") before the durable write,
+and the tool result carries a truthful `contractReport` (chars/token delta, `isEstimate`,
+and any `violations`).
+
+Safety invariants, all regression-tested: deterministic only (no model call); a
+bare-pleasantry segment must be short and carry no technical content; nothing is removed
+unless the remainder still holds >= 30 words; leading negations ("Certainly not — …") are
+never reduced to their continuation; code fences and body indentation are byte-identical.
+`maxWords`/`format` violations are **reported, never enforced destructively**. No contract
+supplied ⇒ the durable payload is byte-identical to today's behaviour (opt-in, zero
+regression risk). Measured: 14.04% estimated token reduction on a four-answer corpus.
+
+### 3. Tool-surface memoization (latency)
+
+`ToolRegistry.getToolDefinitions(profile)` rebuilt the surface (a map over all 74 tools)
+on every `tools/list` request and every `bridge_discover_tools` call. It is now memoized
+per profile and invalidated in `registerTool`, so registration stays correct while the
+hot path returns a cached array.
+
+| Path | Uncached | Memoized | Speedup |
+| :--- | :--: | :--: | :--: |
+| `getToolDefinitions('all')` | 287.6 ns | 9.7 ns | **29.7×** (200k iterations) |
+
+`resolveKnowledgeStore` now caches its store on the durable DB handle rather than the
+per-request context object. The HTTP control plane builds a fresh context per `tools/call`,
+which previously re-instantiated `KnowledgeStore` (re-running schema DDL and re-preparing
+statements) on every knowledge-tool call. The store is unchanged when no DB exists (it owns
+a private in-memory database, so it must not be shared).
+
+### 4. Regression coverage
+
+- `tests/model-serialization.test.js` — whitespace-only invariant, string passthrough, `undefined` handling, >= 10% measured reduction.
+- `tests/response-contract.test.js` — normalize/safety/stripping/violations plus real tool wiring for both tools.
+- `tests/tool-surface-cache.test.js` — memoization identity, profile isolation, registration invalidation, unchanged canonical counts (74/81).
+- `tests/knowledge-store-sharing.test.js` — a store written through one request context is visible through another on the same DB handle, and stays private without one.
+
 ## Long-term topology
 
 The target topology is peer-to-peer:

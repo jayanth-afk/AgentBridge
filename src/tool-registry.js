@@ -6,6 +6,7 @@ import { isEffectfulTool, getToolClassification, EffectsLedger } from './effects
 import { AttemptLedger } from './attempts/attempt-ledger.js';
 import { ArtifactStore, ArtifactError } from './artifacts/artifact-store.js';
 import { KnowledgeStore } from './memory/knowledge-store.js';
+import { applyContractToField } from './protocol/response-contract.js';
 import { SkillsManager } from './skills/skills-manager.js';
 import { SignedSkillRegistry } from './skills/skill-registry.js';
 
@@ -49,11 +50,19 @@ async function resolveArtifactStore(ctx) {
 const knowledgeStoreCache = new WeakMap();
 function resolveKnowledgeStore(ctx) {
   if (ctx.knowledgeStore) return ctx.knowledgeStore;
-  let store = knowledgeStoreCache.get(ctx);
+  const db = ctx.db || ctx.logger?.db || null;
+  // Cache the store on the durable DB handle when one exists. The store is
+  // bound to that handle (it only creates tables and prepares statements), so
+  // sharing it avoids re-running schema DDL and re-preparing statements for
+  // every request. Transports that build a fresh context object per call (e.g.
+  // the HTTP control plane) therefore stop re-instantiating it per tool call.
+  // Without a DB the store owns a private in-memory database, so it must stay
+  // keyed to the context and never be shared.
+  const key = db && typeof db === 'object' ? db : ctx;
+  let store = knowledgeStoreCache.get(key);
   if (!store) {
-    const db = ctx.db || ctx.logger?.db || null;
     store = new KnowledgeStore(db);
-    knowledgeStoreCache.set(ctx, store);
+    knowledgeStoreCache.set(key, store);
   }
   return store;
 }
@@ -324,10 +333,30 @@ export class ToolRegistry {
       throw new Error('Tool definition must have name and handler');
     }
     this.tools.set(definition.name, definition);
+    // Any registration invalidates cached per-profile surface definitions.
+    this._toolDefinitionCache?.clear();
   }
 
+  /**
+   * Return the tool surface for a profile.
+   *
+   * Memoized per profile: the surface is rebuilt only when a tool is registered
+   * (see `registerTool`). Every `tools/list` request and every
+   * `bridge_discover_tools` call reads this, so avoiding the 74-entry rebuild on
+   * the hot path removes repeated allocation for no behavioural change.
+   * The returned array is shared and must be treated as read-only.
+   */
   getToolDefinitions(profile = this.profile) {
     const norm = (profile || 'all').toLowerCase();
+    if (!this._toolDefinitionCache) this._toolDefinitionCache = new Map();
+    const cached = this._toolDefinitionCache.get(norm);
+    if (cached) return cached;
+    const definitions = this._computeToolDefinitions(norm);
+    this._toolDefinitionCache.set(norm, definitions);
+    return definitions;
+  }
+
+  _computeToolDefinitions(norm) {
     if (norm === 'skills') {
       const pingDef = this.tools.get('bridge_ping');
       const ping = pingDef ? [{ name: pingDef.name, description: pingDef.description, inputSchema: pingDef.inputSchema }] : [];
@@ -1683,7 +1712,17 @@ export class ToolRegistry {
           result: { type: 'string' },
           error: { type: 'string' },
           attemptId: { type: 'string', description: 'Attempt ID for monotonic fencing' },
-          epoch: { type: 'number', description: 'Attempt epoch token' }
+          epoch: { type: 'number', description: 'Attempt epoch token' },
+          contract: {
+            type: 'object',
+            description: 'Optional answer-only contract ({ answerOnly, forbidPreamble, maxWords, format }): strips bare pleasantries and reports token savings.',
+            properties: {
+              answerOnly: { type: 'boolean' },
+              forbidPreamble: { type: 'boolean' },
+              maxWords: { type: 'number' },
+              format: { type: 'string', enum: ['text', 'json', 'md'] }
+            }
+          }
         },
         required: ['taskId', 'agentId', 'status']
       },
@@ -1702,6 +1741,15 @@ export class ToolRegistry {
             args.result = val.compactText;
           }
         }
+        const contractReport = applyContractToField(args, 'result');
+        if (contractReport?.applied) {
+          ctx.logger?.log?.({
+            agentId: args.agentId,
+            action: 'response_contract_enforced',
+            status: 'success',
+            details: { taskId: args.taskId, ...contractReport }
+          });
+        }
         const outcome = await ctx.mailbox.submitTaskResult(args);
         try {
           const { defaultDisplayManager } = await import('./display/bridge-display-manager.js');
@@ -1715,6 +1763,9 @@ export class ToolRegistry {
         } catch  {
       // swallow-ok: intentional non-fatal error suppression
     }
+        if (contractReport && outcome && typeof outcome === 'object') {
+          return { ...outcome, contractReport };
+        }
         return outcome;
       }
     });
@@ -1899,11 +1950,28 @@ export class ToolRegistry {
           status: { type: 'string', enum: ['completed', 'failed'], default: 'completed' },
           error: { type: 'string', description: 'Optional error description if status is failed' },
           attemptId: { type: 'string', description: 'Attempt ID for monotonic fencing' },
-          epoch: { type: 'number', description: 'Attempt epoch token' }
+          epoch: { type: 'number', description: 'Attempt epoch token' },
+          contract: {
+            type: 'object',
+            description: 'Optional answer-only response contract: { answerOnly, forbidPreamble, maxWords, format }.',
+            properties: {
+              answerOnly: { type: 'boolean' },
+              forbidPreamble: { type: 'boolean' },
+              maxWords: { type: 'number' },
+              format: { type: 'string', enum: ['text', 'json', 'md'] }
+            }
+          }
         },
         required: ['requestId', 'agentId', 'response']
       },
-      handler: async (args, ctx) => ctx.mailbox.answerRequest(args)
+      handler: async (args, ctx) => {
+        const contractReport = applyContractToField(args, 'response');
+        const outcome = await ctx.mailbox.answerRequest(args);
+        if (contractReport && outcome && typeof outcome === 'object') {
+          return { ...outcome, contractReport };
+        }
+        return outcome;
+      }
     });
 
     this.registerTool({
