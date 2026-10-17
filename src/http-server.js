@@ -1061,9 +1061,12 @@ export class BridgeHttpServer {
     return new Promise((resolve) => {
       for (const [sessionId, client] of this.sseClients.entries()) {
         if (client.keepAliveTimer) clearInterval(client.keepAliveTimer);
-        try { client.res.end(); } catch  {
-      // swallow-ok: safe fallback for non-serializable object
-    }
+        try {
+          if (client.res?.socket) client.res.socket.destroy();
+          client.res.end();
+        } catch {
+          // swallow-ok
+        }
       }
       this.sseClients.clear();
       if (this.backgroundGPT && typeof this.backgroundGPT.close === 'function') {
@@ -1086,8 +1089,21 @@ export class BridgeHttpServer {
         } catch  {
       // swallow-ok: best-effort disposal cleanup
     }
+        let closed = false;
+        const forceTimer = setTimeout(() => {
+          if (!closed) {
+            closed = true;
+            resolve();
+          }
+        }, 500);
+        if (typeof forceTimer.unref === 'function') forceTimer.unref();
+
         this.server.close(() => {
-          resolve();
+          if (!closed) {
+            closed = true;
+            clearTimeout(forceTimer);
+            resolve();
+          }
         });
         // In case close callback is delayed by lingering handles
         if (typeof this.server.unref === 'function') {
