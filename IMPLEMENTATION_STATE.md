@@ -13,11 +13,11 @@ This is the authoritative implementation handoff for Agent Bridge. It supersedes
 
 Full regression suite (`npm run test:hermetic` → hermetic verification harness across all test suites):
 
-- tests: **1156**
-- pass: **1148**
+- tests: **1207**
+- pass: **1196**
 - fail: **0**
-- skipped: **8** (explicitly live-gated: live model quota/credentials requiring explicit opt-in)
-- duration: **~42.4s**
+- skipped: **11** (explicitly live-gated: live model quota/credentials and live desktop sessions requiring explicit opt-in)
+- duration: **~47.8s**
 - exit code: **0**
 
 ## Mission 4C Hardening & Verification Architecture
@@ -165,7 +165,7 @@ Zero-waste inter-agent responses are canonicalized into `ArtifactStore` (`bridge
   - Strict compliance with Agent Bridge protected-branch policies.
   - Zero network telemetry or remote code execution hooks.
   - Documented in `.agents/skills/mcp-builder/VETTING_AUDIT.md`.
-- **Suite Verification:** Full regression suite green (1156 tests, 1148 passed, 0 failed, 8 skipped).
+- **Suite Verification:** Full regression suite green (1207 tests, 1196 passed, 0 failed, 11 skipped).
 
 ## Agent lifecycle
 

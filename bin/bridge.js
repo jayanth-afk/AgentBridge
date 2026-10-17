@@ -40,6 +40,7 @@ Usage:
   bridge dashboard [--port <p>]
   bridge tail <requestId>
   bridge doctor
+  bridge config generate <agent>
   bridge explain <requestId>
   bridge agent add <agentId>
   bridge agent verify <agentId>
@@ -444,6 +445,48 @@ try {
       const docRes = await runBridgeDoctor({ logger });
       console.log(docRes.report);
       if (!docRes.passed) process.exit(1);
+      break;
+    }
+
+    case 'config': {
+      const sub = filteredArgs[1];
+      if (sub === 'generate') {
+        const targetAgent = filteredArgs[2] || 'claude';
+        const pathModule = await import('node:path');
+        const nodeBin = process.execPath;
+        const bridgeScript = pathModule.join(CONFIG.BRIDGE_ROOT, 'src', 'mcp-server.js');
+        const generated = {
+          mcpServers: {
+            'agent-bridge': {
+              command: nodeBin,
+              args: [bridgeScript],
+              env: {
+                AGENT_ID: targetAgent
+              }
+            }
+          }
+        };
+
+        let placementPath = '';
+        if (targetAgent.includes('claude')) {
+          placementPath = '~/Library/Application Support/Claude/claude_desktop_config.json';
+        } else if (targetAgent.includes('antigravity')) {
+          placementPath = '~/.gemini/antigravity-ide/mcp_config.json';
+        } else {
+          placementPath = `~/.config/${targetAgent}/mcp_config.json`;
+        }
+
+        console.log('========================================================================');
+        console.log(`     AGENT BRIDGE — GENERATED MCP CONFIG FOR: ${targetAgent}`);
+        console.log('========================================================================');
+        console.log(`\nGenerated Configuration (copy and place into: ${placementPath}):\n`);
+        console.log(JSON.stringify(generated, null, 2));
+        console.log('\nNOTE: Agent Bridge does not overwrite your existing application config.');
+        console.log(`To install, copy the JSON block above into ${placementPath}.\n`);
+      } else {
+        console.error('Usage: bridge config generate <agent> (e.g. claude, antigravity)');
+        process.exit(1);
+      }
       break;
     }
 

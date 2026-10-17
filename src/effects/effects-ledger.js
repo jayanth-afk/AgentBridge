@@ -46,39 +46,106 @@ export const EffectState = Object.freeze({
   UNKNOWN: 'UNKNOWN' // When process crashed or timed out during execution; NEVER silently marked FAILED
 });
 
+export const PUBLIC_TOOLS = Object.freeze(new Set([
+  'bridge_ping'
+]));
+
 /**
  * Authoritative mapping of Tool names to side-effect classification
  */
 export const TOOL_EFFECT_CLASSIFICATIONS = Object.freeze({
-  // Filesystem mutations
+  // PURE Read-only Tools (no state mutation, CAS read, metadata read)
+  bridge_ping: EffectClassification.PURE,
+  bridge_agent_presence: EffectClassification.PURE,
+  bridge_context: EffectClassification.PURE,
+  bridge_diagnostics: EffectClassification.PURE,
+  bridge_discover_agents: EffectClassification.PURE,
+  bridge_discover_tools: EffectClassification.PURE,
+  bridge_find_symbol: EffectClassification.PURE,
+  bridge_get_adapter_capabilities: EffectClassification.PURE,
+  bridge_get_all_file_activity: EffectClassification.PURE,
+  bridge_get_audit_log: EffectClassification.PURE,
+  bridge_get_collaboration: EffectClassification.PURE,
+  bridge_get_events: EffectClassification.PURE,
+  bridge_get_file_activity: EffectClassification.PURE,
+  bridge_get_knowledge: EffectClassification.PURE,
+  bridge_get_pending_requests: EffectClassification.PURE,
+  bridge_get_request_status: EffectClassification.PURE,
+  bridge_get_response: EffectClassification.PURE,
+  bridge_get_task_status: EffectClassification.PURE,
+  bridge_git_blame: EffectClassification.PURE,
+  bridge_git_branches: EffectClassification.PURE,
+  bridge_git_diff: EffectClassification.PURE,
+  bridge_git_log: EffectClassification.PURE,
+  bridge_git_status: EffectClassification.PURE,
+  bridge_git_summary: EffectClassification.PURE,
+  bridge_inspect_project: EffectClassification.PURE,
+  bridge_list_collaborations: EffectClassification.PURE,
+  bridge_project_snapshot: EffectClassification.PURE,
+  bridge_read_file: EffectClassification.PURE,
+  bridge_read_symbol: EffectClassification.PURE,
+  bridge_search_files: EffectClassification.PURE,
+  bridge_search_knowledge: EffectClassification.PURE,
+  bridge_test_plan: EffectClassification.PURE,
+  bridge_tool_info: EffectClassification.PURE,
+  bridge_check_syntax: EffectClassification.PURE,
+  bridge_extract_data: EffectClassification.PURE,
+  bridge_batch_read: EffectClassification.PURE,
+  bridge_batch_stat: EffectClassification.PURE,
+  bridge_check_inbox: EffectClassification.PURE,
+  bridge_artifact_get: EffectClassification.PURE,
+  bridge_artifact_read: EffectClassification.PURE,
+  bridge_explain_request: EffectClassification.PURE,
+  bridge_request_ledger: EffectClassification.PURE,
+  bridge_slice_fetch: EffectClassification.PURE,
+  bridge_get_protocol_snippet: EffectClassification.PURE,
+  bridge_list_skills: EffectClassification.PURE,
+  bridge_get_skill: EffectClassification.PURE,
+  bridge_get_skill_resource: EffectClassification.PURE,
+  bridge_search_skills: EffectClassification.PURE,
+
+  // IDEMPOTENT Side-Effect Tools (safe to repeat with identical inputs)
   bridge_create_file: EffectClassification.IDEMPOTENT,
-  bridge_edit_file: EffectClassification.NON_IDEMPOTENT,
   bridge_delete_file: EffectClassification.IDEMPOTENT,
-  bridge_apply_patch: EffectClassification.NON_IDEMPOTENT,
   bridge_batch_write: EffectClassification.IDEMPOTENT,
-
-  // Command execution
-  bridge_execute_command: EffectClassification.NON_IDEMPOTENT,
-
-  // Git mutations
   bridge_git_stage: EffectClassification.IDEMPOTENT,
-  bridge_git_commit: EffectClassification.NON_IDEMPOTENT,
   bridge_git_create_branch: EffectClassification.IDEMPOTENT,
   bridge_git_switch_branch: EffectClassification.IDEMPOTENT,
   bridge_git_delete_branch: EffectClassification.IDEMPOTENT,
+  bridge_artifact_cleanup: EffectClassification.IDEMPOTENT,
+  bridge_store_knowledge: EffectClassification.IDEMPOTENT,
+  bridge_acknowledge_delivery: EffectClassification.IDEMPOTENT,
+  bridge_skill_load: EffectClassification.IDEMPOTENT,
+  bridge_close_collaboration: EffectClassification.IDEMPOTENT,
+  bridge_leave_collaboration: EffectClassification.IDEMPOTENT,
+  bridge_file_activity_stop: EffectClassification.IDEMPOTENT,
+
+  // NON_IDEMPOTENT Side-Effect Tools (state mutations that advance epochs/state)
+  bridge_edit_file: EffectClassification.NON_IDEMPOTENT,
+  bridge_apply_patch: EffectClassification.NON_IDEMPOTENT,
+  bridge_execute_command: EffectClassification.NON_IDEMPOTENT,
+  bridge_git_commit: EffectClassification.NON_IDEMPOTENT,
+  bridge_artifact_store: EffectClassification.NON_IDEMPOTENT,
+  bridge_ask_agent: EffectClassification.NON_IDEMPOTENT,
+  bridge_send_message: EffectClassification.NON_IDEMPOTENT,
+  bridge_broadcast_message: EffectClassification.NON_IDEMPOTENT,
+  bridge_delegate_task: EffectClassification.NON_IDEMPOTENT,
+  bridge_claim_task: EffectClassification.NON_IDEMPOTENT,
+  bridge_submit_task_result: EffectClassification.NON_IDEMPOTENT,
+  bridge_answer_request: EffectClassification.NON_IDEMPOTENT,
+  bridge_request_review: EffectClassification.NON_IDEMPOTENT,
+  bridge_create_collaboration: EffectClassification.NON_IDEMPOTENT,
+  bridge_join_collaboration: EffectClassification.NON_IDEMPOTENT,
+  bridge_heartbeat_collaboration: EffectClassification.NON_IDEMPOTENT,
+  bridge_post_collaboration_event: EffectClassification.NON_IDEMPOTENT,
+  bridge_file_activity_start: EffectClassification.NON_IDEMPOTENT,
+  bridge_file_activity_heartbeat: EffectClassification.NON_IDEMPOTENT,
+  bridge_wait_for_response: EffectClassification.NON_IDEMPOTENT,
+
+  // EXTERNAL Side-Effect Tools (reach network, external repositories, remotes)
   bridge_git_fetch: EffectClassification.EXTERNAL,
   bridge_git_pull: EffectClassification.EXTERNAL,
-  bridge_git_push: EffectClassification.EXTERNAL,
-
-  // Durable binary artifact transport. Storing creates NEW persistent bytes and
-  // a new artifact id on every call (non-idempotent); cleanup removes expired
-  // bytes (idempotent). Both are side effects and must be fenced/audited like
-  // any other mutation rather than silently bypassing the effects policy.
-  bridge_artifact_store: EffectClassification.NON_IDEMPOTENT,
-  bridge_artifact_cleanup: EffectClassification.IDEMPOTENT,
-
-  // Knowledge store writes
-  bridge_store_knowledge: EffectClassification.IDEMPOTENT
+  bridge_git_push: EffectClassification.EXTERNAL
 });
 
 export const ToolSecurityCategory = Object.freeze({
@@ -189,15 +256,22 @@ export const TOOL_SECURITY_CLASSIFICATIONS = Object.freeze({
 });
 
 export function getToolSecurityCategory(toolName) {
-  return (toolName && TOOL_SECURITY_CLASSIFICATIONS[toolName]) || ToolSecurityCategory.PURE_LOCAL;
+  return (toolName && TOOL_SECURITY_CLASSIFICATIONS[toolName]) || ToolSecurityCategory.CROSS_AGENT_DATA;
 }
 
 export function isEffectfulTool(toolName) {
-  return Boolean(toolName && TOOL_EFFECT_CLASSIFICATIONS[toolName] && TOOL_EFFECT_CLASSIFICATIONS[toolName] !== EffectClassification.PURE);
+  if (!toolName) return true;
+  const classification = TOOL_EFFECT_CLASSIFICATIONS[toolName];
+  if (!classification) return true; // Default-deny: unclassified tools are effectful
+  return classification !== EffectClassification.PURE;
 }
 
 export function getToolClassification(toolName) {
-  return (toolName && TOOL_EFFECT_CLASSIFICATIONS[toolName]) || EffectClassification.PURE;
+  if (toolName && TOOL_EFFECT_CLASSIFICATIONS[toolName]) {
+    return TOOL_EFFECT_CLASSIFICATIONS[toolName];
+  }
+  // Default-deny: unclassified tools default to NON_IDEMPOTENT side-effect
+  return EffectClassification.NON_IDEMPOTENT;
 }
 
 export class EffectsLedger {

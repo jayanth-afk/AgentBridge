@@ -15,7 +15,7 @@ import { GitController } from './git-controller.js';
 import { ZiABackgroundGPT } from './control-plane/zia-background-gpt.js';
 import { ChatGptLocalEngineAdapter } from './control-plane/chatgpt-local-engine.js';
 import { AdapterHealth } from './control-plane/desktop-control-adapter.js';
-import { EffectsLedger, isEffectfulTool } from './effects/effects-ledger.js';
+import { EffectsLedger, isEffectfulTool, PUBLIC_TOOLS } from './effects/effects-ledger.js';
 import { AttemptLedger } from './attempts/attempt-ledger.js';
 import { ArtifactStore } from './artifacts/artifact-store.js';
 import { A2AAdapter } from './interop/a2a-adapter.js';
@@ -72,6 +72,10 @@ export class BridgeHttpServer {
     const defaultGatewayPort = Number(process.env.AGENT_BRIDGE_HTTP_PORT || 8765);
     const isGatewayServer = options.port === defaultGatewayPort || (options.port === undefined && !options.host);
 
+    const isTestEnv = process.env.NODE_ENV === 'test' ||
+      Boolean(process.env.NODE_TEST_CONTEXT) ||
+      process.argv.some(arg => typeof arg === 'string' && (arg.includes('--test') || arg.includes('.test.')));
+
     if (options.apiKey !== undefined) {
       this.apiKey = options.apiKey;
       this.requireApiKey = options.requireApiKey !== undefined
@@ -82,6 +86,12 @@ export class BridgeHttpServer {
       this.apiKey = this.requireApiKey ? (CONFIG.CONTROL_PLANE?.API_KEY || null) : null;
     } else if (isGatewayServer && CONFIG.CONTROL_PLANE?.API_KEY) {
       this.apiKey = CONFIG.CONTROL_PLANE.API_KEY;
+      this.requireApiKey = true;
+    } else if (isGatewayServer && process.env.AGENT_BRIDGE_INSECURE_DEV === '1') {
+      this.apiKey = null;
+      this.requireApiKey = false;
+    } else if (isGatewayServer && !isTestEnv) {
+      this.apiKey = null;
       this.requireApiKey = true;
     } else {
       this.apiKey = null;
@@ -263,10 +273,14 @@ export class BridgeHttpServer {
       ));
     }
 
+    if (!this.apiKey && process.env.AGENT_BRIDGE_INSECURE_DEV === '1') {
+      console.warn('[SECURITY WARNING] Agent Bridge HTTP server starting WITHOUT control-plane API key because AGENT_BRIDGE_INSECURE_DEV=1 is set.');
+    }
+
     if (this.requireApiKey && !this.apiKey) {
       return Promise.reject(new Error(
         'Authentication required but no control_plane.api_key is configured. ' +
-        'Set CONTROL_PLANE_API_KEY (or provide a literal api_key) before starting the HTTP control plane.'
+        'Set CONTROL_PLANE_API_KEY (or provide a literal api_key) before starting the HTTP control plane. Set AGENT_BRIDGE_INSECURE_DEV=1 to explicitly permit insecure development.'
       ));
     }
 
@@ -309,10 +323,12 @@ export class BridgeHttpServer {
           const auth = this.resolveAuth(req);
           const buildInfo = getBuildInfo();
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          if (auth && auth.authorized && !auth.unauthenticatedLocal) {
+          const isPrivilegedCaller = Boolean(auth && auth.authorized && !auth.unauthenticatedLocal && auth.isPrivileged);
+          if (isPrivilegedCaller) {
             return res.end(JSON.stringify({
               status: 'healthy',
               service: 'agent-bridge',
+              version: buildInfo.version || '1.0.0',
               auth: this.apiKey ? 'api-key' : 'none-loopback',
               authEnabled: Boolean(this.apiKey),
               buildId: buildInfo.buildId,
@@ -323,10 +339,11 @@ export class BridgeHttpServer {
               startupStamp: this.diagnostics?.startupStamp || null
             }));
           }
-          // F-017: Unauthenticated /health returns liveness only (no allowed roots, no live agents, no fingerprinting)
+          // F-017: Unauthenticated or unprivileged /health returns liveness only (no allowed roots, no live agents, no fingerprinting)
           return res.end(JSON.stringify({
             status: 'healthy',
             service: 'agent-bridge',
+            version: buildInfo.version || '1.0.0',
             auth: this.apiKey ? 'api-key' : 'none-loopback',
             authEnabled: Boolean(this.apiKey),
             buildId: buildInfo.buildId
@@ -883,10 +900,38 @@ export class BridgeHttpServer {
                 });
               }
 
-              const isPublicTool = ['bridge_ping', 'bridge_discover_agents', 'bridge_agent_presence', 'bridge_diagnostics'].includes(name);
-              if ((auth.unauthenticatedLocal || !auth.authorized) && (isEffectfulTool(name) || name === 'bridge_get_audit_log')) {
+              if (!this.registry.hasTool(name)) {
+                return sendJsonRpc({
+                  jsonrpc: '2.0',
+                  id,
+                  result: {
+                    content: [
+                      {
+                        type: 'text',
+                        text: `Error executing tool '${name}': Unknown tool: '${name}'`
+                      }
+                    ],
+                    isError: true
+                  }
+                });
+              }
+
+              const isPublicTool = PUBLIC_TOOLS.has(name);
+              if ((auth.unauthenticatedLocal || !auth.authorized) && !isPublicTool) {
                 res.writeHead(401, { 'Content-Type': 'application/json' });
-                return res.end(JSON.stringify({ ok: false, error: `Unauthorized: valid credentials required for tool '${name}'.` }));
+                return res.end(JSON.stringify({
+                  ok: false,
+                  error: `Unauthorized: valid credentials required for tool '${name}'.`,
+                  result: {
+                    content: [
+                      {
+                        type: 'text',
+                        text: `Error executing tool '${name}': Unauthorized: valid credentials required for tool '${name}'.`
+                      }
+                    ],
+                    isError: true
+                  }
+                }));
               }
               const toolContext = {
                 controller: this.controller,

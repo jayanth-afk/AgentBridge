@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import net from 'node:net';
 import { CONFIG } from '../config.js';
 import { getBuildInfo } from '../utils/build-info.js';
@@ -30,7 +31,7 @@ export async function runBridgeDoctor(options = {}) {
       name: 'Control Plane Auth Key',
       status: 'FAIL',
       detail: 'No CONTROL_PLANE.API_KEY set. In production, Agent Bridge fails safe and refuses to start without auth.',
-      fix: 'Set CONTROL_PLANE.API_KEY in src/config.js or via AGENT_BRIDGE_API_KEY environment variable.'
+      fix: 'Set AGENT_BRIDGE_API_KEY in your environment, store in keychain (`security add-generic-password -s agent-bridge -a control_plane_api_key -w <secret>`), or write to data/.control_plane_key with chmod 0600.'
     });
   } else if (apiKey && apiKey.length < 16 && !isDevFlag) {
     checks.push({
@@ -71,6 +72,35 @@ export async function runBridgeDoctor(options = {}) {
       name: 'Allowed Roots Confinement',
       status: 'PASS',
       detail: `${roots.length} allowed roots verified and accessible.`,
+      fix: null
+    });
+  }
+
+  // 2b. Allowed Roots Home Directory Warning (F-001/A4)
+  const homeDir = os.homedir();
+  const includesHome = roots.some(r => path.resolve(r) === path.resolve(homeDir));
+  if (includesHome) {
+    checks.push({
+      name: 'Allowed Roots Home Directory Confinement',
+      status: 'WARN',
+      detail: `Effective allowed roots include the user home directory (${homeDir}). Agents can access personal files and dotfiles outside the repository.`,
+      fix: 'Tighten allowed roots by unsetting AGENT_BRIDGE_ALLOW_HOME_ROOT and configuring specific paths in config/allowed-roots.json or AGENT_BRIDGE_ALLOWED_ROOTS.'
+    });
+  }
+
+  // 2c. Zia Workspace Write-Lock Check (A4)
+  if (CONFIG.ZIA_WRITE_LOCKED === false) {
+    checks.push({
+      name: 'Zia Workspace Protection',
+      status: 'WARN',
+      detail: 'Zia write-lock is currently DISABLED (CONFIG.ZIA_WRITE_LOCKED = false). Mutations to the Zia project from Agent Bridge are not blocked.',
+      fix: 'Enable the lock by setting ZIA_WRITE_LOCKED=true in your environment or src/config.js.'
+    });
+  } else {
+    checks.push({
+      name: 'Zia Workspace Protection',
+      status: 'PASS',
+      detail: 'Zia write-lock is ACTIVE (CONFIG.ZIA_WRITE_LOCKED = true). Zia repository is protected against bridge mutations.',
       fix: null
     });
   }

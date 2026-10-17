@@ -4,6 +4,13 @@ import { SwiftAXBridge } from '../src/control-plane/swift-ax-bridge.js';
 import { PersistentDesktopSessionManager, SessionState } from '../src/control-plane/persistent-session-manager.js';
 import { DesktopControlPlane } from '../src/control-plane/desktop-control-plane.js';
 
+// These categories inspect real desktop applications, so they only run when a
+// live desktop session is explicitly opted into (same convention as
+// tests/live-desktop-agents.test.js). Without the flag the hermetic suite stays
+// deterministic on hosts where ChatGPT/Claude are closed.
+const LIVE_DESKTOP = process.env.AGENT_BRIDGE_LIVE_DESKTOP === '1';
+const LIVE_DESKTOP_SKIP = 'requires a live desktop session; set AGENT_BRIDGE_LIVE_DESKTOP=1 to run';
+
 test('Desktop Session Verifier & Honest Capability Audit Suite', async (t) => {
   const swift = new SwiftAXBridge();
   const sessionManager = new PersistentDesktopSessionManager({ swiftBridge: swift });
@@ -22,7 +29,7 @@ test('Desktop Session Verifier & Honest Capability Audit Suite', async (t) => {
     assert.ok(process.pid > 0);
   });
 
-  await t.test('Category C & E: Real Claude Desktop Process & Window State Inspection', async () => {
+  await t.test('Category C & E: Real Claude Desktop Process & Window State Inspection', { skip: LIVE_DESKTOP ? false : LIVE_DESKTOP_SKIP }, async () => {
     const claudeInspect = await swift.inspectApp('Claude');
     assert.strictEqual(claudeInspect.ok, true);
     assert.strictEqual(claudeInspect.app, 'Claude');
@@ -39,7 +46,7 @@ test('Desktop Session Verifier & Honest Capability Audit Suite', async (t) => {
     ].includes(claudeState));
   });
 
-  await t.test('Category D & F: Real ChatGPT Desktop Process Inspection', async () => {
+  await t.test('Category D & F: Real ChatGPT Desktop Process Inspection', { skip: LIVE_DESKTOP ? false : LIVE_DESKTOP_SKIP }, async () => {
     const chatgptInspect = await swift.inspectApp('ChatGPT');
     assert.strictEqual(chatgptInspect.ok, true);
     assert.strictEqual(chatgptInspect.app, 'ChatGPT');

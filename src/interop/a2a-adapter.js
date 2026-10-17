@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { canonicalizeTargetAgent } from '../agent-identity.js';
+import { CompletionEvidenceTier } from '../control-plane/route-interface.js';
 
 /**
  * A2AAdapter provides an optional interoperability layer implementing the
@@ -69,8 +70,20 @@ export class A2AAdapter {
       };
     }
 
-    // 1. Authorize caller via Agent Identity & token
-    const callerId = authContext.agentId || 'anonymous';
+    // 1. Authorize caller via Agent Identity & token (fail closed)
+    const isPrivileged = Boolean(authContext.isPrivileged);
+    const callerId = isPrivileged
+      ? (authContext.agentId || 'system')
+      : (authContext.agentId && authContext.agentId !== 'anonymous' ? authContext.agentId : null);
+
+    if (!callerId) {
+      return {
+        jsonrpc: '2.0',
+        id: request.id,
+        error: { code: -32001, message: 'Unauthorized: A2A requests require an authenticated agent identity' }
+      };
+    }
+
     if (this.permissionGuard && typeof this.permissionGuard.checkPermission === 'function') {
       const check = this.permissionGuard.checkPermission(callerId, 'DELEGATE');
       if (check && check.allowed === false) {
@@ -137,7 +150,8 @@ export class A2AAdapter {
     // Generate V2 correlation headers and nonce
     const correlationId = authContext.correlationId || `a2a_corr_${crypto.randomBytes(8).toString('hex')}`;
     const nonce = authContext.nonce || `nonce_${crypto.randomBytes(12).toString('hex')}`;
-    const callerId = authContext.agentId || 'a2a_client';
+    const isPrivileged = Boolean(authContext.isPrivileged);
+    const callerId = isPrivileged ? (authContext.agentId || 'system') : authContext.agentId;
 
     if (this.taskManager) {
       const task = await this.taskManager.delegateTask({
@@ -176,11 +190,13 @@ export class A2AAdapter {
     if (this.taskManager) {
       const task = await this.taskManager.getTaskStatus(params.taskId);
       if (!task) throw new Error(`Task '${params.taskId}' not found`);
+      const isComplete = String(task.status).toUpperCase() === 'COMPLETED';
       return {
         taskId: params.taskId,
         status: task.status,
         result: task.result || null,
         error: task.error || null,
+        completionEvidence: isComplete ? CompletionEvidenceTier.A2A_COMPLETION : null,
         updatedAt: task.updatedAt || new Date().toISOString()
       };
     }
@@ -189,6 +205,7 @@ export class A2AAdapter {
       taskId: params.taskId,
       status: 'COMPLETED',
       result: { output: 'Task completed successfully' },
+      completionEvidence: CompletionEvidenceTier.A2A_COMPLETION,
       updatedAt: new Date().toISOString()
     };
   }

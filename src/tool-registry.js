@@ -22,7 +22,22 @@ const artifactStoreCache = new WeakMap();
 // MCP servers which carry only `boundAgentId`, the connection binding.
 function trustedCallerAgentId(ctx) {
   if (!ctx || typeof ctx !== 'object') return null;
-  return ctx.agentId || ctx.boundAgentId || ctx.identity?.boundAgentId || null;
+  const id = ctx.agentId || ctx.boundAgentId || ctx.identity?.boundAgentId || null;
+  if (!id || id === 'anonymous') return null;
+  return String(id).trim();
+}
+
+function requireTrustedCallerAgentId(ctx, toolName) {
+  if (ctx && ctx.isPrivileged) {
+    return ctx.agentId || 'system';
+  }
+  const trusted = trustedCallerAgentId(ctx);
+  if (!trusted) {
+    const err = new Error(`Unauthorized: tool '${toolName}' requires an authenticated or bound caller identity.`);
+    err.code = 'UNAUTHORIZED_CALLER';
+    throw err;
+  }
+  return trusted;
 }
 
 function assertGitMutationAllowed(ctx, callerAgent) {
@@ -389,6 +404,25 @@ export class ToolRegistry {
     return all.filter(t => allowedSet.has(t.name));
   }
 
+  hasTool(name) {
+    const resolvedName = name === 'bridge_search_tools' ? 'bridge_discover_tools' : name;
+    if (this.tools.has(resolvedName)) return true;
+    const dynamicTools = new Set([
+      'bridge_acknowledge_delivery',
+      'bridge_explain_request',
+      'bridge_request_ledger',
+      'bridge_wait_for_response',
+      'bridge_slice_fetch',
+      'bridge_get_protocol_snippet',
+      'bridge_list_skills',
+      'bridge_get_skill',
+      'bridge_get_skill_resource',
+      'bridge_search_skills',
+      'bridge_skill_load'
+    ]);
+    return dynamicTools.has(resolvedName);
+  }
+
   async executeTool(name, rawArgs = {}, context = {}) {
     // Alias bridge_search_tools -> bridge_discover_tools
     const resolvedName = name === 'bridge_search_tools' ? 'bridge_discover_tools' : name;
@@ -551,9 +585,10 @@ export class ToolRegistry {
       tool = {
         name: 'bridge_get_protocol_snippet',
         handler: async (args, ctx) => {
+          const callerId = trustedCallerAgentId(ctx) || 'all';
           const { STABLE_PROTOCOL_INSTRUCTIONS } = await import('./protocol/stable-protocol.js');
           return {
-            agentId: args.agentId || ctx.agentId || 'all',
+            agentId: callerId,
             snippet: STABLE_PROTOCOL_INSTRUCTIONS,
             instructions: 'Paste this snippet into the agent custom instructions / system instructions.'
           };
@@ -616,10 +651,12 @@ export class ToolRegistry {
       tool = {
         name: 'bridge_skill_load',
         handler: async (args, ctx) => {
+          const callerId = requireTrustedCallerAgentId(ctx, 'bridge_skill_load');
           const sm = resolveSkillsManager(ctx);
+          const { SignedSkillRegistry } = await import('./skills/signed-skill-registry.js');
           const reg = ctx.signedSkillRegistry || new SignedSkillRegistry({ skillsManager: sm, auditLogger: ctx.logger });
           return reg.loadSkill(args.name, {
-            agentId: args.agentId || ctx.agentId || 'anonymous',
+            agentId: callerId,
             agentProfile: args.profile || 'default',
             clientHash: args.contentHash || null
           });
@@ -640,7 +677,7 @@ export class ToolRegistry {
     const boundTransportId = rawBound && rawBound !== 'anonymous' ? rawBound : null;
 
     if (context.identity) {
-      const candidate = rawArgs.agentId || rawArgs.fromAgent || context.agentId || context.boundAgentId || null;
+      const candidate = context.agentId || context.boundAgentId || context.identity?.boundAgentId || null;
       const resolved = context.identity.resolveIdentity(candidate, {
         token: rawArgs.token,
         allowCompatibility: context.allowIdentityCompatibility
@@ -670,7 +707,7 @@ export class ToolRegistry {
         callerAgentId = resolved.agentId;
       }
     } else if (context.isPrivileged === true) {
-      callerAgentId = rawArgs.fromAgent || rawArgs.agentId || boundTransportId || 'system';
+      callerAgentId = context.agentId || context.boundAgentId || 'system';
     } else if (boundTransportId) {
       // Bound/authenticated identity from transport
       const boundId = String(boundTransportId).trim().toLowerCase();
@@ -1560,7 +1597,18 @@ export class ToolRegistry {
         },
         required: ['fromAgent', 'toAgent', 'subject', 'content']
       },
-      handler: async (args, ctx) => ctx.mailbox.sendMessage(args)
+      handler: async (args, ctx) => {
+        const callerAgent = requireTrustedCallerAgentId(ctx, 'bridge_send_message');
+        if (!ctx.isPrivileged && args.fromAgent && String(args.fromAgent).trim().toLowerCase() !== String(callerAgent).trim().toLowerCase()) {
+          const err = new Error(`Unauthorized: caller '${callerAgent}' cannot send message as '${args.fromAgent}'.`);
+          err.code = 'UNAUTHORIZED_MESSAGE_SEND';
+          throw err;
+        }
+        return ctx.mailbox.sendMessage({
+          ...args,
+          fromAgent: ctx.isPrivileged ? (args.fromAgent || callerAgent) : callerAgent
+        });
+      }
     });
 
     this.registerTool({
@@ -1577,7 +1625,18 @@ export class ToolRegistry {
         },
         required: ['fromAgent', 'toAgents', 'subject', 'content']
       },
-      handler: async (args, ctx) => ctx.mailbox.broadcastMessage(args)
+      handler: async (args, ctx) => {
+        const callerAgent = requireTrustedCallerAgentId(ctx, 'bridge_broadcast_message');
+        if (!ctx.isPrivileged && args.fromAgent && String(args.fromAgent).trim().toLowerCase() !== String(callerAgent).trim().toLowerCase()) {
+          const err = new Error(`Unauthorized: caller '${callerAgent}' cannot broadcast message as '${args.fromAgent}'.`);
+          err.code = 'UNAUTHORIZED_MESSAGE_SEND';
+          throw err;
+        }
+        return ctx.mailbox.broadcastMessage({
+          ...args,
+          fromAgent: ctx.isPrivileged ? (args.fromAgent || callerAgent) : callerAgent
+        });
+      }
     });
 
     this.registerTool({
@@ -1629,6 +1688,14 @@ export class ToolRegistry {
         required: ['fromAgent', 'toAgent', 'title', 'instructions']
       },
       handler: async (args, ctx) => {
+        const callerAgent = requireTrustedCallerAgentId(ctx, 'bridge_delegate_task');
+        if (!ctx.isPrivileged && args.fromAgent && String(args.fromAgent).trim().toLowerCase() !== String(callerAgent).trim().toLowerCase()) {
+          const err = new Error(`Unauthorized: caller '${callerAgent}' cannot delegate task as '${args.fromAgent}'.`);
+          err.code = 'UNAUTHORIZED_TASK_ACCESS';
+          throw err;
+        }
+        const effectiveFrom = ctx.isPrivileged ? (args.fromAgent || callerAgent) : callerAgent;
+        const taskArgs = { ...args, fromAgent: effectiveFrom };
         if (Array.isArray(args.hops) && args.hops.length > 1) {
           const { MultiHopRouter } = await import('./control-plane/multi-hop-router.js');
           const router = ctx.multiHopRouter || new MultiHopRouter({
@@ -1640,11 +1707,12 @@ export class ToolRegistry {
           return router.executeHopChain({
             hops: args.hops,
             initialInput: args.instructions || args.title,
-            initiatorAgent: args.fromAgent,
+            initiatorAgent: effectiveFrom,
+            isPrivileged: Boolean(ctx.isPrivileged),
             parentRequestId: args.requestId
           });
         }
-        return ctx.mailbox.delegateTask(args);
+        return ctx.mailbox.delegateTask(taskArgs);
       }
     });
 
@@ -1727,18 +1795,26 @@ export class ToolRegistry {
         required: ['taskId', 'agentId', 'status']
       },
       handler: async (args, ctx) => {
-        if (args.contractType && args.status === 'completed' && args.result) {
+        const callerAgent = requireTrustedCallerAgentId(ctx, 'bridge_submit_task_result');
+        if (!ctx.isPrivileged && args.agentId && String(args.agentId).trim().toLowerCase() !== String(callerAgent).trim().toLowerCase()) {
+          const err = new Error(`Unauthorized: caller '${callerAgent}' cannot submit results for agent '${args.agentId}'.`);
+          err.code = 'UNAUTHORIZED_TASK_ACCESS';
+          throw err;
+        }
+        const effectiveAgent = ctx.isPrivileged ? (args.agentId || callerAgent) : callerAgent;
+        const submitArgs = { ...args, agentId: effectiveAgent };
+        if (submitArgs.contractType && submitArgs.status === 'completed' && submitArgs.result) {
           const { StructuredContractValidator } = await import('./contracts/structured-contracts.js');
-          const val = StructuredContractValidator.validate(args.contractType, args.result);
+          const val = StructuredContractValidator.validate(submitArgs.contractType, submitArgs.result);
           if (!val.valid) {
             return {
               ok: false,
               status: 'rejected',
-              error: `CONTRACT_VIOLATION: Result does not conform to '${args.contractType}' contract: ${val.errors?.join(', ')}`
+              error: `CONTRACT_VIOLATION: Result does not conform to '${submitArgs.contractType}' contract: ${val.errors?.join(', ')}`
             };
           }
           if (val.compactText) {
-            args.result = val.compactText;
+            submitArgs.result = val.compactText;
           }
         }
         const contractReport = applyContractToField(args, 'result');
@@ -1800,9 +1876,17 @@ export class ToolRegistry {
         required: ['fromAgent', 'toAgent', 'question']
       },
       handler: async (args, ctx) => {
-        const fullOutcome = await ctx.mailbox.askAgent(args);
+        const callerAgent = requireTrustedCallerAgentId(ctx, 'bridge_ask_agent');
+        if (!ctx.isPrivileged && args.fromAgent && String(args.fromAgent).trim().toLowerCase() !== String(callerAgent).trim().toLowerCase()) {
+          const err = new Error(`Unauthorized: caller '${callerAgent}' cannot send request as '${args.fromAgent}'.`);
+          err.code = 'UNAUTHORIZED_REQUEST_SEND';
+          throw err;
+        }
+        const effectiveFrom = ctx.isPrivileged ? (args.fromAgent || callerAgent) : callerAgent;
+        const askArgs = { ...args, fromAgent: effectiveFrom };
+        const fullOutcome = await ctx.mailbox.askAgent(askArgs);
         let pendingNotice = null;
-        if (args.fromAgent && ctx.mailbox?.getPendingRequests) {
+        if (effectiveFrom && ctx.mailbox?.getPendingRequests) {
           try {
             const pending = ctx.mailbox.getPendingRequests(args.fromAgent, 5);
             if (pending && pending.length > 0) {
@@ -1965,8 +2049,16 @@ export class ToolRegistry {
         required: ['requestId', 'agentId', 'response']
       },
       handler: async (args, ctx) => {
-        const contractReport = applyContractToField(args, 'response');
-        const outcome = await ctx.mailbox.answerRequest(args);
+        const callerAgent = requireTrustedCallerAgentId(ctx, 'bridge_answer_request');
+        if (!ctx.isPrivileged && args.agentId && String(args.agentId).trim().toLowerCase() !== String(callerAgent).trim().toLowerCase()) {
+          const err = new Error(`Unauthorized: caller '${callerAgent}' cannot answer request for agent '${args.agentId}'.`);
+          err.code = 'UNAUTHORIZED_REQUEST_ANSWER';
+          throw err;
+        }
+        const effectiveAgent = ctx.isPrivileged ? (args.agentId || callerAgent) : callerAgent;
+        const answerArgs = { ...args, agentId: effectiveAgent };
+        const contractReport = applyContractToField(answerArgs, 'response');
+        const outcome = await ctx.mailbox.answerRequest(answerArgs);
         if (contractReport && outcome && typeof outcome === 'object') {
           return { ...outcome, contractReport };
         }
@@ -2498,7 +2590,7 @@ export class ToolRegistry {
       },
       handler: async (args, ctx) => {
         const store = resolveKnowledgeStore(ctx);
-        const boundAgent = ctx?.identity?.boundAgentId || ctx?.identity?.agentId || ctx?.agentId || (ctx?.requireAuthentication ? null : args.agentId) || 'system';
+        const boundAgent = requireTrustedCallerAgentId(ctx, 'bridge_store_knowledge');
         const item = store.storeKnowledge({
           agentId: boundAgent,
           title: args.title,

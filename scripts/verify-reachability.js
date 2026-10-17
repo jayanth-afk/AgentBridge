@@ -7,6 +7,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
 const SRC_DIR = path.join(REPO_ROOT, 'src');
+const TESTS_DIR = path.join(REPO_ROOT, 'tests');
 
 const ENTRY_POINTS = [
   path.join(SRC_DIR, 'index.js'),
@@ -98,6 +99,29 @@ function extractImports(filePath) {
   return Array.from(imports);
 }
 
+/**
+ * Map each `src/` module to the test files that import it directly.
+ * Used to annotate unwired modules that are still covered by the test suite
+ * (e.g. `src/gui-adapter.js`, exercised by tests/integration.test.js).
+ */
+function collectTestReferences() {
+  const references = new Map();
+  if (!fs.existsSync(TESTS_DIR)) return references;
+
+  for (const entry of fs.readdirSync(TESTS_DIR, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith('.js')) continue;
+    const testFile = path.join(TESTS_DIR, entry.name);
+    for (const imp of extractImports(testFile)) {
+      const resolved = resolveImport(testFile, imp);
+      if (!resolved || !resolved.startsWith(SRC_DIR + path.sep)) continue;
+      if (!references.has(resolved)) references.set(resolved, new Set());
+      references.get(resolved).add(entry.name);
+    }
+  }
+
+  return references;
+}
+
 function traceReachability() {
   const reachable = new Set();
   const queue = [...ENTRY_POINTS.filter(f => fs.existsSync(f))];
@@ -125,6 +149,7 @@ function traceReachability() {
 function main() {
   const allSrcFiles = getAllJsFiles(SRC_DIR);
   const reachableSet = traceReachability();
+  const testReferences = collectTestReferences();
 
   const reportRows = [];
   let failures = 0;
@@ -147,8 +172,13 @@ function main() {
       }
     } else if (isOptIn) {
       notes = isWired ? 'Opt-In Capability (Wired, Off by Default)' : 'Opt-In Capability (Standalone Library)';
+    } else if (isWired) {
+      notes = 'Production Module (Wired)';
     } else {
-      notes = isWired ? 'Production Module (Wired)' : 'Standalone Library / Secondary Tool';
+      const testRefs = testReferences.get(absPath);
+      notes = testRefs && testRefs.size > 0
+        ? `Test-exercised only (${[...testRefs].sort().join(', ')})`
+        : 'Standalone Library / Secondary Tool';
     }
 
     reportRows.push({ relPath, status, isDefaultOn, isOptIn, notes });

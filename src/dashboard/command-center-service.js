@@ -13,8 +13,8 @@ export class CommandCenterService {
     // Replay store
     this.collaborations = new Map();
 
-    // In-memory token ledger stats
-    this.tokenStats = {
+    // Token ledger stats (benchmark / aggregated turn history)
+    this.tokenStats = options.tokenStats || {
       tokensIn: 12400,
       tokensOut: 8900,
       toolSchemaOverhead: 420,
@@ -23,7 +23,7 @@ export class CommandCenterService {
       compressionSaved: 3800
     };
 
-    // Seed initial pending approval
+    // Seed initial pending approval for human audit verification
     this.pendingApprovals.set('appr_seed_1', {
       id: 'appr_seed_1',
       type: 'skill_install',
@@ -158,6 +158,10 @@ export class CommandCenterService {
     const actualTokensUsed = this.tokenStats.tokensIn + this.tokenStats.tokensOut;
     const tokensSavedTotal = baselineCopyPasteTokens - actualTokensUsed;
 
+    const savingsPercentage = baselineCopyPasteTokens > 0
+      ? `${Math.round((tokensSavedTotal / baselineCopyPasteTokens) * 100)}%`
+      : '0%';
+
     return {
       tokensIn: this.tokenStats.tokensIn,
       tokensOut: this.tokenStats.tokensOut,
@@ -166,7 +170,7 @@ export class CommandCenterService {
       compressionTokensSaved: this.tokenStats.compressionSaved,
       cacheHits: this.tokenStats.cacheHits,
       tokensSavedVersusManualCopyPaste: tokensSavedTotal,
-      savingsPercentage: `${Math.round((tokensSavedTotal / baselineCopyPasteTokens) * 100)}%`,
+      savingsPercentage,
       honestMethodology: 'Baseline assumes naive manual copy-paste of full files and uncompressed turn history. Agent Bridge savings are measured using CAS content hashes, line deltas, rolling summaries, and semantic cache hits.'
     };
   }

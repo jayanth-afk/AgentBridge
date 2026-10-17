@@ -1,5 +1,11 @@
 import crypto from 'node:crypto';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ConformanceSuite } from '../interop/conformance-suite.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const bridgeMainPath = path.resolve(__dirname, '../../main.js');
 
 export class AgentAddFlow {
   constructor(options = {}) {
@@ -30,7 +36,7 @@ export class AgentAddFlow {
       mcpServers: {
         'agent-bridge': {
           command: 'node',
-          args: ['/Users/jayanthpranaykonada/agent-bridge/main.js'],
+          args: [bridgeMainPath],
           env: {
             BRIDGE_AGENT_ID: cleanId,
             BRIDGE_AUTH_TOKEN: rawToken
@@ -86,7 +92,17 @@ All requests carry V2 correlation headers and strict default-deny permission gua
       throw new Error('Registration activation rejected: explicit user approval is required.');
     }
 
-    if (approver.startsWith('agent:') || approver.includes('gemini') || approver.includes('chatgpt') || approver.includes('claude')) {
+    const normApprover = String(approver || '').trim().toLowerCase();
+    if (
+      !normApprover ||
+      normApprover.startsWith('agent:') ||
+      normApprover.includes('agent') ||
+      normApprover.includes('gemini') ||
+      normApprover.includes('chatgpt') ||
+      normApprover.includes('claude') ||
+      normApprover.includes('antigravity') ||
+      normApprover.includes('freebuff')
+    ) {
       throw new Error('Agents cannot self-enable or promote their registration.');
     }
 

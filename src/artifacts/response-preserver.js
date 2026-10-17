@@ -354,6 +354,7 @@ export class ResponsePreserver {
       attemptEpoch: artifact.attemptEpoch || 1,
       originRoute: artifact.originRoute || 'bridge',
       completionConfidence: artifact.executionMetadata?.completionConfidence || 'UNKNOWN',
+      completionEvidence: artifact.executionMetadata?.completionEvidence || artifact.executionMetadata?.completionConfidence || 'UNKNOWN',
       isHeuristic: Boolean(artifact.executionMetadata?.isHeuristic || artifact.executionMetadata?.completionConfidence === 'STABILITY_HEURISTIC'),
       observedSignals: artifact.executionMetadata?.observedSignals || null,
       stableTicks: artifact.executionMetadata?.stableTicks ?? null,

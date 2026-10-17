@@ -508,6 +508,80 @@ func setupObserver(name: String) -> SimpleResponse {
     return SimpleResponse(ok: true, status: "OBSERVER_ACTIVE", details: "Attached to PID \(pid)")
 }
 
+// Deliver real keyboard events to a target process.
+//
+// Writing `kAXValueAttribute` directly works for plain AppKit text fields but is
+// ignored by Chromium/ProseMirror composers (Claude, Gemini, ChatGPT): React never
+// observes the change, so the composer keeps its old value and the Send button
+// stays disabled. Posting unicode key events to the app's PID triggers the real
+// input pipeline while keeping the app in the background (no activation needed).
+func postUnicodeText(pid: pid_t, _ text: String) -> Bool {
+    let source = CGEventSource(stateID: .combinedSessionState)
+    let lines = text.components(separatedBy: "\n")
+
+    for (lineIndex, line) in lines.enumerated() {
+        if lineIndex > 0 {
+            guard let down = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: true),
+                  let up = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: false) else {
+                return false
+            }
+            down.postToPid(pid)
+            up.postToPid(pid)
+            usleep(10_000)
+        }
+
+        var units = Array(line.utf16)
+        var offset = 0
+        // keyboardSetUnicodeString accepts at most 20 UTF-16 units per event.
+        while offset < units.count {
+            let chunkSize = min(20, units.count - offset)
+            let chunk = Array(units[offset..<(offset + chunkSize)])
+            guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+                  let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
+                return false
+            }
+            chunk.withUnsafeBufferPointer { buf in
+                down.keyboardSetUnicodeString(stringLength: buf.count, unicodeString: buf.baseAddress)
+                up.keyboardSetUnicodeString(stringLength: buf.count, unicodeString: buf.baseAddress)
+            }
+            down.postToPid(pid)
+            up.postToPid(pid)
+            offset += chunkSize
+            // Chromium/ProseMirror composers drop events posted faster than a
+            // human can type, so keep a realistic cadence between chunks.
+            usleep(12_000)
+        }
+    }
+    return true
+}
+
+// Paste the whole prompt atomically through the clipboard (Cmd+V). Long prompts
+// are delivered in one event instead of dozens of keystrokes, which is what
+// ProseMirror needs to keep every character. The user's clipboard is restored.
+func pasteTextIntoFocused(pid: pid_t, _ text: String) -> Bool {
+    let pasteboard = NSPasteboard.general
+    let saved = pasteboard.string(forType: .string)
+
+    pasteboard.clearContents()
+    guard pasteboard.setString(text, forType: .string) else { return false }
+
+    guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: true),
+          let up = CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: false) else {
+        return false
+    }
+    down.flags = .maskCommand
+    up.flags = .maskCommand
+    down.postToPid(pid)
+    up.postToPid(pid)
+    usleep(250_000)
+
+    if let saved {
+        pasteboard.clearContents()
+        pasteboard.setString(saved, forType: .string)
+    }
+    return true
+}
+
 func sendPromptToClaude(name: String, text: String, requestId: String?) -> SendTurnResponse {
     let (maybeApp, maybeWin) = resolveWindow(name, activate: false)
     guard let app = maybeApp else {
@@ -596,29 +670,84 @@ func sendPromptToClaude(name: String, text: String, requestId: String?) -> SendT
         promptText = text
     }
 
-    _ = AXUIElementSetAttributeValue(input, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-
-    _ = AXUIElementSetAttributeValue(input, "AXSelectedText" as CFString, promptText as CFTypeRef)
-    let setErr = AXUIElementSetAttributeValue(input, kAXValueAttribute as CFString, promptText as CFTypeRef)
-    guard setErr == .success else {
-        return SendTurnResponse(ok: false, status: "VALUE_SET_FAILED", requestId: requestId, error: "AXError \(setErr.rawValue)")
+    // Unicode key events are only delivered to the frontmost application, so a
+    // background Claude window silently drops them. Raise the app for the
+    // submission window (the documented "when-required" focus policy) and hand
+    // focus straight back to whatever the user was using. The response is
+    // observed afterwards and needs no focus.
+    let priorFrontmost = NSWorkspace.shared.frontmostApplication
+    let raisedForSubmission = priorFrontmost?.processIdentifier != app.processIdentifier
+    if raisedForSubmission {
+        _ = app.activate(options: [])
+        usleep(400_000)
     }
+    defer {
+        if raisedForSubmission, let prior = priorFrontmost,
+           prior.processIdentifier != app.processIdentifier, !prior.isTerminated {
+            _ = prior.activate(options: [])
+        }
+    }
+
+    // Re-resolve after activation: raising the window can rebuild the AX tree.
+    let liveWin = resolveWindow(name, activate: false).1 ?? win
+    guard let liveInput = findInput(liveWin) ?? findInput(win).map({ $0 }) else {
+        return SendTurnResponse(ok: false, status: "INPUT_NOT_FOUND", requestId: requestId, error: "Prompt textarea not found")
+    }
+
+    _ = AXUIElementSetAttributeValue(liveInput, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+
+    // Clear any stale draft so the marker check below is unambiguous.
+    _ = AXUIElementSetAttributeValue(liveInput, kAXValueAttribute as CFString, "" as CFTypeRef)
+    usleep(50_000)
 
     let marker = requestId.map { "[AB:\($0)]" } ?? String(text.prefix(24))
 
-    // Wait for Chromium to process the text insertion and populate the composer
-    for _ in 1...25 {
-        let curVal = findInput(win).map { axString($0, kAXValueAttribute).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+    // Primary path: clipboard paste (atomic, survives ProseMirror re-renders).
+    _ = pasteTextIntoFocused(pid: app.processIdentifier, promptText)
+    var composerHasMarker = false
+    for _ in 1...20 {
+        let curVal = findInput(liveWin).map { axString($0, kAXValueAttribute).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
         if curVal.contains(marker) {
+            composerHasMarker = true
             break
         }
         usleep(100_000)
     }
 
+    // Fallback: paced unicode key events for hosts where the pasteboard is not
+    // available to the helper.
+    if !composerHasMarker {
+        _ = postUnicodeText(pid: app.processIdentifier, promptText)
+    }
+    for _ in 1...25 {
+        let curVal = findInput(liveWin).map { axString($0, kAXValueAttribute).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+        if curVal.contains(marker) {
+            composerHasMarker = true
+            break
+        }
+        usleep(100_000)
+    }
+
+    // Fallback for plain AppKit text views where AXValue writes do register.
+    if !composerHasMarker {
+        _ = AXUIElementSetAttributeValue(liveInput, "AXSelectedText" as CFString, promptText as CFTypeRef)
+        let setErr = AXUIElementSetAttributeValue(liveInput, kAXValueAttribute as CFString, promptText as CFTypeRef)
+        guard setErr == .success else {
+            return SendTurnResponse(ok: false, status: "VALUE_SET_FAILED", requestId: requestId, error: "AXError \(setErr.rawValue)")
+        }
+        for _ in 1...25 {
+            let curVal = findInput(liveWin).map { axString($0, kAXValueAttribute).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+            if curVal.contains(marker) {
+                break
+            }
+            usleep(100_000)
+        }
+    }
+
     // Wait for the Send button to become enabled (up to 4 seconds)
     var sendBtn: AXUIElement? = nil
     for _ in 1...40 {
-        if let btn = findSendBtn(win) {
+        if let btn = findSendBtn(liveWin) {
             sendBtn = btn
             break
         }
@@ -634,10 +763,10 @@ func sendPromptToClaude(name: String, text: String, requestId: String?) -> SendT
     var submitted = false
     for attempt in 1...40 {
         usleep(250_000)
-        let curVal = findInput(win).map { axString($0, kAXValueAttribute).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+        let curVal = findInput(liveWin).map { axString($0, kAXValueAttribute).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
         let composerCleared = curVal.isEmpty || curVal == "\n" || !curVal.contains(marker)
-        let generating = checkGenerating(win)
-        let sendDisabled = findSendBtn(win) == nil
+        let generating = checkGenerating(liveWin)
+        let sendDisabled = findSendBtn(liveWin) == nil
 
         if composerCleared || generating || sendDisabled {
             submitted = true
@@ -647,7 +776,7 @@ func sendPromptToClaude(name: String, text: String, requestId: String?) -> SendT
         // Chromium accessibility action retry: if still not submitted after 2 attempts (500ms),
         // re-dispatch AXPress on the send button to ensure JavaScript event delivery.
         if attempt == 2 || attempt == 6 {
-            if let freshBtn = findSendBtn(win) {
+            if let freshBtn = findSendBtn(liveWin) {
                 _ = AXUIElementPerformAction(freshBtn, kAXPressAction as CFString)
             }
         }
@@ -681,7 +810,10 @@ func captureTextSnapshot(name: String) -> [String] {
             let t = (titleVal as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let d = (descVal as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let s = !v.isEmpty ? v : (!t.isEmpty ? t : d)
-            if !s.isEmpty { texts.append(s) }
+            // Electron exposes each rendered line twice (heading + static text).
+            // Collapse adjacent duplicates so a repeated "Claude responded:"
+            // cannot terminate response extraction before the body is read.
+            if !s.isEmpty && texts.last != s { texts.append(s) }
         }
         var childrenVal: AnyObject?
         if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenVal) == .success,
@@ -840,7 +972,10 @@ func observeResponseFromClaude(name: String, requestId: String?, timeoutMs: Int,
             let t = (titleVal as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let d = (descVal as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let s = !v.isEmpty ? v : (!t.isEmpty ? t : d)
-            if !s.isEmpty { texts.append(s) }
+            // Collapse the heading/static-text duplicate pair Electron emits for
+            // every rendered line; otherwise the repeated "Claude responded:"
+            // line is treated as the terminator of the very response it follows.
+            if !s.isEmpty && texts.last != s { texts.append(s) }
         }
         var childrenVal: AnyObject?
         if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenVal) == .success,

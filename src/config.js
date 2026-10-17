@@ -1,5 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
+import fs from 'node:fs';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { resolveSecret, loadKeychainSecret } from './config-resolver.js';
 import { REGISTERED_VERIFICATION_TOKENS } from './security/verification-tokens.js';
@@ -24,20 +26,41 @@ export const CONFIG = {
     ? process.env.ZIA_WRITE_LOCKED !== 'false' && process.env.ZIA_WRITE_LOCKED !== '0'
     : true,
 
-  // Default narrowed roots: only agent-bridge root, handoff folder, and configured scratch/temp directories.
+  // Default allowed roots: repo root and test-workspace.
+  // Extra roots come from an explicit user config file (config/allowed-roots.json) or environment variables.
   // Full home directory access is disabled by default to prevent unintended mutations.
-  // Documented opt-in to widen: set AGENT_BRIDGE_ALLOW_HOME_ROOT=1 or AGENT_BRIDGE_ALLOWED_ROOTS=<comma-separated paths>.
-  ALLOWED_ROOTS: process.env.AGENT_BRIDGE_ALLOW_HOME_ROOT === '1'
-    ? [path.join(BRIDGE_ROOT, 'test-workspace'), '/Users/jayanthpranaykonada']
-    : (process.env.AGENT_BRIDGE_ALLOWED_ROOTS
-      ? process.env.AGENT_BRIDGE_ALLOWED_ROOTS.split(',').map(s => s.trim()).filter(Boolean)
-      : [
-          BRIDGE_ROOT,
-          path.join(BRIDGE_ROOT, 'test-workspace'),
-          '/Users/jayanthpranaykonada/agent-bridge-handoff',
-          path.join(BRIDGE_ROOT, '.scratch'),
-          path.join('/Users/jayanthpranaykonada/agent-bridge-handoff', '.scratch')
-        ]),
+  ALLOWED_ROOTS: (() => {
+    if (process.env.AGENT_BRIDGE_ALLOW_HOME_ROOT === '1') {
+      return [path.join(BRIDGE_ROOT, 'test-workspace'), os.homedir()];
+    }
+    if (process.env.AGENT_BRIDGE_ALLOWED_ROOTS) {
+      return process.env.AGENT_BRIDGE_ALLOWED_ROOTS.split(',').map(s => s.trim()).filter(Boolean);
+    }
+    const userRootsFile = [
+      path.join(BRIDGE_ROOT, 'config', 'allowed-roots.json'),
+      path.join(BRIDGE_ROOT, 'data', 'allowed-roots.json')
+    ].find(p => fs.existsSync(p));
+
+    if (userRootsFile) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(userRootsFile, 'utf8'));
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return [
+            BRIDGE_ROOT,
+            path.join(BRIDGE_ROOT, 'test-workspace'),
+            ...parsed.map(r => path.resolve(BRIDGE_ROOT, r))
+          ];
+        }
+      } catch {
+        // swallow-ok: fallback to defaults if config file is invalid
+      }
+    }
+
+    return [
+      BRIDGE_ROOT,
+      path.join(BRIDGE_ROOT, 'test-workspace')
+    ];
+  })(),
 
   // No Agent-Bridge-level filename denylist for mutation. OS-level protections remain authoritative.
   PROTECTED_FILES: [],
@@ -92,18 +115,50 @@ export const CONFIG = {
     // `control_plane.api_key` accepts a literal value or an `env:NAME`
     // indirection. A present but unresolvable reference throws here at startup.
     const isPlaceholder = (k) => typeof k === 'string' && (/^YOUR_API_KEY/i.test(k.trim()) || k.trim() === '<api-key>');
-    const envKey = process.env.CONTROL_PLANE_API_KEY_CONFIG ?? process.env.CONTROL_PLANE_API_KEY;
+    const envKey = process.env.CONTROL_PLANE_API_KEY_CONFIG ?? process.env.AGENT_BRIDGE_API_KEY ?? process.env.CONTROL_PLANE_API_KEY;
     const hasEnvKey = Boolean(envKey && !isPlaceholder(envKey));
     let rawKey = envKey;
     if (isPlaceholder(rawKey)) rawKey = null;
+
+    // Check persistent 0600 keyfile in data directory
+    const keyFilePath = path.join(BRIDGE_ROOT, 'data', '.control_plane_key');
+    if (!rawKey && fs.existsSync(keyFilePath)) {
+      try {
+        const fileContent = fs.readFileSync(keyFilePath, 'utf8').trim();
+        if (fileContent && !isPlaceholder(fileContent)) {
+          rawKey = fileContent;
+        }
+      } catch {
+        // swallow-ok: ignore file read errors
+      }
+    }
+
     if (!rawKey && process.platform === 'darwin') {
       const keychainSecret = loadKeychainSecret('agent-bridge', 'control_plane_api_key');
       if (keychainSecret) rawKey = keychainSecret;
     }
+
+    // Fresh install detection: no existing database and no key configured
+    const dbPath = process.env.AGENT_BRIDGE_DB_PATH || path.join(BRIDGE_ROOT, 'data', 'bridge.sqlite');
+    const isFreshInstall = !fs.existsSync(dbPath) && !fs.existsSync(keyFilePath);
+    if (!rawKey && isFreshInstall && process.env.NODE_ENV !== 'test' && process.env.AGENT_BRIDGE_DISABLE_AUTO_KEY !== '1') {
+      try {
+        const generatedKey = crypto.randomBytes(24).toString('hex');
+        const dataDir = path.join(BRIDGE_ROOT, 'data');
+        if (!fs.existsSync(dataDir)) {
+          fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+        }
+        fs.writeFileSync(keyFilePath, generatedKey, { mode: 0o600 });
+        rawKey = generatedKey;
+      } catch {
+        // swallow-ok: fallback if disk is read-only
+      }
+    }
+
     const requireFlag = process.env.CONTROL_PLANE_REQUIRE_API_KEY;
     const requireApiKey = requireFlag !== undefined
       ? (requireFlag === '1' || requireFlag === 'true')
-      : hasEnvKey;
+      : Boolean(hasEnvKey || rawKey);
     return {
       API_KEY: resolveSecret(rawKey, { name: 'control_plane.api_key' }),
       REQUIRE_API_KEY: requireApiKey

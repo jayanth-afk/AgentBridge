@@ -7,6 +7,12 @@ import { ConversationRegistry } from '../src/control-plane/conversation-registry
 import { SwiftAXBridge } from '../src/control-plane/swift-ax-bridge.js';
 import { RequestState } from '../src/protocol/envelope.js';
 
+// Live status reporting asserts the real ChatGPT/Claude desktop processes are
+// open. Gate it with the documented live-desktop opt-in so hermetic runs do not
+// depend on which GUI apps happen to be running.
+const LIVE_DESKTOP = process.env.AGENT_BRIDGE_LIVE_DESKTOP === '1';
+const LIVE_DESKTOP_SKIP = 'requires a live desktop session; set AGENT_BRIDGE_LIVE_DESKTOP=1 to run';
+
 test('ConversationRegistry & Session Lifecycle Suite', async (t) => {
   const registry = new ConversationRegistry();
 
@@ -132,7 +138,7 @@ test('ChatGptLocalEngineAdapter Advanced Capabilities Suite', async (t) => {
 test('ModelOrchestrator Autonomous Multi-Hop & Delegation Suite', async (t) => {
   const orchestrator = new ModelOrchestrator();
 
-  await t.test('1. Live Status Reporting (bridge status)', async () => {
+  await t.test('1. Live Status Reporting (bridge status)', { skip: LIVE_DESKTOP ? false : LIVE_DESKTOP_SKIP }, async () => {
     const status = await orchestrator.getLiveStatus();
     assert.ok(status.timestamp);
     assert.equal(status.agents.chatgpt.running, true);

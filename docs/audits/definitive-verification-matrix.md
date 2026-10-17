@@ -1,7 +1,7 @@
 # Agent Bridge v2 — Definitive Verification Matrix
 
 **Date:** 2026-10-14  
-**Test Suite Size:** 129 Test Files · 1164 Total Tests · 1156 Passed · 0 Failed · 8 Skipped (Gated Live Routes)  
+**Test Suite Size:** 138 Test Files · 1207 Total Tests · 1196 Passed · 0 Failed · 11 Skipped (Gated Live Routes)  
 **Execution Environment:** Node.js v24.12.0 · Darwin 24.1.0 · macOS Apple Silicon  
 **Hermeticity Status:** VERIFIED (Zero mutations to production database, zero lockfile dirtiness)  
 
@@ -21,6 +21,8 @@
 | **Interoperability & Zero-Waste Delivery** | `tests/zero-waste-delivery.test.js`, `tests/v2-adversarial-integration.test.js` | 26 | 26 / 0 / 0 | Verbatim response delivery without re-synthesis; CAS artifact hashing; monotonic epoch fencing; late response quarantine; duplicate execution suppression. `[VERIFIED]` |
 | **Skills Platform** | `tests/skills-platform.test.js`, `tests/mission-g-skill-registry.test.js` | 16 | 16 / 0 / 0 | In-house skills registration; lockfile integrity; tool registry profile filtering (`default` profile retains exactly 74 tools; `skills` profile adds 5). `[VERIFIED]` |
 | **Core MCP Tools & Diagnostics** | `tests/mcp-tools-contract.test.js`, `tests/verification-recovery.test.js` | 991 | 983 / 0 / 8 | 74 registered MCP tools adhere to strict schemas; harmless read/write operations succeed in test-workspace; sensitive files forbidden; diagnostic doctor passes cleanly. `[VERIFIED]` |
+
+*Subsystem counts above were captured in the 2026-10-14 subsystem run (1164 tests). The header summary and §3 skip audit are refreshed to the current full-suite run (1207 tests).*
 
 ---
 
@@ -78,15 +80,18 @@
 
 ## 3. Justified Skip Audit (AR-05)
 
-The 8 skipped tests across the suite are explicitly cataloged and verified below:
+The 11 skipped tests across the suite are explicitly cataloged and verified below:
 
-1. `tests/live-autonomous-multihop.test.js`: Requires live model credentials (`AGENT_BRIDGE_LIVE_MODELS=1`).
-2. `tests/live-chatgpt-desktop.test.js`: Requires interactive desktop focus & AX session (`AGENT_BRIDGE_LIVE_CHATGPT=1`).
-3. `tests/live-desktop-agents.test.js`: Requires interactive desktop session (`AGENT_BRIDGE_LIVE_DESKTOP=1`).
-4. `tests/model-orchestrator.test.js` (Test 1): Requires live model credentials (`AGENT_BRIDGE_LIVE_MODELS=1`).
-5. `tests/model-orchestrator.test.js` (Test 2): Requires live model credentials (`AGENT_BRIDGE_LIVE_MODELS=1`).
-6. `tests/model-orchestrator.test.js` (Test 3): Requires live model credentials (`AGENT_BRIDGE_LIVE_MODELS=1`).
-7. `tests/persistent-session-engine.test.js`: Requires interactive desktop session (`AGENT_BRIDGE_LIVE_DESKTOP=1`).
-8. `tests/integration.test.js`: Requires interactive desktop session (`AGENT_BRIDGE_LIVE_DESKTOP=1`).
+1. `tests/desktop-session-verifier.test.js` (Category C & E): Requires a running Claude Desktop process (`AGENT_BRIDGE_LIVE_DESKTOP=1`).
+2. `tests/desktop-session-verifier.test.js` (Category D & F): Requires a running ChatGPT Desktop process (`AGENT_BRIDGE_LIVE_DESKTOP=1`).
+3. `tests/integration.test.js` (LIVE ZiA primary ChatGPT brain endpoint): Requires live ChatGPT credentials (`AGENT_BRIDGE_LIVE_CHATGPT=1`).
+4. `tests/live-autonomous-multihop.test.js`: Requires live model credentials (`AGENT_BRIDGE_LIVE_MODELS=1`).
+5. `tests/live-chatgpt-desktop.test.js`: Requires interactive desktop focus & AX session (`AGENT_BRIDGE_LIVE_CHATGPT=1`).
+6. `tests/live-desktop-agents.test.js`: Requires interactive desktop session (`AGENT_BRIDGE_LIVE_DESKTOP=1`).
+7. `tests/model-orchestrator.test.js` (Test 1, Live Status Reporting): Asserts real ChatGPT/Claude desktop processes are open (`AGENT_BRIDGE_LIVE_DESKTOP=1`).
+8. `tests/model-orchestrator.test.js` (Test 3.1, Real streaming events): Requires live ChatGPT/Codex quota (`AGENT_BRIDGE_LIVE_MODELS=1`).
+9. `tests/model-orchestrator.test.js` (Test 3.2, LIVE_MODEL Delegation): Requires live ChatGPT/Codex quota (`AGENT_BRIDGE_LIVE_MODELS=1`).
+10. `tests/model-orchestrator.test.js` (Test 3.3, Autonomous Multi-Hop Loop): Requires live Claude quota (`AGENT_BRIDGE_LIVE_MODELS=1`).
+11. `tests/persistent-session-engine.test.js` (Real non-interactive model execution): Requires live ChatGPT/Codex quota (`AGENT_BRIDGE_LIVE_MODELS=1`).
 
-**Conclusion:** All 8 skips represent real-world external dependency boundaries. In the default hermetic test run, 0 tests fail, 1156 pass, and exactly these 8 skips execute.
+**Conclusion:** All 11 skips represent real-world external dependency boundaries. In the default hermetic test run, 0 tests fail, 1196 pass, and exactly these 11 skips execute. Setting `AGENT_BRIDGE_LIVE_DESKTOP=1` re-enables the desktop assertions and they fail loudly when the corresponding app is closed, so the gate never masks a genuine inspection regression.

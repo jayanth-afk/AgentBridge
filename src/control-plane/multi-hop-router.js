@@ -37,7 +37,8 @@ export class MultiHopRouter {
     hops,
     initialInput,
     parentRequestId = null,
-    initiatorAgent = 'initiator',
+    initiatorAgent = 'system',
+    isPrivileged = false,
     maxHops = 10,
     timeoutPerHopMs = 30000
   }) {
@@ -65,7 +66,8 @@ export class MultiHopRouter {
       // Authorization guard: verify that previousAgent is allowed to reach currentAgent
       if (this.guard && typeof this.guard.checkPermission === 'function') {
         const perm = this.guard.checkPermission(previousAgent, 'DELEGATE');
-        if (!perm.allowed && previousAgent !== 'system' && previousAgent !== 'initiator') {
+        const isPrivilegedSystem = isPrivileged && previousAgent === 'system';
+        if (!perm.allowed && !isPrivilegedSystem) {
           const authErr = new Error(`UNAUTHORIZED_HOP: Agent '${previousAgent}' is not authorized to delegate to '${currentAgent}'.`);
           authErr.code = 'UNAUTHORIZED_HOP';
           throw authErr;

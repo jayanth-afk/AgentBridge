@@ -563,25 +563,69 @@
       } catch {}
     }
 
+    let csrfToken = '';
+    async function getCsrfToken() {
+      if (csrfToken) return csrfToken;
+      try {
+        const res = await fetchWithAuth('/api/csrf-token');
+        if (res.ok) {
+          const data = await res.json();
+          csrfToken = data.csrfToken || '';
+        }
+      } catch {}
+      return csrfToken;
+    }
+
     async function loadHealth() {
       try {
         const res = await fetchWithAuth('/api/health');
         if (!res.ok) return;
         const data = await res.json();
         const tbody = document.getElementById('health-table-body');
+        while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
         if (!data.agents || data.agents.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">No agents registered.</td></tr>';
+          const tr = document.createElement('tr');
+          const td = document.createElement('td');
+          td.colSpan = 5;
+          td.style.textAlign = 'center';
+          td.style.color = 'var(--text-muted)';
+          td.textContent = 'No agents registered.';
+          tr.appendChild(td);
+          tbody.appendChild(tr);
           return;
         }
-        tbody.innerHTML = data.agents.map(a => `
-          <tr>
-            <td><strong>${a.id}</strong></td>
-            <td><span class="badge-ready">${a.status || 'READY'}</span></td>
-            <td>${a.route || 'mcp'}</td>
-            <td><span class="badge-live">${a.evidenceLevel || 'UNVERIFIED'}</span></td>
-            <td>${a.lastCanary || '—'}</td>
-          </tr>
-        `).join('');
+        for (const a of data.agents) {
+          const tr = document.createElement('tr');
+          const td1 = document.createElement('td');
+          const strong = document.createElement('strong');
+          strong.textContent = a.id;
+          td1.appendChild(strong);
+
+          const td2 = document.createElement('td');
+          const badgeReady = document.createElement('span');
+          badgeReady.className = 'badge-ready';
+          badgeReady.textContent = a.status || 'READY';
+          td2.appendChild(badgeReady);
+
+          const td3 = document.createElement('td');
+          td3.textContent = a.route || 'mcp';
+
+          const td4 = document.createElement('td');
+          const badgeLive = document.createElement('span');
+          badgeLive.className = 'badge-live';
+          badgeLive.textContent = a.evidenceLevel || 'UNVERIFIED';
+          td4.appendChild(badgeLive);
+
+          const td5 = document.createElement('td');
+          td5.textContent = a.lastCanary || '—';
+
+          tr.appendChild(td1);
+          tr.appendChild(td2);
+          tr.appendChild(td3);
+          tr.appendChild(td4);
+          tr.appendChild(td5);
+          tbody.appendChild(tr);
+        }
       } catch {}
     }
 
@@ -591,37 +635,76 @@
         if (!res.ok) return;
         const data = await res.json();
         const container = document.getElementById('approvals-container');
+        while (container.firstChild) container.removeChild(container.firstChild);
         const items = data.approvals || data.items || [];
         if (items.length === 0) {
-          container.innerHTML = '<div style="color: var(--text-muted); font-size: 0.85rem;">No pending approvals.</div>';
+          const empty = document.createElement('div');
+          empty.style.color = 'var(--text-muted)';
+          empty.style.fontSize = '0.85rem';
+          empty.textContent = 'No pending approvals.';
+          container.appendChild(empty);
           return;
         }
-        container.innerHTML = items.map(item => `
-          <div class="approval-item" id="approval-item-${item.id}">
-            <div>
-              <div style="font-weight: 600; font-size: 0.9rem;">${item.type}: ${item.target}</div>
-              <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.2rem;">
-                Requested Permissions: <code style="color: var(--accent-cyan);">${(item.permissionsRequested || []).join(', ')}</code>
-              </div>
-              <div style="font-size: 0.75rem; color: var(--text-dim); margin-top: 0.2rem;">
-                ${item.diffSummary || ''}
-              </div>
-            </div>
-            <div style="display: flex; gap: 0.5rem;">
-              <button class="btn-approve" onclick="handleDecision('${item.id}', 'approve')">Approve</button>
-              <button class="btn-reject" onclick="handleDecision('${item.id}', 'reject')">Reject</button>
-            </div>
-          </div>
-        `).join('');
+        for (const item of items) {
+          const itemDiv = document.createElement('div');
+          itemDiv.className = 'approval-item';
+          itemDiv.id = 'approval-item-' + item.id;
+
+          const infoDiv = document.createElement('div');
+          const titleDiv = document.createElement('div');
+          titleDiv.style.fontWeight = '600';
+          titleDiv.style.fontSize = '0.9rem';
+          titleDiv.textContent = `${item.type}: ${item.target}`;
+          infoDiv.appendChild(titleDiv);
+
+          const permsDiv = document.createElement('div');
+          permsDiv.style.fontSize = '0.8rem';
+          permsDiv.style.color = 'var(--text-muted)';
+          permsDiv.style.marginTop = '0.2rem';
+          permsDiv.textContent = 'Requested Permissions: ' + (item.permissionsRequested || []).join(', ');
+          infoDiv.appendChild(permsDiv);
+
+          if (item.diffSummary) {
+            const diffDiv = document.createElement('div');
+            diffDiv.style.fontSize = '0.75rem';
+            diffDiv.style.color = 'var(--text-dim)';
+            diffDiv.style.marginTop = '0.2rem';
+            diffDiv.textContent = item.diffSummary;
+            infoDiv.appendChild(diffDiv);
+          }
+
+          const btnGroup = document.createElement('div');
+          btnGroup.style.display = 'flex';
+          btnGroup.style.gap = '0.5rem';
+
+          const btnApprove = document.createElement('button');
+          btnApprove.className = 'btn-approve';
+          btnApprove.textContent = 'Approve';
+          btnApprove.onclick = () => handleDecision(item.id, 'approve');
+
+          const btnReject = document.createElement('button');
+          btnReject.className = 'btn-reject';
+          btnReject.textContent = 'Reject';
+          btnReject.onclick = () => handleDecision(item.id, 'reject');
+
+          btnGroup.appendChild(btnApprove);
+          btnGroup.appendChild(btnReject);
+
+          itemDiv.appendChild(infoDiv);
+          itemDiv.appendChild(btnGroup);
+          container.appendChild(itemDiv);
+        }
       } catch {}
     }
 
     async function handleDecision(approvalId, decision) {
       try {
+        const csrf = await getCsrfToken();
         const res = await fetchWithAuth('/api/approvals', {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'x-csrf-token': csrf
           },
           body: JSON.stringify({ approvalId, decision })
         });
@@ -629,7 +712,12 @@
         if (res.ok && data.success) {
           const el = document.getElementById('approval-item-' + approvalId);
           if (el) {
-            el.innerHTML = '<div style="color: var(--accent-emerald); font-weight: 600;">Action recorded: ' + decision.toUpperCase() + ' (Audited)</div>';
+            while (el.firstChild) el.removeChild(el.firstChild);
+            const confirmation = document.createElement('div');
+            confirmation.style.color = 'var(--accent-emerald)';
+            confirmation.style.fontWeight = '600';
+            confirmation.textContent = 'Action recorded: ' + decision.toUpperCase() + ' (Audited)';
+            el.appendChild(confirmation);
           }
           setTimeout(loadApprovals, 1500);
         } else {

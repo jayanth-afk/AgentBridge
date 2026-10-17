@@ -12,6 +12,21 @@ import { getScrubbedEnv } from '../utils/scrubbed-env.js';
 
 const execFileAsync = promisify(execFile);
 
+export const ALLOWED_CLI_COMMANDS = Object.freeze([
+  'echo',
+  'cat',
+  'node',
+  'python3',
+  'swift',
+  'git',
+  'sh',
+  'bash',
+  'zsh',
+  'claude',
+  'codex',
+  'gemini'
+]);
+
 /**
  * Headless CLI process adapter for non-interactive agents (Claude CLI, Codex exec, Gemini CLI).
  * Spawns headless process, streams stdout, takes process exit / EOF as exact completion.
@@ -24,6 +39,9 @@ export class CliProcessAdapter extends BaseRouteAdapter {
     const options = isOptionsFirst ? routeIdOrOptions : maybeOptions;
 
     super(routeId, options);
+    this.allowedCommands = Array.isArray(options.allowedCommands)
+      ? options.allowedCommands
+      : ALLOWED_CLI_COMMANDS;
     this.command = options.command || 'echo';
     this.baseArgs = options.args || options.defaultArgs || [];
     this.inputMode = options.inputMode || (options.passPromptViaStdin ? 'stdin' : 'arg');
@@ -32,10 +50,28 @@ export class CliProcessAdapter extends BaseRouteAdapter {
     this.usageRecords = new Map();    // requestId -> usage
   }
 
+  isCommandAllowed(cmd) {
+    if (!cmd || typeof cmd !== 'string') return false;
+    const base = path.basename(cmd).toLowerCase();
+    return this.allowedCommands.some(allowed => {
+      const allowedBase = path.basename(allowed).toLowerCase();
+      return base === allowedBase || cmd === allowed;
+    });
+  }
+
   /**
    * Probe CLI availability via binary check without assuming presence.
    */
   async probe() {
+    if (!this.isCommandAllowed(this.command)) {
+      return {
+        ready: false,
+        stage: DeliveryStage.FAILED,
+        evidence: RouteEvidence.PROBED,
+        backgroundCapable: false,
+        reason: `Command '${this.command}' is not in the CLI process adapter allowlist`
+      };
+    }
     try {
       let binPath = null;
       if (this.command.includes('/') || path.isAbsolute(this.command)) {
@@ -94,6 +130,10 @@ export class CliProcessAdapter extends BaseRouteAdapter {
    * Dispatch request to CLI process and wait for completion.
    */
   async send(request) {
+    if (!this.isCommandAllowed(this.command)) {
+      throw new Error(`Command '${this.command}' is not in the CLI process adapter allowlist`);
+    }
+
     const {
       requestId,
       prompt = request.message || '',

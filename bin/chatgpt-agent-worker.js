@@ -138,6 +138,9 @@ const keepAlive = setInterval(() => {}, 1 << 30);
 function shutdown(code = 0) {
   clearInterval(keepAlive);
   worker.stop();
+  if (worker.session && typeof worker.session.close === 'function') {
+    try { worker.session.close(); } catch {}
+  }
   try { eventBus.close(); } catch {}
   try { logger.close(); } catch {}
   process.exit(code);

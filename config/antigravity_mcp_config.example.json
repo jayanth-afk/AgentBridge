@@ -1,9 +1,9 @@
 {
   "mcpServers": {
     "agent-bridge": {
-      "command": "node",
+      "command": "{{NODE_BINARY}}",
       "args": [
-        "./src/mcp-server.js"
+        "{{BRIDGE_ROOT}}/src/mcp-server.js"
       ],
       "env": {
         "AGENT_ID": "antigravity-ide"

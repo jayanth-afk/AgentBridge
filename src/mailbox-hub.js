@@ -15,6 +15,7 @@ import { normalizeAgentId, canonicalizeTargetAgent, getAliasesFor } from './agen
 import { isEffectfulTool } from './effects/effects-ledger.js';
 import { CheapFirstRouter } from './routing/cheap-first-router.js';
 import { SemanticCache } from './cache/semantic-cache.js';
+import { CompletionEvidenceTier } from './control-plane/route-interface.js';
 import { CONFIG } from './config.js';
 
 export const CONFIDENCE_RANK = Object.freeze({
@@ -392,6 +393,26 @@ export class MailboxHub {
 
               if (res.changes > 0) {
                 uncertain.push({ requestId: row.request_id, epoch: nextEpoch, error: errorMsg });
+                if (row.task_id) {
+                  try {
+                    this.db.prepare(`
+                      UPDATE tasks
+                      SET status = 'delivery_uncertain',
+                          error = ?,
+                          updated_at = ?
+                      WHERE id = ? AND status IN ('claimed', 'in_progress')
+                    `).run(errorMsg, now, row.task_id);
+
+                    this.db.prepare(`
+                      UPDATE task_epochs
+                      SET active_attempt_id = NULL,
+                          updated_at = ?
+                      WHERE task_id = ?
+                    `).run(now, row.task_id);
+                  } catch {
+                    // swallow-ok
+                  }
+                }
                 this.logger?.log?.({
                   agentId: row.to_agent || 'system',
                   action: 'request_delivery_uncertain',
@@ -417,6 +438,25 @@ export class MailboxHub {
 
           if (res.changes > 0) {
             recovered.push({ requestId: row.request_id, epoch: nextEpoch });
+            if (row.task_id) {
+              try {
+                this.db.prepare(`
+                  UPDATE tasks
+                  SET status = 'pending',
+                      updated_at = ?
+                  WHERE id = ? AND status IN ('claimed', 'in_progress')
+                `).run(now, row.task_id);
+
+                this.db.prepare(`
+                  UPDATE task_epochs
+                  SET active_attempt_id = NULL,
+                      updated_at = ?
+                  WHERE task_id = ?
+                `).run(now, row.task_id);
+              } catch {
+                // swallow-ok
+              }
+            }
             this.logger?.log?.({
               agentId: row.to_agent || 'system',
               action: 'recover_expired_request',
@@ -1678,7 +1718,12 @@ export class MailboxHub {
       }
     }
 
-    const effectiveConfidence = completionConfidence || 'UNKNOWN';
+    let effectiveConfidence = completionConfidence || 'UNKNOWN';
+    let effectiveEvidence = null;
+    if (status === 'completed' && attemptId && epoch !== null && epoch !== undefined) {
+      effectiveConfidence = CompletionEvidenceTier.AUTHENTICATED_SUBMIT;
+      effectiveEvidence = CompletionEvidenceTier.AUTHENTICATED_SUBMIT;
+    }
 
     const submitWork = (targetDb, stageEventFn = null) => {
       updated = this.tasks.updateTaskStatus({
@@ -1780,7 +1825,8 @@ export class MailboxHub {
               correlationTier: attemptId ? 'crypto_nonce' : 'direct_session',
               originRoute: 'task_mailbox',
               completionConfidence: effectiveConfidence,
-              observedSignals: observedSignals || null,
+              completionEvidence: effectiveEvidence || effectiveConfidence,
+              observedSignals: observedSignals || (effectiveEvidence ? [effectiveEvidence] : null),
               stableTicks: stableTicks || null,
               graceRecheck: graceRecheck || null,
               isHeuristic: effectiveConfidence === 'STABILITY_HEURISTIC'
@@ -1820,7 +1866,8 @@ export class MailboxHub {
             tokensOut: estTokensOut,
             bodySizeBytes: respBytes,
             completionType: effectiveConfidence,
-            completionEvidence: observedSignals ? Array.from(observedSignals).join(',') : null
+            evidenceTier: effectiveEvidence || effectiveConfidence,
+            completionEvidence: effectiveEvidence || (observedSignals ? Array.from(observedSignals).join(',') : null)
           }
         });
       }
@@ -2080,6 +2127,23 @@ export class MailboxHub {
     if (caller && !this._isAuthorizedParty(row.from_agent, row.to_agent, caller)) {
       const callerId = typeof caller === 'string' ? caller : caller.agentId;
       throw new Error(`Unauthorized: Agent '${callerId}' is not authorized to access request '${requestId}'.`);
+    }
+
+    // Apply expired-lease predicate: dead lease cannot be reported as live
+    if (['claimed', 'in_progress'].includes(row.status) && row.lease_expires_at) {
+      if (new Date(row.lease_expires_at).getTime() < Date.now()) {
+        this.recoverExpiredRequests({ agentId: row.to_agent });
+        const fresh = this.db.prepare('SELECT * FROM bridge_requests WHERE request_id = ?').get(requestId);
+        if (fresh) {
+          row.status = fresh.status;
+          row.epoch = fresh.epoch;
+          row.claimed_by = fresh.claimed_by;
+          row.lease_expires_at = fresh.lease_expires_at;
+          row.error = fresh.error;
+        } else {
+          row.status = 'pending';
+        }
+      }
     }
 
     const art = this.responsePreserver?.getByRequestId(requestId) || null;

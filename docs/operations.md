@@ -108,3 +108,48 @@ To inspect the exact lifecycle timeline of any request:
 node bin/bridge.js explain <requestId>
 ```
 Prints monotonic stage timestamps, latencies, current state, and the next recovery action.
+
+---
+
+## 8. Control-Plane Key Migration & Security Posture
+
+### 8.1 Fresh Install vs. Existing Install Behavior
+- **Fresh Install (No existing database or key)**:
+  Agent Bridge automatically provisions a 24-byte random authentication key stored in `data/.control_plane_key` with mode `0600` (and attempts to save to the macOS Keychain). The control plane requires this key by default.
+- **Existing Install (Database already exists)**:
+  To avoid silently breaking existing integrations, Agent Bridge does not automatically generate or inject a new key into existing deployments. If no key is set, `bridge doctor` will flag a loud failing check instructing the operator to configure one.
+
+### 8.2 Migration Path for Existing Deployments
+To securely configure a control-plane key for an existing deployment:
+1. **Generate a high-entropy secret**:
+   ```bash
+   KEY=$(openssl rand -hex 24)
+   ```
+2. **Choose one persistence mechanism**:
+   - **Environment Variable (Recommended for CLI / Containers)**:
+     ```bash
+     export AGENT_BRIDGE_API_KEY="$KEY"
+     ```
+   - **0600 File in Data Directory (Recommended for Headless Daemons)**:
+     ```bash
+     echo "$KEY" > data/.control_plane_key
+     chmod 0600 data/.control_plane_key
+     ```
+   - **macOS Keychain (Recommended for macOS Desktop Workstations)**:
+     ```bash
+     security add-generic-password -U -s agent-bridge -a control_plane_api_key -w "$KEY"
+     ```
+3. **Verify with Doctor**:
+   ```bash
+   node bin/bridge.js doctor
+   ```
+
+### 8.3 Allowed Roots & Zia Project Isolation
+- **Allowed Roots**: Defaults strictly to the Agent Bridge repository root (`/Users/.../agent-bridge`) and `test-workspace/`. To configure extra project roots safely, create a user configuration file at `config/allowed-roots.json` with an array of absolute or relative paths:
+  ```json
+  [
+    "/Users/operator/workspace/my-project"
+  ]
+  ```
+- **Zia Project Protection**: `CONFIG.ZIA_WRITE_LOCKED` defaults to `true`. All mutation operations attempting to write to or modify files in `/Users/jayanthpranaykonada/Zia` (including through symlinks) are strictly denied by `PermissionGuard`.
+

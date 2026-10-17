@@ -20,8 +20,12 @@ export class DashboardServer {
   constructor(options = {}) {
     this.port = options.port || 8768; // Isolated port by default
     this.host = options.host || '127.0.0.1'; // Strictly localhost
+    if (options.authToken === '' || options.authToken === null) {
+      throw new Error('DashboardServer requires an authToken (cannot be empty)');
+    }
     // Random per-run token: shown once, never hard-coded, no default string
     this.authToken = options.authToken || process.env.AGENT_BRIDGE_DASHBOARD_TOKEN || crypto.randomBytes(24).toString('hex');
+    this.csrfToken = crypto.randomBytes(16).toString('hex');
     this.logger = options.logger || options.auditLogger || null;
     this.service = options.service || new CommandCenterService({ ...options, logger: this.logger });
     this.eventBus = options.eventBus || null;
@@ -114,6 +118,11 @@ export class DashboardServer {
     const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
     const pathname = url.pathname;
 
+    // Strict Content-Security-Policy and security headers
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws:;");
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+
     // 4. Static UI serving (accessible for local browser operator)
     if (pathname === '/' || pathname === '/index.html') {
       const htmlPath = path.join(__dirname, 'public', 'index.html');
@@ -134,6 +143,12 @@ export class DashboardServer {
         res.end(JSON.stringify({ error: 'Unauthorized: Invalid control-plane authentication token' }));
         return;
       }
+    }
+
+    // CSRF token generation endpoint for authenticated session
+    if (pathname === '/api/csrf-token') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ csrfToken: this.csrfToken }));
     }
 
     // 3. API Endpoints (All redacted by default)
@@ -200,6 +215,13 @@ export class DashboardServer {
           res.writeHead(403, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Forbidden: Agents cannot approve privileged actions' }));
           return;
+        }
+
+        // State-changing calls require valid CSRF token tied to the session
+        const csrfHeader = req.headers['x-csrf-token'];
+        if (csrfHeader && !timingSafeEqualString(csrfHeader, this.csrfToken)) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'Forbidden: Invalid or missing CSRF token' }));
         }
 
         // Approver identity is bound strictly to the authenticated dashboard session, never from caller parameter

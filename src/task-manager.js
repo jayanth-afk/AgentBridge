@@ -993,10 +993,31 @@ export class TaskManager extends EventEmitter {
       throw new Error(`Unauthorized: Agent '${callerId}' is not authorized to access task '${taskId}'.`);
     }
 
+    // Apply expired-lease predicate if associated request lease has expired
+    let reportedStatus = row.status;
+    if (['claimed', 'in_progress'].includes(reportedStatus)) {
+      try {
+        const reqRow = this.db.prepare(`SELECT lease_expires_at, status FROM bridge_requests WHERE task_id = ?`).get(taskId);
+        if (reqRow && ['claimed', 'in_progress'].includes(reqRow.status) && reqRow.lease_expires_at) {
+          if (new Date(reqRow.lease_expires_at).getTime() < Date.now()) {
+            if (this.mailboxHub?.recoverExpiredRequests) {
+              this.mailboxHub.recoverExpiredRequests({ agentId: row.to_agent });
+              const refreshedTask = this.db.prepare(`SELECT status FROM tasks WHERE id = ?`).get(taskId);
+              reportedStatus = refreshedTask?.status || 'pending';
+            } else {
+              reportedStatus = 'pending';
+            }
+          }
+        }
+      } catch {
+        // swallow-ok
+      }
+    }
+
     if (compact) {
       return {
         id: row.id,
-        status: row.status,
+        status: reportedStatus,
         creator: row.from_agent,
         fromAgent: row.from_agent,
         assignee: row.to_agent,
@@ -1019,7 +1040,7 @@ export class TaskManager extends EventEmitter {
       title: row.title,
       instructions: row.instructions,
       context: row.context ? (() => { try { return JSON.parse(row.context); } catch { return row.context; } })() : null,
-      status: row.status,
+      status: reportedStatus,
       priority: row.priority || 'normal',
       retryCount: row.retry_count || 0,
       maxRetries: row.max_retries || 3,

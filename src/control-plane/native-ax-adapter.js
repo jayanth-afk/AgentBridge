@@ -9,8 +9,7 @@ import { ResponseCorrelator } from './response-correlator.js';
  * Invariants & Guarantees:
  * 1. Background non-focus: Submits and observes without raising the window (activate: false).
  * 2. Exact completion signals:
- *    - INDICATOR_BASED: Stop button disappearance + idle state (high confidence).
- *    - AUTHENTICATED_SUBMIT: Recipient agent executes bridge_submit_task_result with matching nonce/epoch.
+ *    - UI_STOP_IDLE (INDICATOR_BASED): Stop button disappearance + idle state (medium/high confidence).
  *    - STABILITY_HEURISTIC: Fallback when no explicit stop indicator is exposed, marked confidence: 'low'.
  * 3. Fast failure: Probes Swift helper binary, app process, window presence, and AX permissions.
  * 4. Cancellation: Direct press of Stop generation element without focus theft.

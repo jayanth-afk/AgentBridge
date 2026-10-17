@@ -191,434 +191,434 @@
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/Accessibility.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/Accessibility-L7F8TEZTJGOZU0M426TXWW9F.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/Accessibility-BFPWFQ242CA8CLMHV8ACEL98A.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "Accessibility"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/AppKit.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/AppKit-2LNEFB6OX7KY4R71P57KTPEN2.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/AppKit-22S6AMPU4ZS3B8X9TVUGMZAF5.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "AppKit"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/ApplicationServices.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/ApplicationServices-4QVPGBW3TZ0MH0MC62BXVNHYG.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/ApplicationServices-46OACO1U7F5Q48FY9C2N73VHM.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "ApplicationServices"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/CFNetwork.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/CFNetwork-1N1QDKHHANXYMXM9CIQTZON0I.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/CFNetwork-DY07VPLS2BP9QULZRVCS5ZCFB.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "CFNetwork"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/usr\/include\/cups.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/CUPS-ET6V68F0M6HAIYUFE5UCX3ZTQ.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/CUPS-9P77DHG2GL7P2XTKPHMT56VV1.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "CUPS"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/ColorSync.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/ColorSync-BQLQVK78X7T6TO8DWKWYQNCQX.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/ColorSync-3OUTVTN3LFIBH7QJ2EVBA1JMM.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "ColorSync"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/CoreData.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/CoreData-TZK6EG0TOXPUP4H9261MX4MS.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/CoreData-5QPXPAIZE89I4VBXX03MIJCYX.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "CoreData"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/CoreFoundation.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/CoreFoundation-43MK1Z3SRLCJQRTM2P8VGZJHH.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/CoreFoundation-2WVKQXFC9FOUMIAWIDVGYZBIA.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "CoreFoundation"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/CoreGraphics.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/CoreGraphics-YMBFX4J4433LUI3MCQC5A6S.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/CoreGraphics-6Y6QW07LG388EXWEENLIRULIB.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "CoreGraphics"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/CoreImage.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/CoreImage-D7N906OF5PQM34UVYYHSXXHJZ.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/CoreImage-FXJ735TEUQ16QGDVE37M70GS.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "CoreImage"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/CoreServices.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/CoreServices-5FOK1OY0Z2AM2XSVPXHCAGS6K.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/CoreServices-D4Z1YT8NQG361BO79KEXJSB86.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "CoreServices"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/CoreText.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/CoreText-6DDXVQW4QX11AFFNK28OAOTWZ.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/CoreText-2WBYYZ2MA7XL5NH18RYG164JQ.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "CoreText"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/CoreTransferable.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/CoreTransferable-6CIZOEWY91D9QCSV9R1QRYOL1.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/CoreTransferable-BJWX1KSK7OU153NYBTY133MIB.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "CoreTransferable"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/CoreVideo.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/CoreVideo-R32XAYUF23JNBIU8O687XG9S.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/CoreVideo-3LSWUKDLQN97H51T32FZCNH59.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "CoreVideo"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/usr\/include\/Darwin.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/Darwin-1Y2EDENYMW48UKV9BGBHIFS8E.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/Darwin-78EJH15LP0W8ZBJU4S68Y6JJH.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "Darwin"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/DataDetection.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/DataDetection-E0QHD6IOALRO8L5AP2T9S8KHL.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/DataDetection-B2ZQZK853KN6L8QONGYIQXG8S.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "DataDetection"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/DeveloperToolsSupport.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/DeveloperToolsSupport-6C2YEBZFLIR0QES38G9PCA4UW.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/DeveloperToolsSupport-3NYPKDCFTA2W5ISRZQFSGJ1CC.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "DeveloperToolsSupport"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/DiskArbitration.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/DiskArbitration-BVOLZDHEXJKGRI1XKTNBIBY75.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/DiskArbitration-6OKHCI0Y5X8V4KKOE9NR8WPAZ.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "DiskArbitration"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/usr\/include\/dispatch.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/Dispatch-8WRKO6POA6IWNL4OLOUBC3Z1B.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/Dispatch-2IQFPGC568GICP9CIZTQW7DGY.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "Dispatch"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/Foundation.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/Foundation-BRNIL87UOSHKRO9AVFR7KBWLO.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/Foundation-5AJB9VLAITKX7I6EYXID72VYX.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "Foundation"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/IOKit.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/IOKit-BDCF7D3SPLL80QVNNV2CG1N51.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/IOKit-4H2IBMJ6910IZD8TLFOHVCWA7.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "IOKit"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/IOSurface.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/IOSurface-67HK3R7WI0C9K2G9YWP7O1HWE.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/IOSurface-7AEZGCH80KXCLM7RDFFF62W96.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "IOSurface"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/ImageIO.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/ImageIO-341CQNIR3MNDJ0AN4NKGKTJLY.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/ImageIO-CHDRRG28LTO4895QW0FJKQCD5.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "ImageIO"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/usr\/include\/DarwinBasic.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/MachO-1EQ4ID96LEEZ72EHIPHMEGQO.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/MachO-1F2S9ZZFPV4A0WRO7LG2RMLDI.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "MachO"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/Metal.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/Metal-7AMKF4M05LE35WQLWAJ2R6RZV.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/Metal-E70PKZ46RDKOHIF5Z7LUY4SNG.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "Metal"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/OSLog.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/OSLog-9K9MJ3CQNPNRX3J24YGKUCJVB.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/OSLog-9MJ1HRUQDIFU2IL4HELZCZ0D8.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "OSLog"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/usr\/include\/ObjectiveC.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/ObjectiveC-4KIIHHNP80UCTPDN142QYKAWJ.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/ObjectiveC-3O9DBZRADPLZXT3AZ9P4OSKMZ.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "ObjectiveC"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/OpenGL.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/OpenGL-4HD0Q24ACAXSUUG4Y49EF3IAM.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/OpenGL-61PNBHSETCCTA2XXIVCMKMER8.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "OpenGL"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/QuartzCore.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/QuartzCore-6JBNBOPQ64AS0K4XFLTH49MKO.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/QuartzCore-72FWU9NCZZXG3QAI9E6HQC9CI.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "QuartzCore"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/Security.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/Security-DRLBTQ85MLDPQWRGT8PLWHJP3.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/Security-86TYPR25F37DGF3PDK7S7V9IM.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "Security"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/usr\/include\/Spatial\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/Spatial-8UAUC3EJWV28YLEOWXZ2ANLNV.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/Spatial-BSLA7GMUZBRP8M4L1ZFJZLTH4.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "Spatial"
   },
   {
     "clangModuleMapPath" : "\/Users\/jayanthpranaykonada\/Library\/Developer\/Toolchains\/swift-6.4.0-RELEASE.xctoolchain\/usr\/lib\/swift\/shims\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/SwiftShims-E090QTI8UQXTGE920H451V1RS.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/SwiftShims-F13JX2O2T1FMP9TZJVTYC7GFB.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "SwiftShims"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/SwiftUICore.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/SwiftUICore-ACSL5HCCWAR1NN8YAA5SKN9XR.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/SwiftUICore-ERIJQEA4HSWOKLKWZ3ZA6F5O0.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "SwiftUICore"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/Symbols.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/Symbols-F0UDTJCTB0NL0CX5QP5D19X6L.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/Symbols-3MUS2BIE5A9S9DLK2RIRPB8M7.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "Symbols"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/System\/Library\/Frameworks\/UniformTypeIdentifiers.framework\/Modules\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/UniformTypeIdentifiers-621J3EUUF11N2X6CINVWU18ZT.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/UniformTypeIdentifiers-6KCCZZ6KE19ERGBI0ECWWAUOO.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "UniformTypeIdentifiers"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/usr\/include\/xpc.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/XPC-TYRA8P6BE7KW46ZH2HQDL9CC.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/XPC-5S7TAXQNFIFPQVL47DR0G9U0I.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "XPC"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/usr\/include\/DarwinFoundation1.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_AvailabilityInternal-9AH1HPB8WR1OS9VVTAX2QPS8R.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_AvailabilityInternal-DHFOYKRB8NWG38I6TXXXJ5TU2.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "_AvailabilityInternal"
   },
   {
     "clangModuleMapPath" : "\/Users\/jayanthpranaykonada\/Library\/Developer\/Toolchains\/swift-6.4.0-RELEASE.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_Builtin_float-E4W5ARMDMDH2OLGZJP5NWMG96.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_Builtin_float-35ATO2RTXJ02GUE36Z1PIZCM3.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "_Builtin_float"
   },
   {
     "clangModuleMapPath" : "\/Users\/jayanthpranaykonada\/Library\/Developer\/Toolchains\/swift-6.4.0-RELEASE.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_Builtin_intrinsics-9VWFZ0YTF1TX3MB7TCU2DFC30.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_Builtin_intrinsics-ES74DGB8RG51JIA8YTSYQPW8F.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "_Builtin_intrinsics"
   },
   {
     "clangModuleMapPath" : "\/Users\/jayanthpranaykonada\/Library\/Developer\/Toolchains\/swift-6.4.0-RELEASE.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_Builtin_inttypes-5YSLQHSOJMRPXVKEFLMRY27JK.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_Builtin_inttypes-6D23GQG1CF0OP4CCQBP15O1PR.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "_Builtin_inttypes"
   },
   {
     "clangModuleMapPath" : "\/Users\/jayanthpranaykonada\/Library\/Developer\/Toolchains\/swift-6.4.0-RELEASE.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_Builtin_limits-A4IQHAIVLTVZIQB2FNIKRVUQV.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_Builtin_limits-DB4J0CHPWDDN823NYY0XSNANI.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "_Builtin_limits"
   },
   {
     "clangModuleMapPath" : "\/Users\/jayanthpranaykonada\/Library\/Developer\/Toolchains\/swift-6.4.0-RELEASE.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_Builtin_stdarg-51AJ90918ZNXYT7U6A80L23CH.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_Builtin_stdarg-NHA39INLGJ941WY9RZ4DKJZR.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "_Builtin_stdarg"
   },
   {
     "clangModuleMapPath" : "\/Users\/jayanthpranaykonada\/Library\/Developer\/Toolchains\/swift-6.4.0-RELEASE.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_Builtin_stdatomic-DG48W3NX806NXJH3NFOXBA568.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_Builtin_stdatomic-DZN3R6WNDCTMA3UUIDWVFWGQE.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "_Builtin_stdatomic"
   },
   {
     "clangModuleMapPath" : "\/Users\/jayanthpranaykonada\/Library\/Developer\/Toolchains\/swift-6.4.0-RELEASE.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_Builtin_stdbool-7S6PGI5UN84FB3MWPF5Q8KHZ4.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_Builtin_stdbool-2XSVIOF4JP6QJEAXKF8B64AJ8.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "_Builtin_stdbool"
   },
   {
     "clangModuleMapPath" : "\/Users\/jayanthpranaykonada\/Library\/Developer\/Toolchains\/swift-6.4.0-RELEASE.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_Builtin_stddef-9N5ZEM9MY7MXEFW7R1ZN2GCH8.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_Builtin_stddef-8S8IKSZA1UZ5ECCWDQLGDA9GL.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "_Builtin_stddef"
   },
   {
     "clangModuleMapPath" : "\/Users\/jayanthpranaykonada\/Library\/Developer\/Toolchains\/swift-6.4.0-RELEASE.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_Builtin_stdint-DXNO66ZX5H9PLOXIQMVRZHDM0.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_Builtin_stdint-ADSD6FACGD1VB0IZESLM3A25P.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "_Builtin_stdint"
   },
   {
     "clangModuleMapPath" : "\/Users\/jayanthpranaykonada\/Library\/Developer\/Toolchains\/swift-6.4.0-RELEASE.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_Builtin_tgmath-BPWBYNQ3BEG3UA4WF088QK87L.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_Builtin_tgmath-CCL484VYSZQBP557P05JYPKUT.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "_Builtin_tgmath"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/usr\/include\/DarwinFoundation1.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_DarwinFoundation1-FEMKMYNTECEBPZ3ZMUTFTNLJ.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_DarwinFoundation1-4VUTOO0JE967QXFOB4HF0MT1I.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "_DarwinFoundation1"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/usr\/include\/DarwinFoundation2.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_DarwinFoundation2-4ONH4KE0QHUVBSEMLH1GECH3A.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_DarwinFoundation2-ZZY77YJSPXRWVXFP4RWRMACD.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "_DarwinFoundation2"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/usr\/include\/DarwinFoundation3.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_DarwinFoundation3-3W7JYDWT1E21BFVSIDBCA9C6O.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_DarwinFoundation3-E37S3Y4WJ6J35W0LV3AMJ9DY1.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "_DarwinFoundation3"
   },
   {
     "clangModuleMapPath" : "\/Users\/jayanthpranaykonada\/Library\/Developer\/Toolchains\/swift-6.4.0-RELEASE.xctoolchain\/usr\/lib\/swift\/shims\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_SwiftConcurrencyShims-6F7UNJOSWIIC86MCXR43QP14Q.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/_SwiftConcurrencyShims-CMI51NGYPEKSF0KL7AVRIKQIC.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "_SwiftConcurrencyShims"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/usr\/include\/launch.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/launch-9AE17IVWQL89BV6EUJC4Y3J1T.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/launch-2JOPA4XE34GD9IQ2QW4HX8RHB.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "launch"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/usr\/include\/libDER\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/libDER-7R2AT5UGOC7ZOWSYMMVMBINQP.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/libDER-49XJPQRSO61MP9U5P9KIPYKEG.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "libDER"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/usr\/include\/libkern.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/libkern-F83QERGVW4A0WFFBF35JCABJ.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/libkern-79XQXZ32GCVKSOHKBRAY33CQI.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "libkern"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/usr\/include\/os.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/os-483PLLN05551IEQYOG4CGM078.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/os-4SPVNAAJ4BNNS8YX5JCS9UEPZ.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "os"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/usr\/include\/os.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/os_object-3SN75H27VTYIDRQ28SKQJIV1J.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/os_object-46EOV96YGATAIK4OV1OG8ASB6.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "os_object"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/usr\/include\/os.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/os_workgroup-1LB5K66VZBOEMXFW9V1JTPGNX.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/os_workgroup-EEB8XFH3CX86O3VW5B5R0WE8P.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "os_workgroup"
   },
   {
     "clangModuleMapPath" : "\/Users\/jayanthpranaykonada\/Library\/Developer\/Toolchains\/swift-6.4.0-RELEASE.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/ptrauth-29AZBSBGE53OZJE3XGQKHNCRL.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/ptrauth-LARP2T02H8LEB5QF611GXY2W.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "ptrauth"
   },
   {
     "clangModuleMapPath" : "\/Users\/jayanthpranaykonada\/Library\/Developer\/Toolchains\/swift-6.4.0-RELEASE.xctoolchain\/usr\/lib\/clang\/21\/include\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/ptrcheck-3HK3QVKKHPGI9WYPNB25BJMPE.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/ptrcheck-6TJZDVK52MCZ5YV05BNKWULDY.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "ptrcheck"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/usr\/include\/simd\/module.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/simd-4KL5DW6GTMSKCJAK45PQRUDZ8.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/simd-5CD4WDJH04U1IANM7OBFV5TG3.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "simd"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/usr\/include\/c_standard_library.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/string_h-5DUA1XULJS8TJ01F8231IJGHW.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/string_h-2IBH9AZ4DR37AAZYTL6545ASG.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "string_h"
   },
   {
     "clangModuleMapPath" : "\/Library\/Developer\/CommandLineTools\/SDKs\/MacOSX27.0.sdk\/usr\/include\/DarwinFoundation2.modulemap",
-    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/sys_types-CKTT0FMN7335GQHXZNPV1Z6G6.pcm",
+    "clangModulePath" : "\/Users\/jayanthpranaykonada\/agent-bridge\/tools\/macos-accessibility-helper\/.build\/out\/out\/SDKExplicitPrecompiledModules\/sys_types-67M1Q9E2VYCN4B3XZ99130FY0.pcm",
     "isBridgingHeaderDependency" : false,
     "isFramework" : false,
     "moduleName" : "sys_types"
